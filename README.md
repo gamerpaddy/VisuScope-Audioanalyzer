@@ -2,7 +2,7 @@
 
 Real-time audio analyzer for Windows. Captures from an input device or from WASAPI loopback and shows spectrum, spectrogram, 3D spectrum, stereo field and oscilloscope, with distortion measurements and a signal generator.
 
-> **This is not REW.** It is not intended to be or replace Room EQ Wizard and has no affiliation with it.
+> **This is not REW (Room EQ Wizard).** It is not intended to be or replace it and has no affiliation with it.
 
 ![Overview](docs/overview.png)
 
