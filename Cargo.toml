@@ -1,0 +1,26 @@
+[package]
+name = "visuscope"
+version = "1.0.0"
+edition = "2024"
+description = "Real-time audio analyzer"
+license = "Unlicense"
+repository = "https://github.com/gamerpaddy/VisuScope-Audioanalyzer"
+
+[dependencies]
+cpal = { version = "0.18.2", features = ["realtime"] }
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+parking_lot = "0.13.0"
+rfd = "0.15"
+rustfft = "6.4.1"
+symphonia = { version = "0.5", features = ["aac", "alac", "flac", "isomp4", "mkv", "mp3", "ogg", "vorbis", "wav", "pcm"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+debug = false
+
+[profile.dev]
+opt-level = 2
