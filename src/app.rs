@@ -151,6 +151,13 @@ pub struct App {
     pub mic_mask: [bool; 2],
     pub mic_dialog: Option<tools::dialogs::Pending>,
     pub unit: Unit,
+    /// live input monitor
+    pub mon_on: bool,
+    pub mon_dev: String,
+    pub mon_gain_db: f32,
+    pub mon_gain: Arc<std::sync::atomic::AtomicU32>,
+    pub mon_handle: Option<(tools::monitor::Handle, String)>,
+    pub mon_status: Arc<parking_lot::Mutex<String>>,
     pub tools: Vec<Box<dyn Tool>>,
     pub sweep: Sweep,
     pub lib: tools::traces::Library,
@@ -325,6 +332,12 @@ impl App {
             mic_mask: [true, true],
             mic_dialog: None,
             unit: Unit::Dbfs,
+            mon_on: false,
+            mon_dev: String::new(),
+            mon_gain_db: -10.0,
+            mon_gain: Arc::new(std::sync::atomic::AtomicU32::new(0.316f32.to_bits())),
+            mon_handle: None,
+            mon_status: Arc::new(parking_lot::Mutex::new(String::new())),
             tools: tools::all(),
             sweep: Sweep::new(),
             lib: tools::traces::Library::default(),
@@ -407,6 +420,8 @@ impl App {
         kv("cal_entry_unit", &self.cal.entry_unit);
         kv("cal_entry_val", &self.cal.entry_val);
         kv("unit", &self.unit.index());
+        kv("mon_dev", &self.mon_dev);
+        kv("mon_gain_db", &self.mon_gain_db);
         kv("mic0_path", &self.mic_paths[0]);
         kv("mic90_path", &self.mic_paths[1]);
         kv("mic_angle", &self.mic_angle);
@@ -596,6 +611,12 @@ impl App {
         }
         if !self.cal.on {
             self.unit = Unit::Dbfs;
+        }
+        if let Some(d) = m.get("mon_dev") {
+            self.mon_dev = d.trim().to_string();
+        }
+        if let Some(v) = get::<f32>(&m, "mon_gain_db") {
+            self.mon_gain_db = v.clamp(-60.0, 6.0);
         }
         set!(self.mic_on, "mic_on");
         set!(self.mic_mask[0], "mic_l");
@@ -1362,6 +1383,7 @@ impl eframe::App for App {
         self.handle_screenshot();
         self.poll_scan();
         self.poll_mic_dialog();
+        self.manage_monitor();
         self.tools_update();
         self.handle_hotkeys(&ctx);
 

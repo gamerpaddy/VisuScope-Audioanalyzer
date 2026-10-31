@@ -230,6 +230,8 @@ where
     f32: FromSample<T>,
 {
     let ch = cfg.channels as usize;
+    let in_sr = cfg.sample_rate;
+    let (mut ml, mut mr): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
     let sh_err = sh.clone();
     let dead_cb = dead.clone();
     dev.build_input_stream(
@@ -243,11 +245,18 @@ where
             let ri = sh.ch_b.load(Relaxed).min(ch - 1);
             let nm = ch.min(MAX_CH);
             let mut peak = [0f32; MAX_CH];
+            let mon = sh.mon_on.load(Relaxed);
+            ml.clear();
+            mr.clear();
             {
                 let mut ring = sh.ring.lock();
                 for frame in data.chunks_exact(ch) {
                     let (l, r) = (f32::from_sample(frame[li]), f32::from_sample(frame[ri]));
                     ring.push(l, r);
+                    if mon {
+                        ml.push(l);
+                        mr.push(r);
+                    }
                     if ch > 2 {
                         for (c, p) in peak[..nm].iter_mut().enumerate() {
                             *p = p.max(f32::from_sample(frame[c]).abs());
@@ -258,6 +267,12 @@ where
             if ch > 2 {
                 for c in 0..nm {
                     sh.ch_peak[c].fetch_max(peak[c].to_bits(), Relaxed);
+                }
+            }
+            if mon {
+                if let Some(mut q) = sh.mon_q.try_lock() {
+                    q.src_sr = in_sr;
+                    q.push(&ml, &mr);
                 }
             }
             sh.last_data_ms.store(sh.t0.elapsed().as_millis() as u64, Relaxed);

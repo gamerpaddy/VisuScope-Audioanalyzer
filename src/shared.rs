@@ -198,6 +198,9 @@ pub struct MicShared {
 }
 
 pub struct Shared {
+    /// live input monitor: the audio callback feeds the queue while this is set
+    pub mon_on: AtomicBool,
+    pub mon_q: std::sync::Arc<Mutex<crate::tools::monitor::Queue>>,
     pub mic: Mutex<MicShared>,
     pub tf_params: Mutex<TfParams>,
     pub tf_out: Mutex<TfResult>,
@@ -234,6 +237,8 @@ pub struct Shared {
 impl Shared {
     pub fn new() -> Self {
         Self {
+            mon_on: AtomicBool::new(false),
+            mon_q: std::sync::Arc::new(Mutex::new(Default::default())),
             mic: Mutex::new(MicShared::default()),
             tf_params: Mutex::new(TfParams::default()),
             tf_out: Mutex::new(TfResult::default()),

@@ -55,8 +55,71 @@ impl App {
             }
         });
         ui.label(RichText::new("[Loopback] entries capture what a playback device is playing.").small().weak());
+        self.monitor_ui(ui);
         if restart {
             self.start_selected();
+        }
+    }
+
+    /// Id of the output the monitor plays on (the default output when none is chosen).
+    fn mon_output_id(&self) -> Option<String> {
+        if !self.mon_dev.is_empty() {
+            return Some(self.mon_dev.clone());
+        }
+        self.gen_devs.first().map(|d| d.id.clone())
+    }
+
+    /// True when the monitor would play into the device that is being captured.
+    fn mon_feedback(&self) -> bool {
+        match (self.devices.get(self.sel_dev), self.mon_output_id()) {
+            (Some(i), Some(o)) => i.label.starts_with("[Loopback]") && i.id == o,
+            _ => false,
+        }
+    }
+
+    /// Start, stop or retarget the input monitor (called every frame).
+    pub fn manage_monitor(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.mon_gain.store(10f32.powf(self.mon_gain_db / 20.0).to_bits(), Relaxed);
+        let want = self.mon_on && !self.mon_feedback();
+        let dev = self.mon_output_id().unwrap_or_default();
+        if let Some((_, d)) = &self.mon_handle {
+            if !want || *d != dev {
+                self.mon_handle = None;
+            }
+        }
+        if want && self.mon_handle.is_none() {
+            self.sh.mon_q.lock().buf.clear();
+            let h = crate::tools::monitor::start(self.sh.mon_q.clone(), self.mon_gain.clone(), Some(dev.clone()).filter(|d| !d.is_empty()), self.mon_status.clone());
+            self.mon_handle = Some((h, dev));
+        }
+        self.sh.mon_on.store(want, Relaxed);
+        if !self.mon_on {
+            self.mon_status.lock().clear();
+        }
+    }
+
+    fn monitor_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.mon_on, "Monitor").on_hover_text("Play the analysed input (L and R) on an output device");
+            ui.add_enabled(self.mon_on, egui::Slider::new(&mut self.mon_gain_db, -60.0..=6.0).suffix(" dB"));
+        });
+        let cur = self.gen_devs.iter().find(|d| d.id == self.mon_dev).map(|d| d.label.clone()).unwrap_or_else(|| self.gen_devs.first().map(|d| d.label.clone()).unwrap_or_else(|| "-".into()));
+        egui::ComboBox::from_id_salt("mon_out").width(ui.available_width() - 8.0).selected_text(cur).show_ui(ui, |ui| {
+            for (i, d) in self.gen_devs.iter().enumerate() {
+                let id = if i == 0 { String::new() } else { d.id.clone() };
+                ui.selectable_value(&mut self.mon_dev, id, &d.label);
+            }
+        });
+        if self.mon_on {
+            if self.mon_feedback() {
+                ui.colored_label(egui::Color32::from_rgb(255, 130, 100), "This loopback input captures the monitor output: choose another output (feedback).");
+            } else {
+                let s = self.mon_status.lock().clone();
+                if !s.is_empty() {
+                    ui.label(RichText::new(s).small().weak());
+                }
+            }
         }
     }
 
