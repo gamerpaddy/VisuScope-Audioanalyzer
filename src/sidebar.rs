@@ -1,7 +1,6 @@
 //! Left settings bar: grouped, collapsible sections.
 
 use crate::app::*;
-use crate::audio;
 use crate::colormap::Cmap;
 use crate::dsp::Window;
 use crate::shared::*;
@@ -10,11 +9,6 @@ use std::sync::atomic::Ordering::Relaxed;
 
 fn section(ui: &mut Ui, title: &str, open: bool, add: impl FnOnce(&mut Ui)) {
     egui::CollapsingHeader::new(RichText::new(title).strong()).default_open(open).show(ui, add);
-}
-
-fn pair_label(p: usize, chans: usize) -> String {
-    let a = p * 2 + 1;
-    if a < chans { format!("{a} + {}", a + 1) } else { format!("{a} (mono)") }
 }
 
 impl App {
@@ -28,6 +22,7 @@ impl App {
             section(ui, "3D view", false, |ui| self.view3d_section(ui));
             section(ui, "Distortion measurement", false, |ui| self.thd_section(ui));
             section(ui, "Voltage calibration", false, |ui| self.calibration_ui(ui));
+            section(ui, "Microphone calibration", false, |ui| self.mic_section(ui));
             section(ui, "Performance", false, |ui| {
                 ui.add(egui::Slider::new(&mut self.fps_cap, 15.0..=241.0).text("UI fps cap").custom_formatter(|v, _| if v > 240.0 { "max".into() } else { format!("{v:.0}") }));
                 ui.add(egui::Slider::new(&mut self.readout_hz, 0.5..=10.0).text("Readout Hz"));
@@ -48,23 +43,9 @@ impl App {
             }
         });
         let chans = (self.sh.chans.load(Relaxed) as usize).max(1);
-        let npairs = chans.div_ceil(2);
-        if self.pair >= npairs {
-            self.pair = 0;
-            self.sh.pair.store(0, Relaxed);
+        if chans > 2 {
+            self.channel_picker(ui, chans);
         }
-        ui.horizontal(|ui| {
-            ui.label("Channels");
-            egui::ComboBox::from_id_salt("pair").selected_text(pair_label(self.pair, chans)).show_ui(ui, |ui| {
-                for p in 0..npairs {
-                    if ui.selectable_value(&mut self.pair, p, pair_label(p, chans)).clicked() {
-                        self.sh.pair.store(self.pair, Relaxed);
-                    }
-                }
-            });
-        })
-        .response
-        .on_hover_text("Which two input channels of the device are analysed as L and R.\nOnly matters for interfaces with more than 2 inputs.");
         ui.horizontal(|ui| {
             if ui.button("Restart").clicked() {
                 restart = true;
@@ -76,6 +57,175 @@ impl App {
         ui.label(RichText::new("[Loopback] entries capture what a playback device is playing.").small().weak());
         if restart {
             self.start_selected();
+        }
+    }
+
+    /// Pick any device channel as L and as R, with a level meter per channel (click = L, right-click = R).
+    fn channel_picker(&mut self, ui: &mut Ui, chans: usize) {
+        let n = chans.min(MAX_CH);
+        self.ch_a = self.ch_a.min(n - 1);
+        self.ch_b = self.ch_b.min(n - 1);
+        let dt = ui.ctx().input(|i| i.stable_dt).clamp(0.001, 0.1);
+        for c in 0..n {
+            let p = f32::from_bits(self.sh.ch_peak[c].swap(0, Relaxed));
+            self.ch_lvl[c] = p.max(self.ch_lvl[c] * (-dt / 0.35f32).exp());
+        }
+        ui.horizontal(|ui| {
+            for (name, which) in [("L", 0usize), ("R", 1)] {
+                ui.label(RichText::new(name).color(CH_COLORS[which]));
+                let cur = if which == 0 { self.ch_a } else { self.ch_b };
+                let mut sel = cur;
+                egui::ComboBox::from_id_salt(("chsel", which)).width(52.0).selected_text(format!("{}", cur + 1)).show_ui(ui, |ui| {
+                    for c in 0..n {
+                        ui.selectable_value(&mut sel, c, format!("{}", c + 1));
+                    }
+                });
+                if which == 0 {
+                    self.ch_a = sel;
+                } else {
+                    self.ch_b = sel;
+                }
+            }
+        })
+        .response
+        .on_hover_text("Which input channels of the device are analysed as L and R.");
+        let h = 46.0;
+        let bw = ((ui.available_width() - 8.0) / n as f32).clamp(8.0, 26.0);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(bw * n as f32, h + 14.0), egui::Sense::click());
+        let p = ui.painter_at(rect);
+        for c in 0..n {
+            let x0 = rect.min.x + c as f32 * bw;
+            let bar = egui::Rect::from_min_size(egui::pos2(x0 + 2.0, rect.min.y), egui::vec2(bw - 4.0, h));
+            p.rect_filled(bar, 1.0, ui.visuals().extreme_bg_color);
+            let db = 20.0 * self.ch_lvl[c].max(1e-6).log10();
+            let f = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+            let col = if db > -1.0 {
+                egui::Color32::from_rgb(255, 70, 70)
+            } else if db > -12.0 {
+                egui::Color32::from_rgb(240, 200, 60)
+            } else {
+                egui::Color32::from_rgb(80, 200, 110)
+            };
+            p.rect_filled(egui::Rect::from_min_max(egui::pos2(bar.min.x, bar.max.y - h * f), bar.max), 1.0, col);
+            let sel = if c == self.ch_a {
+                Some(CH_COLORS[0])
+            } else if c == self.ch_b {
+                Some(CH_COLORS[1])
+            } else {
+                None
+            };
+            if let Some(sc) = sel {
+                p.rect_stroke(bar.expand(1.0), 1.0, egui::Stroke::new(1.5, sc), egui::StrokeKind::Outside);
+            }
+            let tc = if sel.is_some() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+            p.text(egui::pos2(x0 + bw * 0.5, rect.max.y - 1.0), egui::Align2::CENTER_BOTTOM, format!("{}", c + 1), egui::FontId::proportional(10.0), tc);
+        }
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let c = (((pos.x - rect.min.x) / bw) as usize).min(n - 1);
+            if resp.clicked() {
+                self.ch_a = c;
+            } else if resp.secondary_clicked() {
+                self.ch_b = c;
+            }
+        }
+        ui.label(RichText::new("Click a meter = L, right-click = R").small().weak());
+        // the audio thread reads these every callback
+        self.sh.ch_a.store(self.ch_a, Relaxed);
+        self.sh.ch_b.store(self.ch_b, Relaxed);
+    }
+
+    /// Read a calibration file into slot 0 (0 degrees) or 1 (90 degrees; chosen from the file name when `slot` is `None`).
+    pub fn load_mic_file(&mut self, path: &std::path::Path, slot: Option<usize>, announce: bool) {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let slot = slot.unwrap_or_else(|| usize::from(name.to_lowercase().contains("90")));
+        let parsed = std::fs::read(path).ok().and_then(|b| crate::cal::parse_mic_cal(&name, &String::from_utf8_lossy(&b)));
+        match parsed {
+            Some(c) => {
+                if announce {
+                    self.note = format!("Loaded {} ({} points)", c.name, c.f.len());
+                    self.mic_on = true;
+                    self.mic_angle = slot;
+                }
+                self.mic[slot] = Some(c);
+                self.mic_paths[slot] = path.to_string_lossy().to_string();
+            }
+            None if announce => self.note = format!("{name}: no frequency / dB pairs found"),
+            None => {}
+        }
+    }
+
+    pub fn push_mic(&mut self) {
+        let cur = self.mic[self.mic_angle].as_ref().or(self.mic[0].as_ref()).or(self.mic[1].as_ref());
+        let mut m = self.sh.mic.lock();
+        m.rev = m.rev.wrapping_add(1);
+        m.mask = self.mic_mask;
+        match cur {
+            Some(c) if self.mic_on => {
+                m.f = c.f.clone();
+                m.db = c.db.clone();
+            }
+            _ => {
+                m.f.clear();
+                m.db.clear();
+            }
+        }
+    }
+
+    pub fn poll_mic_dialog(&mut self) {
+        let Some(d) = &self.mic_dialog else { return };
+        if let Some(res) = d.take() {
+            self.mic_dialog = None;
+            if let Some(path) = res {
+                self.load_mic_file(&path, None, true);
+                self.push_mic();
+            }
+        }
+    }
+
+    fn mic_section(&mut self, ui: &mut Ui) {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(self.mic_dialog.is_none(), egui::Button::new("Load file...")).on_hover_text("Calibration file of the microphone (frequency and dB pairs). A name containing 90 is stored as the 90° file.").clicked() {
+                self.mic_dialog = Some(crate::tools::dialogs::open("Load microphone calibration", "Calibration", &["txt", "cal", "csv", "frd"]));
+            }
+            if ui.button("Clear").clicked() {
+                self.mic = [None, None];
+                self.mic_paths = Default::default();
+                changed = true;
+            }
+        });
+        for (i, deg) in ["0", "90"].iter().enumerate() {
+            if let Some(c) = &self.mic[i] {
+                ui.label(RichText::new(format!("{deg}°: {} ({} points, {:.0} Hz - {:.0} Hz)", c.name, c.f.len(), c.f[0], c.f[c.f.len() - 1])).small());
+            }
+        }
+        let cur = self.mic[self.mic_angle].as_ref().or(self.mic[0].as_ref()).or(self.mic[1].as_ref());
+        let Some(c) = cur else {
+            ui.label(RichText::new("No file loaded. The spectrum then shows what the input hears, including the microphone's own response.").small().weak());
+            if changed {
+                self.push_mic();
+            }
+            return;
+        };
+        if let Some(s) = c.sens {
+            ui.label(RichText::new(format!("File header: Sens Factor {s:+.2} dB{}", c.again.map(|g| format!(", analog gain {g:.0} dB")).unwrap_or_default())).small().weak());
+        }
+        changed |= ui.checkbox(&mut self.mic_on, "Correct the spectrum").changed();
+        if self.mic[0].is_some() && self.mic[1].is_some() {
+            ui.horizontal(|ui| {
+                ui.label("Angle");
+                changed |= ui.selectable_value(&mut self.mic_angle, 0, "0° (on axis)").changed();
+                changed |= ui.selectable_value(&mut self.mic_angle, 1, "90°").changed();
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label("Apply to");
+            changed |= ui.checkbox(&mut self.mic_mask[0], RichText::new("L").color(CH_COLORS[0])).changed();
+            changed |= ui.checkbox(&mut self.mic_mask[1], RichText::new("R").color(CH_COLORS[1])).changed();
+        });
+        ui.label(RichText::new("Corrects spectrum, spectrogram, 3D and snapshots. Measurements and the SPL meter use the raw signal.").small().weak());
+        if changed {
+            self.push_mic();
         }
     }
 
@@ -139,6 +289,16 @@ impl App {
             ui.checkbox(&mut self.show_ch[1], RichText::new("R").color(CH_COLORS[1]));
             ui.checkbox(&mut self.fill, "Fill");
         });
+        ui.horizontal(|ui| {
+            ui.label("Smoothing");
+            egui::ComboBox::from_id_salt("spec_smooth").width(80.0).selected_text(SMOOTH_OCT[self.smooth_oct].1).show_ui(ui, |ui| {
+                for (i, s) in SMOOTH_OCT.iter().enumerate() {
+                    ui.selectable_value(&mut self.smooth_oct, i, s.1);
+                }
+            });
+        })
+        .response
+        .on_hover_text("Fractional-octave smoothing of the displayed spectrum (power average). Cursor readouts stay unsmoothed.");
         ui.add(egui::Slider::new(&mut self.line_w, 0.5..=3.0).text("Line width"));
     }
 

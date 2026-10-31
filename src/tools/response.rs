@@ -11,6 +11,8 @@ const LOG_N: usize = 900;
 
 struct Curve {
     f: Vec<f32>,
+    /// unsmoothed magnitude, what "Store" keeps
+    raw: Vec<f32>,
     mag: Vec<f32>,
     phase_deg: Vec<f32>,
     gd_ms: Vec<f32>,
@@ -30,7 +32,7 @@ pub struct Response {
 }
 
 /// 1/N-octave smoothing of a power quantity sampled on a log grid.
-fn smooth_log(v: &[f32], pts_per_oct: f32, n: f32) -> Vec<f32> {
+pub fn smooth_log(v: &[f32], pts_per_oct: f32, n: f32) -> Vec<f32> {
     if n <= 0.0 {
         return v.to_vec();
     }
@@ -54,6 +56,11 @@ impl Response {
     }
 
     fn build(&mut self, r: &SweepResult) {
+        self.curve = Some(Self::make_curve(r, self.smooth));
+        self.key = (r.id, self.smooth);
+    }
+
+    fn make_curve(r: &SweepResult, smooth: usize) -> Curve {
         let h = &r.h;
         let nyq = r.sr * 0.5;
         let (f0, f1) = (10.0f32.max(h.df * 2.0), nyq.min(r.params.f1 * 1.2).min(24000.0).max(100.0));
@@ -66,21 +73,20 @@ impl Response {
         };
         let f: Vec<f32> = (0..LOG_N).map(|i| f0 * (f1 / f0).powf(i as f32 / (LOG_N - 1) as f32)).collect();
         let mag_raw: Vec<f32> = f.iter().map(|&x| at(&h.mag_db, x)).collect();
-        let mag = smooth_log(&mag_raw, ppo, SMOOTH[self.smooth].0);
+        let mag = smooth_log(&mag_raw, ppo, SMOOTH[smooth].0);
         // group delay from the unwrapped phase of the full-resolution response
         let gd_full: Vec<f32> = (1..h.phase.len() - 1).map(|k| -(h.phase[k + 1] - h.phase[k - 1]) / (2.0 * std::f32::consts::TAU * h.df) * 1000.0).collect();
         let gd_raw: Vec<f32> = f.iter().map(|&x| at(&gd_full, (x - h.df).max(0.0))).collect();
-        let gd_ms = if SMOOTH[self.smooth].0 > 0.0 {
+        let gd_ms = if SMOOTH[smooth].0 > 0.0 {
             // smooth linearly (delay is not a power)
-            let half = (ppo / SMOOTH[self.smooth].0 * 0.5) as usize;
+            let half = (ppo / SMOOTH[smooth].0 * 0.5) as usize;
             (0..LOG_N).map(|i| gd_raw[i.saturating_sub(half)..(i + half + 1).min(LOG_N)].iter().sum::<f32>() / (i + half + 1).min(LOG_N).saturating_sub(i.saturating_sub(half)).max(1) as f32).collect()
         } else {
             gd_raw
         };
         let phase_deg = f.iter().map(|&x| at(&h.phase, x).to_degrees()).collect();
         let coh = h.coh.as_ref().map(|c| f.iter().map(|&x| at(c, x)).collect());
-        self.curve = Some(Curve { f, mag, phase_deg, gd_ms, coh });
-        self.key = (r.id, self.smooth);
+        Curve { f, raw: mag_raw, mag, phase_deg, gd_ms, coh }
     }
 
     fn controls(&mut self, ui: &mut Ui, cx: &mut Ctx) {
@@ -209,6 +215,7 @@ impl Tool for Response {
             ui.add(egui::DragValue::new(&mut self.y_hi).range(self.y_lo + 5.0..=100.0).speed(0.5).prefix("max "));
         });
 
+        cx.lib.ui(ui, self.curve.as_ref().map(|c| (c.f.clone(), c.raw.clone(), c.phase_deg.clone())));
         // rebuild the display curve if there is a new result or a new smoothing
         if let Some(r) = &cx.sweep.result {
             if self.key != (r.id, self.smooth) {
@@ -220,6 +227,9 @@ impl Tool for Response {
             ui.label(RichText::new("Press Measure. The generator plays a log sweep while the input records it.\nUse a cable or a [Loopback] input; set Reference to \"R input\" to cancel the sound card.").weak());
             return;
         };
+        let ppo = LOG_N as f32 / (c.f[c.f.len() - 1] / c.f[0]).log2();
+        let (layers, rel) = cx.lib.layers(&c.f, ppo, SMOOTH[self.smooth].0);
+        let rel_v = rel.clone();
         let norm = if self.normalize { -c.f.iter().zip(&c.mag).min_by(|a, b| (a.0 - 1000.0).abs().total_cmp(&(b.0 - 1000.0).abs())).map(|x| *x.1).unwrap_or(0.0) } else { 0.0 };
         let has_lower = self.lower < 3 && !(self.lower == 2 && c.coh.is_none());
 
@@ -238,7 +248,14 @@ impl Tool for Response {
         if let Some((_, f, m)) = &self.held {
             plot.line(&painter, f.iter().copied().zip(m.iter().copied()), Stroke::new(1.0, Color32::from_rgb(150, 150, 160)));
         }
-        plot.line(&painter, c.f.iter().copied().zip(c.mag.iter().map(|m| m + norm)), Stroke::new(1.6, Color32::from_rgb(90, 200, 255)));
+        for (_, col, v) in &layers {
+            plot.line(&painter, c.f.iter().copied().zip(v.iter().copied()), Stroke::new(1.2, *col));
+        }
+        let rel_at = |i: usize| rel_v.as_ref().map(|r| r[i]).unwrap_or(0.0);
+        plot.line(&painter, c.f.iter().copied().zip(c.mag.iter().enumerate().map(|(i, m)| m - rel_at(i) + norm)), Stroke::new(1.6, Color32::from_rgb(90, 200, 255)));
+        for (i, (name, col, _)) in layers.iter().enumerate() {
+            painter.text(Pos2::new(pr.right() - 6.0, pr.bottom() - 6.0 - i as f32 * 12.0), Align2::RIGHT_BOTTOM, name, FontId::proportional(10.0), *col);
+        }
         painter.text(Pos2::new(rect.left() + 2.0, pr.top()), Align2::LEFT_TOP, "dB", FontId::proportional(9.0), crate::views::TXT);
 
         let mut lower_plot: Option<Plot> = None;
@@ -282,6 +299,35 @@ impl Tool for Response {
         if let Some(r) = &cx.sweep.result {
             painter.text(Pos2::new(pr.left() + 6.0, rect.bottom() - 20.0 - if has_lower { 0.0 } else { 0.0 }), Align2::LEFT_BOTTOM, format!("{} run(s), input peak {:.1} dBFS, {} ms window", r.runs, r.capture_peak_db, r.params.resp_ms as i32), FontId::proportional(9.5), Color32::from_white_alpha(90));
         }
+    }
+
+    fn report(&self, cx: &Ctx) -> Vec<crate::report::Section> {
+        use crate::report::*;
+        let Some(r) = &cx.sweep.result else { return Vec::new() };
+        let c = Self::make_curve(r, self.smooth);
+        let ser = |name: String, col: usize, v: &[f32]| Series { name, color: COLORS[col], pts: c.f.iter().copied().zip(v.iter().copied()).collect() };
+        let x = (c.f[0], *c.f.last().unwrap());
+        let mag = vec![ser(format!("magnitude, smoothing {}", SMOOTH[self.smooth].1), 0, &c.mag)];
+        let y = auto_range(&mag, 5.0, 20.0);
+        let mut blocks = vec![
+            Block::Text(format!("Exponential sweep {:.0} Hz to {:.0} Hz, {:.1} s, {:.0} dBFS, {} run(s), input peak {:.1} dBFS, response window {:.0} ms.", r.params.f0, r.params.f1, r.params.secs, r.params.amp_db, r.runs, r.capture_peak_db, r.params.resp_ms)),
+            Block::Plot(PlotSpec { title: "Magnitude".into(), xlog: true, xlabel: "Hz".into(), ylabel: "dB".into(), x, y, series: mag }),
+        ];
+        let mut pts: Vec<(f32, f32)> = Vec::new();
+        let mut prev = f32::NAN;
+        for (i, p) in c.phase_deg.iter().enumerate() {
+            let w = (p + 180.0).rem_euclid(360.0) - 180.0;
+            if prev.is_finite() && (w - prev).abs() > 180.0 {
+                pts.push((f32::NAN, f32::NAN));
+            }
+            pts.push((c.f[i], w));
+            prev = w;
+        }
+        blocks.push(Block::Plot(PlotSpec { title: "Phase".into(), xlog: true, xlabel: "Hz".into(), ylabel: "degrees".into(), x, y: (-180.0, 180.0), series: vec![Series { name: String::new(), color: COLORS[1], pts }] }));
+        if let Some(co) = &c.coh {
+            blocks.push(Block::Plot(PlotSpec { title: "Coherence".into(), xlog: true, xlabel: "Hz".into(), ylabel: String::new(), x, y: (0.0, 1.0), series: vec![ser(String::new(), 3, co)] }));
+        }
+        vec![Section { id: "Response", title: "Frequency response".into(), blocks }]
     }
 
     fn save(&self, o: &mut SettingsOut) {

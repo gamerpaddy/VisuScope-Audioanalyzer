@@ -93,3 +93,79 @@ pub fn fmt_time(t: f32) -> String {
         format!("{:.2} \u{b5}s", t * 1e6)
     }
 }
+
+/// Microphone calibration curve from a `.txt` / `.cal` file: header lines (quoted or starting with `*`)
+/// followed by `frequency  dB` pairs (the mic's deviation from flat; the display subtracts it).
+#[derive(Clone)]
+pub struct MicCurve {
+    pub name: String,
+    pub f: Vec<f32>,
+    pub db: Vec<f32>,
+    /// `Sens Factor` of a miniDSP / UMIK style header
+    pub sens: Option<f32>,
+    pub again: Option<f32>,
+}
+
+fn header_value(line: &str, key: &str) -> Option<f32> {
+    let i = line.find(key)?;
+    let rest = line[i + key.len()..].trim_start_matches([' ', '=', ':']);
+    let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+')).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+pub fn parse_mic_cal(name: &str, text: &str) -> Option<MicCurve> {
+    let (mut f, mut db) = (Vec::new(), Vec::new());
+    let (mut sens, mut again) = (None, None);
+    for line in text.lines() {
+        let l = line.trim().trim_start_matches('\u{feff}');
+        if l.is_empty() {
+            continue;
+        }
+        if l.starts_with(['"', '*', '#', ';']) {
+            sens = sens.or_else(|| header_value(l, "Sens Factor"));
+            again = again.or_else(|| header_value(l, "AGain"));
+            continue;
+        }
+        let mut it = l.split(|c: char| c.is_whitespace() || c == ',' || c == ';').filter(|s| !s.is_empty());
+        let (Some(a), Some(b)) = (it.next(), it.next()) else { continue };
+        if let (Ok(a), Ok(b)) = (a.parse::<f32>(), b.parse::<f32>()) {
+            if a > 0.0 && a.is_finite() && b.is_finite() && f.last().map_or(true, |&p| a > p) {
+                f.push(a);
+                db.push(b);
+            }
+        }
+    }
+    (f.len() >= 2).then(|| MicCurve { name: name.to_string(), f, db, sens, again })
+}
+
+/// Correction (dB) at `freq` by interpolation on a log frequency axis, held flat outside the file's range.
+pub fn mic_db_at(f: &[f32], db: &[f32], freq: f32) -> f32 {
+    if f.is_empty() {
+        return 0.0;
+    }
+    if freq <= f[0] {
+        return db[0];
+    }
+    if freq >= *f.last().unwrap() {
+        return *db.last().unwrap();
+    }
+    let j = f.partition_point(|&x| x < freq).clamp(1, f.len() - 1);
+    let t = (freq.ln() - f[j - 1].ln()) / (f[j].ln() - f[j - 1].ln()).max(1e-9);
+    db[j - 1] + t * (db[j] - db[j - 1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_umik_file() {
+        let t = "\"Sens Factor =3.8346dB, AGain =18dB, SERNO: 7070781\"\n10.054\t-5.5826\n10.179\t-5.4112\n20\t0.0\n";
+        let c = parse_mic_cal("x", t).unwrap();
+        assert_eq!(c.f.len(), 3);
+        assert_eq!(c.sens, Some(3.8346));
+        assert_eq!(c.again, Some(18.0));
+        assert!((mic_db_at(&c.f, &c.db, 10.054) + 5.5826).abs() < 1e-4);
+        assert!(mic_db_at(&c.f, &c.db, 5.0) < -5.5);
+    }
+}

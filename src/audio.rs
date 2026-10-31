@@ -239,13 +239,25 @@ where
             if sh.audio_gen.load(Relaxed) != gid || dead_cb.load(Relaxed) {
                 return;
             }
-            let pair = sh.pair.load(Relaxed);
-            let li = (pair * 2).min(ch - 1);
-            let ri = (pair * 2 + 1).min(ch - 1);
+            let li = sh.ch_a.load(Relaxed).min(ch - 1);
+            let ri = sh.ch_b.load(Relaxed).min(ch - 1);
+            let nm = ch.min(MAX_CH);
+            let mut peak = [0f32; MAX_CH];
             {
                 let mut ring = sh.ring.lock();
                 for frame in data.chunks_exact(ch) {
-                    ring.push(f32::from_sample(frame[li]), f32::from_sample(frame[ri]));
+                    let (l, r) = (f32::from_sample(frame[li]), f32::from_sample(frame[ri]));
+                    ring.push(l, r);
+                    if ch > 2 {
+                        for (c, p) in peak[..nm].iter_mut().enumerate() {
+                            *p = p.max(f32::from_sample(frame[c]).abs());
+                        }
+                    }
+                }
+            }
+            if ch > 2 {
+                for c in 0..nm {
+                    sh.ch_peak[c].fetch_max(peak[c].to_bits(), Relaxed);
                 }
             }
             sh.last_data_ms.store(sh.t0.elapsed().as_millis() as u64, Relaxed);

@@ -278,12 +278,18 @@ impl App {
                 let open_tools = (BUILTIN..WIN_COUNT).filter(|&i| self.wins[i].open).count();
                 let label = if open_tools > 0 { format!("Tools ({open_tools})") } else { "Tools".to_string() };
                 ui.menu_button(label, |ui| {
-                    for k in 0..TOOL_COUNT {
-                        let i = BUILTIN + k;
-                        let info = &tools::INFO[k];
-                        let mut o = self.wins[i].open;
-                        if ui.checkbox(&mut o, info.title).on_hover_text(info.tip).changed() {
-                            self.wins[i].open = o;
+                    for (g, (name, members)) in tools::GROUPS.iter().enumerate() {
+                        if g > 0 {
+                            ui.separator();
+                        }
+                        ui.label(egui::RichText::new(*name).small().weak());
+                        for &k in members.iter() {
+                            let i = BUILTIN + k;
+                            let info = &tools::INFO[k];
+                            let mut o = self.wins[i].open;
+                            if ui.checkbox(&mut o, info.title).on_hover_text(info.tip).changed() {
+                                self.wins[i].open = o;
+                            }
                         }
                     }
                 });

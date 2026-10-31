@@ -14,6 +14,9 @@ use eframe::egui::{self, Color32, ColorImage, RichText, TextureHandle, TextureOp
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Spectrum display smoothing: (1/N octave, label).
+pub const SMOOTH_OCT: [(f32, &str); 6] = [(0.0, "off"), (24.0, "1/24 oct"), (12.0, "1/12 oct"), (6.0, "1/6 oct"), (3.0, "1/3 oct"), (1.0, "1/1 oct")];
+
 pub const SG_W: usize = 3072;
 pub const WF_H: usize = 768;
 
@@ -43,7 +46,11 @@ pub struct App {
     pub audio: Option<AudioHandle>,
     pub devices: Vec<DevInfo>,
     pub sel_dev: usize,
-    pub pair: usize,
+    /// device channels (0-based) analysed as L and R
+    pub ch_a: usize,
+    pub ch_b: usize,
+    /// smoothed level (linear) of every device channel, for the input meters
+    pub ch_lvl: [f32; MAX_CH],
     pub p: Params,
     pub p_sent: Params,
     pub an: Analysis,
@@ -62,6 +69,7 @@ pub struct App {
     pub show_ch: [bool; 2],
     pub fill: bool,
     pub line_w: f32,
+    pub smooth_oct: usize,
 
     pub cmap: Cmap,
     pub lut: [Color32; 256],
@@ -135,13 +143,23 @@ pub struct App {
     last_save_t: Instant,
     pub scope: ScopeState,
     pub cal: Calib,
+    /// microphone calibration files: 0 degrees, 90 degrees
+    pub mic: [Option<crate::cal::MicCurve>; 2],
+    pub mic_paths: [String; 2],
+    pub mic_angle: usize,
+    pub mic_on: bool,
+    pub mic_mask: [bool; 2],
+    pub mic_dialog: Option<tools::dialogs::Pending>,
     pub unit: Unit,
     pub tools: Vec<Box<dyn Tool>>,
     pub sweep: Sweep,
+    pub lib: tools::traces::Library,
     pub popped: [bool; WIN_COUNT],
     pub presets: Vec<UserPreset>,
     pub preset_name: String,
     pub test_sweep_started: bool,
+    /// `--run script [--report file]` from the command line
+    pub autorun: Option<(String, Option<String>)>,
 }
 
 /// If the UI thread stops responding for 3 s, write what every thread was doing to `visuscope_hang.log`.
@@ -212,7 +230,9 @@ impl App {
             audio: None,
             devices,
             sel_dev: 0,
-            pair: 0,
+            ch_a: 0,
+            ch_b: 1,
+            ch_lvl: [0.0; MAX_CH],
             p: Params::default(),
             p_sent: Params::default(),
             an: Analysis::default(),
@@ -229,6 +249,7 @@ impl App {
             show_ch: [true, true],
             fill: true,
             line_w: 1.2,
+            smooth_oct: 0,
             cmap,
             lut,
             dyn_lut: lut,
@@ -297,14 +318,27 @@ impl App {
             last_save_t: Instant::now(),
             scope: ScopeState::new(),
             cal: Calib::new(),
+            mic: [None, None],
+            mic_paths: [String::new(), String::new()],
+            mic_angle: 0,
+            mic_on: true,
+            mic_mask: [true, true],
+            mic_dialog: None,
             unit: Unit::Dbfs,
             tools: tools::all(),
             sweep: Sweep::new(),
+            lib: tools::traces::Library::default(),
             popped: [false; WIN_COUNT],
             presets: Vec::new(),
             preset_name: String::new(),
             test_sweep_started: false,
+            autorun: {
+                let a: Vec<String> = std::env::args().collect();
+                let val = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
+                val("--run").map(|s| (s, val("--report")))
+            },
         };
+        app.lib.load_auto();
         app.load_settings();
         app.apply_test_hooks();
         app.rebuild_dyn_lut();
@@ -321,7 +355,8 @@ impl App {
         if let Some(d) = self.devices.get(self.sel_dev) {
             kv("device", &d.id);
         }
-        kv("pair", &self.pair);
+        kv("ch_a", &self.ch_a);
+        kv("ch_b", &self.ch_b);
         let p = &self.p;
         kv("fft", &p.fft_size);
         kv("window", &p.window.name());
@@ -343,6 +378,7 @@ impl App {
         kv("show_r", &self.show_ch[1]);
         kv("fill", &self.fill);
         kv("line_w", &self.line_w);
+        kv("smooth_oct", &self.smooth_oct);
         kv("cmap", &self.cmap.name());
         kv("col_lo", &self.col_lo);
         kv("col_hi", &self.col_hi);
@@ -371,6 +407,12 @@ impl App {
         kv("cal_entry_unit", &self.cal.entry_unit);
         kv("cal_entry_val", &self.cal.entry_val);
         kv("unit", &self.unit.index());
+        kv("mic0_path", &self.mic_paths[0]);
+        kv("mic90_path", &self.mic_paths[1]);
+        kv("mic_angle", &self.mic_angle);
+        kv("mic_on", &self.mic_on);
+        kv("mic_l", &self.mic_mask[0]);
+        kv("mic_r", &self.mic_mask[1]);
         let sc = &self.scope;
         kv("sc_t_div", &sc.t_div);
         kv("sc_v_div", &sc.v_div);
@@ -412,8 +454,16 @@ impl App {
                 self.sel_dev = i;
             }
         }
+        // older versions stored a pair index (0 = 1+2, 1 = 3+4 ...)
         if let Some(v) = get::<usize>(&m, "pair") {
-            self.pair = v.min(15);
+            self.ch_a = (v * 2).min(MAX_CH - 1);
+            self.ch_b = (v * 2 + 1).min(MAX_CH - 1);
+        }
+        if let Some(v) = get::<usize>(&m, "ch_a") {
+            self.ch_a = v.min(MAX_CH - 1);
+        }
+        if let Some(v) = get::<usize>(&m, "ch_b") {
+            self.ch_b = v.min(MAX_CH - 1);
         }
         let p = &mut self.p;
         if let Some(v) = get::<usize>(&m, "fft") {
@@ -474,6 +524,9 @@ impl App {
         set!(self.rotated, "rotated");
         set!(self.auto_tile, "auto_tile");
         set!(self.snap_peak, "snap_peak");
+        if let Some(v) = get::<usize>(&m, "smooth_oct") {
+            self.smooth_oct = v.min(SMOOTH_OCT.len() - 1);
+        }
         if let Some(v) = get::<f32>(&m, "line_w") {
             self.line_w = v.clamp(0.5, 3.0);
         }
@@ -544,6 +597,18 @@ impl App {
         if !self.cal.on {
             self.unit = Unit::Dbfs;
         }
+        set!(self.mic_on, "mic_on");
+        set!(self.mic_mask[0], "mic_l");
+        set!(self.mic_mask[1], "mic_r");
+        if let Some(v) = get::<usize>(&m, "mic_angle") {
+            self.mic_angle = v.min(1);
+        }
+        for (k, slot) in [("mic0_path", 0usize), ("mic90_path", 1)] {
+            if let Some(p) = m.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                self.load_mic_file(std::path::Path::new(p), Some(slot), false);
+            }
+        }
+        self.push_mic();
         set!(self.scope.rising, "sc_rising");
         set!(self.scope.hf_reject, "sc_hf");
         if let Some(v) = get::<f32>(&m, "sc_hf_hz") {
@@ -606,7 +671,7 @@ impl App {
         self.last_saved = self.settings_string();
     }
 
-    fn save_settings(&mut self, force: bool) {
+    pub fn save_settings(&mut self, force: bool) {
         // do not overwrite a saved layout before it has been applied
         if !self.layout_ready {
             return;
@@ -660,7 +725,8 @@ impl App {
         crate::log::log("ui: (re)start capture requested");
         self.audio = None;
         if let Some(d) = self.devices.get(self.sel_dev) {
-            self.sh.pair.store(self.pair, std::sync::atomic::Ordering::Relaxed);
+            self.sh.ch_a.store(self.ch_a, std::sync::atomic::Ordering::Relaxed);
+            self.sh.ch_b.store(self.ch_b, std::sync::atomic::Ordering::Relaxed);
             self.audio = Some(audio::start(self.sh.clone(), d.id.clone()));
         } else {
             *self.sh.status.lock() = "No audio devices found".into();
@@ -1220,6 +1286,7 @@ impl App {
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings(true);
+        self.lib.save_auto();
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -1294,6 +1361,7 @@ impl eframe::App for App {
         }
         self.handle_screenshot();
         self.poll_scan();
+        self.poll_mic_dialog();
         self.tools_update();
         self.handle_hotkeys(&ctx);
 
@@ -1314,6 +1382,7 @@ impl eframe::App for App {
         if self.last_save_t.elapsed().as_secs_f32() > 2.0 {
             self.last_save_t = Instant::now();
             self.save_settings(false);
+            self.lib.save_auto();
         }
         self.frames += 1;
         if self.prof_t.elapsed().as_secs_f32() > 1.0 {

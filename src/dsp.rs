@@ -209,6 +209,12 @@ struct State {
     epoch: u32,
     meng: Option<MeasEngine>,
     meas_t: Instant,
+    tf: crate::tf::TfEngine,
+    mic_gen: u32,
+    mic_n: usize,
+    mic_sr: u32,
+    /// per channel, per bin: power factor undoing the microphone's response
+    mic_lin: [Vec<f32>; 2],
 }
 
 impl State {
@@ -241,6 +247,11 @@ impl State {
             epoch: 0,
             meng: None,
             meas_t: Instant::now(),
+            tf: crate::tf::TfEngine::new(),
+            mic_gen: 0,
+            mic_n: 0,
+            mic_sr: 0,
+            mic_lin: Default::default(),
         }
     }
 
@@ -389,6 +400,23 @@ fn run(sh: Arc<Shared>) {
             dc[c] = (sum / tn as f64) as f32;
         }
 
+        {
+            let m = sh.mic.lock();
+            if m.rev != st.mic_gen || st.mic_n != n || st.mic_sr != sr {
+                if m.rev != st.mic_gen {
+                    st.reset_traces();
+                }
+                st.mic_gen = m.rev;
+                st.mic_n = n;
+                st.mic_sr = sr;
+                for c in 0..2 {
+                    st.mic_lin[c] = (0..=half)
+                        .map(|k| if m.mask[c] && !m.f.is_empty() { 10f32.powf(-crate::cal::mic_db_at(&m.f, &m.db, k as f32 * srf / n as f32) / 10.0) } else { 1.0 })
+                        .collect();
+                }
+            }
+        }
+
         for i in 0..n {
             let w = st.w[i];
             st.buf[i] = Complex32::new(st.l[i] * w, st.r[i] * w);
@@ -406,8 +434,8 @@ fn run(sh: Arc<Shared>) {
             let xl = (zk + zn) * 0.5;
             let d = zk - zn;
             let xr = Complex32::new(d.im, -d.re) * 0.5;
-            let pl = xl.norm_sqr();
-            let pr = xr.norm_sqr();
+            let pl = xl.norm_sqr() * st.mic_lin[0][k];
+            let pr = xr.norm_sqr() * st.mic_lin[1][k];
             st.plin[0][k] = pl;
             st.plin[1][k] = pr;
             let dl = DB_PER_LOG2 * fast_log2(pl * c + 1e-30);
@@ -456,6 +484,8 @@ fn run(sh: Arc<Shared>) {
                 st.metrics[ch] = smooth_metrics(st.metrics[ch], res[ch]);
             }
         }
+
+        st.tf.step(&sh, &p, sr, &mut planner, total);
 
         // Spectrogram column
         let col_interval = (srf / p.cols_per_sec.clamp(1.0, p.update_hz.max(1.0))) as u64;

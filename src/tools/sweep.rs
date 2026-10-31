@@ -86,7 +86,30 @@ pub struct Transfer {
     pub coh: Option<Vec<f32>>,
 }
 
+/// Number of harmonic orders (2..=HARM_K) and fundamental grid points of the swept harmonic analysis.
+pub const HARM_K: usize = 6;
+pub const HARM_N: usize = 480;
+
+/// Power of the fundamental (index 0) and of each harmonic order on a log grid of fundamental
+/// frequencies; NaN where the harmonic lies outside the swept range.
+#[derive(Clone)]
+pub struct HarmPow {
+    pub f: Vec<f32>,
+    pub p: Vec<Vec<f64>>,
+}
+
+/// Harmonic distortion versus fundamental frequency from one exponential sweep (Farina's method).
+pub struct Harm {
+    pub f: Vec<f32>,
+    /// level of the fundamental (dB, 0 = the stimulus level)
+    pub h1_db: Vec<f32>,
+    /// harmonic 2..=HARM_K in dB relative to the fundamental
+    pub hd_db: Vec<Vec<f32>>,
+    pub thd_db: Vec<f32>,
+}
+
 pub struct SweepResult {
+    pub harm: Option<Harm>,
     pub sr: f32,
     pub ir: Vec<f32>,
     /// samples in the window before the IR peak
@@ -100,6 +123,7 @@ pub struct SweepResult {
 }
 
 pub struct RunOut {
+    harm: Option<HarmPow>,
     ir: Vec<f32>,
     pre: usize,
     y: Vec<C64>,
@@ -118,6 +142,7 @@ pub enum State {
 }
 
 struct Acc {
+    harm: Option<HarmPow>,
     ir: Vec<f32>,
     a: Vec<C64>,
     b: Vec<f64>,
@@ -253,7 +278,7 @@ impl Sweep {
             None => {
                 let (b, c) = (o.x.iter().map(|v| v.norm_sqr()).collect(), o.y.iter().map(|v| v.norm_sqr()).collect());
                 let a = o.y.iter().zip(&o.x).map(|(y, x)| y * x.conj()).collect();
-                self.acc = Some(Acc { ir: o.ir, a, b, c, n: 1, pre: o.pre, peak_db: o.peak_db });
+                self.acc = Some(Acc { harm: o.harm, ir: o.ir, a, b, c, n: 1, pre: o.pre, peak_db: o.peak_db });
             }
             Some(acc) => {
                 for (s, v) in acc.ir.iter_mut().zip(&o.ir) {
@@ -263,6 +288,13 @@ impl Sweep {
                     acc.a[i] += o.y[i] * o.x[i].conj();
                     acc.b[i] += o.x[i].norm_sqr();
                     acc.c[i] += o.y[i].norm_sqr();
+                }
+                if let (Some(a), Some(b)) = (&mut acc.harm, &o.harm) {
+                    for (pa, pb) in a.p.iter_mut().zip(&b.p) {
+                        for (x, y) in pa.iter_mut().zip(pb) {
+                            *x += y;
+                        }
+                    }
                 }
                 acc.n += 1;
                 acc.peak_db = acc.peak_db.max(o.peak_db);
@@ -299,7 +331,20 @@ impl Sweep {
         let ir: Vec<f32> = acc.ir.iter().map(|v| v / n).collect();
         let id = self.next_id;
         self.next_id += 1;
+        let harm = acc.harm.as_ref().map(|h| {
+            let db = |v: f64| (10.0 * (v / n as f64).max(1e-30).log10()) as f32;
+            let h1_db: Vec<f32> = h.p[0].iter().map(|&v| db(v)).collect();
+            let hd_db: Vec<Vec<f32>> = (1..HARM_K).map(|k| h.p[k].iter().zip(&h1_db).map(|(&v, &d1)| db(v) - d1).collect()).collect();
+            let thd_db = (0..h.f.len())
+                .map(|i| {
+                    let s: f64 = (1..HARM_K).map(|k| h.p[k][i]).sum();
+                    if s.is_nan() { f32::NAN } else { (10.0 * (s / h.p[0][i].max(1e-30)).max(1e-30).log10()) as f32 }
+                })
+                .collect();
+            Harm { f: h.f.clone(), h1_db, hd_db, thd_db }
+        });
         self.result = Some(SweepResult {
+            harm,
             sr,
             ir,
             pre: acc.pre,
@@ -311,6 +356,58 @@ impl Sweep {
         });
         self.state = State::Done;
     }
+}
+
+// ------------------------------------------------------------------ swept harmonic analysis
+
+/// Spectrum of `h[pk + lo .. pk + hi]` with a Tukey taper; `None` if the span lies outside the data.
+fn gated_spectrum(planner: &mut FftPlanner<f64>, h: &[f32], pk: usize, lo: f64, hi: f64) -> Option<(Vec<C64>, usize)> {
+    let (a, b) = ((pk as f64 + lo).round() as isize, (pk as f64 + hi).round() as isize);
+    if a < 0 || b as usize > h.len() || b - a < 64 {
+        return None;
+    }
+    let len = (b - a) as usize;
+    let edge = (len as f64 * 0.2) as usize;
+    let x: Vec<f32> = (0..len)
+        .map(|i| {
+            let d = i.min(len - 1 - i);
+            let w = if d < edge { 0.5 - 0.5 * (std::f64::consts::PI * d as f64 / edge as f64).cos() } else { 1.0 };
+            h[a as usize + i] * w as f32
+        })
+        .collect();
+    let n = len.next_power_of_two().max(4096);
+    Some((fft(planner, &x, n), n))
+}
+
+/// Farina: in the deconvolved response the k-th harmonic sits `secs * ln(k) / ln(f1/f0)` before the
+/// main peak. Gate each one out and read it at k times the fundamental frequency.
+fn harmonics(h: &[f32], pk: usize, srf: f64, secs: f64, lr: f64, f0: f64, f1: f64) -> Option<HarmPow> {
+    let dk = |k: usize| if k <= 1 { 0.0 } else { secs * (k as f64).ln() / lr * srf };
+    let mut planner = FftPlanner::<f64>::new();
+    let top = f1.min(srf * 0.49);
+    let f: Vec<f32> = (0..HARM_N).map(|i| (f0 * (top / f0).powf(i as f64 / (HARM_N - 1) as f64)) as f32).collect();
+    let mut p = Vec::with_capacity(HARM_K);
+    for k in 1..=HARM_K {
+        let (lo, hi) = if k == 1 {
+            (-dk(2) / 2.0, dk(2) / 2.0)
+        } else {
+            let lo = if k < HARM_K { -(dk(k) + dk(k + 1)) / 2.0 } else { -dk(k) - (dk(k) - dk(k - 1)) / 2.0 };
+            (lo, -(dk(k) + dk(k - 1)) / 2.0)
+        };
+        let (spec, n) = gated_spectrum(&mut planner, h, pk, lo, hi)?;
+        let col: Vec<f64> = f
+            .iter()
+            .map(|&fi| {
+                let nu = fi as f64 * k as f64;
+                if nu > top {
+                    return f64::NAN;
+                }
+                spec[((nu / srf * n as f64).round() as usize).min(n / 2)].norm_sqr()
+            })
+            .collect();
+        p.push(col);
+    }
+    Some(HarmPow { f, p })
 }
 
 // ------------------------------------------------------------------ deconvolution
@@ -405,7 +502,8 @@ pub fn process_run(l: &[f32], r: &[f32], sr: f32, p: &SweepParams) -> Result<Run
         Some(hr) => shift(fft(&mut planner, &taper(cut(hr, rl)), m)),
         None => vec![C64::new(1.0, 0.0); m / 2 + 1],
     };
-    Ok(RunOut { ir, pre, y, x, peak_db })
+    let harm = harmonics(&h_dut, pk, srf, secs, lr, p.f0 as f64, f1);
+    Ok(RunOut { harm, ir, pre, y, x, peak_db })
 }
 
 // ------------------------------------------------------------------ tests
@@ -457,5 +555,14 @@ mod tests {
         let want = -(0.5 * w.sin()).atan2(1.0 - 0.5 * w.cos());
         let got = out.y[k].arg();
         assert!((got - want).abs() < 0.08, "phase {got} want {want}");
+
+        // swept harmonic analysis: u = v + 0.05 v^3 at A = 0.5 gives HD3 = 0.0125 A^2 = -50.1 dB, no even orders
+        let hp = out.harm.expect("harmonics");
+        for f in [150.0f32, 300.0, 600.0] {
+            let i = hp.f.iter().position(|&x| x >= f).unwrap();
+            let rel = |k: usize| 10.0 * (hp.p[k][i] / hp.p[0][i]).log10();
+            assert!((rel(2) + 50.1).abs() < 2.5, "HD3 at {f} Hz: {} dB", rel(2));
+            assert!(rel(1) < -70.0, "HD2 at {f} Hz: {} dB", rel(1));
+        }
     }
 }

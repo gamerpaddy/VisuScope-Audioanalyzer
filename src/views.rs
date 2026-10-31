@@ -33,6 +33,30 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
+/// 1/`n` octave smoothing for the spectrum display: per pixel, the average power over `[b/k, b*k]`
+/// bins around the pixel's centre bin (never narrower than the pixel itself).
+fn smooth_pixels(data: &[f32], bpos: &[f32], n: f32) -> Vec<Option<f32>> {
+    let half = (data.len() - 1) as f32;
+    let mut pre = vec![0f64; data.len() + 1];
+    for (i, &x) in data.iter().enumerate() {
+        pre[i + 1] = pre[i] + (x * 0.332_192_8).exp2() as f64;
+    }
+    let k = 2f32.powf(0.5 / n);
+    (0..bpos.len() - 1)
+        .map(|i| {
+            let (b0, b1) = (bpos[i], bpos[i + 1]);
+            if b1 < 0.0 || b0 > half {
+                return None;
+            }
+            let c = (0.5 * (b0 + b1)).max(0.0);
+            let (lo, hi) = ((c / k).min(b0), (c * k).max(b1));
+            let a = lo.max(0.0).floor() as usize;
+            let b = ((hi.ceil() as usize) + 1).min(data.len());
+            (b > a).then(|| 10.0 * (((pre[b] - pre[a]) / (b - a) as f64).max(1e-30) as f32).log10())
+        })
+        .collect()
+}
+
 /// Linear-interpolated / peak-reduced lookup of a spectrum between fractional bins.
 fn sample_bins(data: &[f32], b0: f32, b1: f32) -> Option<f32> {
     let half = (data.len() - 1) as f32;
@@ -298,10 +322,12 @@ impl App {
             })
             .collect();
         let offs = [self.unit_off(0), self.unit_off(1)];
+        let sm = crate::app::SMOOTH_OCT[self.smooth_oct].0;
         let trace = |data: &[f32], off: f32| -> Vec<Pos2> {
             let mut pts = Vec::with_capacity(w);
+            let vals: Vec<Option<f32>> = if sm > 0.0 { smooth_pixels(data, &bpos, sm) } else { (0..w).map(|i| sample_bins(data, bpos[i], bpos[i + 1])).collect() };
             for i in 0..w {
-                if let Some(v) = sample_bins(data, bpos[i], bpos[i + 1]) {
+                if let Some(v) = vals[i] {
                     pts.push(Pos2::new(plot.left() + i as f32 + 0.5, y_of_db(v + off).clamp(plot.top() - 2.0, plot.bottom() + 2.0)));
                 }
             }
@@ -315,8 +341,10 @@ impl App {
             }
             let sb = |hz: f32| hz / (s.sr / s.n as f32);
             let mut pts = Vec::with_capacity(w);
+            let sbp: Vec<f32> = bpos.iter().map(|b| sb(b * bin_hz)).collect();
+            let vals: Vec<Option<f32>> = if sm > 0.0 { smooth_pixels(&s.data, &sbp, sm) } else { (0..w).map(|i| sample_bins(&s.data, sbp[i], sbp[i + 1])).collect() };
             for i in 0..w {
-                if let Some(v) = sample_bins(&s.data, sb(bpos[i] * bin_hz), sb(bpos[i + 1] * bin_hz)) {
+                if let Some(v) = vals[i] {
                     pts.push(Pos2::new(plot.left() + i as f32 + 0.5, y_of_db(v + offs[s.ch.min(1)]).clamp(plot.top() - 2.0, plot.bottom() + 2.0)));
                 }
             }

@@ -12,6 +12,8 @@ pub const ROWS: usize = 4096;
 /// Lowest frequency of the logarithmic axis.
 pub const FMIN_LOG: f32 = 10.0;
 pub const MAXH: usize = 10;
+/// Most input channels that get a level meter.
+pub const MAX_CH: usize = 32;
 /// History dB range encoded into u8.
 pub const HIST_DB_RANGE: f32 = 150.0;
 
@@ -43,6 +45,19 @@ impl Ring {
         r[..pad].fill(0.0);
         let start = self.total as usize - avail;
         self.copy_abs(start, &mut l[pad..], &mut r[pad..]);
+    }
+
+    /// Like `copy_last`, but each channel looks `sl` / `sr` samples further back (zero padded before the start).
+    pub fn copy_last_shifted(&self, l: &mut [f32], r: &mut [f32], sl: usize, sr: usize) {
+        let n = l.len() as isize;
+        let tot = self.total as isize;
+        for (out, back, src) in [(l, sl, &self.l), (r, sr, &self.r)] {
+            let start = tot - back as isize - n;
+            for (i, o) in out.iter_mut().enumerate() {
+                let idx = start + i as isize;
+                *o = if idx < 0 || tot - idx > RING_CAP as isize { 0.0 } else { src[(idx as usize) & RING_MASK] };
+            }
+        }
     }
 
     /// Copy `l.len()` samples starting at absolute sample index `start`.
@@ -143,7 +158,49 @@ pub struct Analysis {
     pub dsp_fps: f32,
 }
 
+/// Settings of the live transfer function, owned by the Transfer tool and read by the DSP thread.
+#[derive(Clone, PartialEq)]
+pub struct TfParams {
+    pub on: bool,
+    /// R carries the reference (default), otherwise L does
+    pub ref_r: bool,
+    pub auto_delay: bool,
+    pub delay_ms: f32,
+    pub reset: u32,
+}
+
+impl Default for TfParams {
+    fn default() -> Self {
+        Self { on: false, ref_r: true, auto_delay: true, delay_ms: 0.0, reset: 0 }
+    }
+}
+
+/// Averaged transfer function H = measured / reference, `n / 2 + 1` bins.
+#[derive(Clone, Default)]
+pub struct TfResult {
+    pub seq: u64,
+    pub sr: f32,
+    pub n: usize,
+    pub mag: Vec<f32>,
+    pub phase: Vec<f32>,
+    pub coh: Vec<f32>,
+    pub delay_ms: f32,
+    pub frames: u32,
+}
+
+/// Microphone correction handed to the DSP thread (empty `f` = off).
+#[derive(Default)]
+pub struct MicShared {
+    pub rev: u32,
+    pub f: Vec<f32>,
+    pub db: Vec<f32>,
+    pub mask: [bool; 2],
+}
+
 pub struct Shared {
+    pub mic: Mutex<MicShared>,
+    pub tf_params: Mutex<TfParams>,
+    pub tf_out: Mutex<TfResult>,
     pub ring: Mutex<Ring>,
     pub params: Mutex<Params>,
     pub analysis: Mutex<Analysis>,
@@ -151,7 +208,11 @@ pub struct Shared {
     pub columns: Mutex<Vec<(u32, Vec<u8>)>>,
     pub status: Mutex<String>,
     pub sr: AtomicU32,
-    pub pair: AtomicUsize,
+    /// device channels (0-based) analysed as L and R
+    pub ch_a: AtomicUsize,
+    pub ch_b: AtomicUsize,
+    /// per device channel: largest |sample| since the UI last looked (f32 bits, non-negative so bits order like values)
+    pub ch_peak: [AtomicU32; MAX_CH],
     pub quit: AtomicBool,
     pub xruns: AtomicU32,
     /// incremented every time an audio thread is started; streams of older generations go quiet
@@ -173,13 +234,18 @@ pub struct Shared {
 impl Shared {
     pub fn new() -> Self {
         Self {
+            mic: Mutex::new(MicShared::default()),
+            tf_params: Mutex::new(TfParams::default()),
+            tf_out: Mutex::new(TfResult::default()),
             ring: Mutex::new(Ring::new()),
             params: Mutex::new(Params::default()),
             analysis: Mutex::new(Analysis::default()),
             columns: Mutex::new(Vec::new()),
             status: Mutex::new(String::from("No input")),
             sr: AtomicU32::new(0),
-            pair: AtomicUsize::new(0),
+            ch_a: AtomicUsize::new(0),
+            ch_b: AtomicUsize::new(1),
+            ch_peak: std::array::from_fn(|_| AtomicU32::new(0)),
             quit: AtomicBool::new(false),
             xruns: AtomicU32::new(0),
             audio_gen: AtomicU32::new(0),

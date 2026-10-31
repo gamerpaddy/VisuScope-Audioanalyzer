@@ -12,7 +12,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 pub mod decode;
+pub mod distortion;
 pub mod dialogs;
+pub mod eqtool;
 pub mod impulse;
 pub mod loudness;
 pub mod logger;
@@ -21,14 +23,20 @@ pub mod octave;
 pub mod peaks;
 pub mod plot;
 pub mod recorder;
+pub mod reportui;
 pub mod reference;
 pub mod response;
+pub mod room;
 pub mod stats;
+pub mod spl;
+pub mod sequence;
 pub mod sweep;
+pub mod traces;
 pub mod tap;
+pub mod transfer;
 pub mod wavio;
 
-pub const TOOL_COUNT: usize = 9;
+pub const TOOL_COUNT: usize = 15;
 
 pub struct ToolInfo {
     pub short: &'static str,
@@ -49,6 +57,20 @@ pub const INFO: [ToolInfo; TOOL_COUNT] = [
     ToolInfo { short: "Stats", title: "Signal statistics", weight: 1.6, tip: "Sample histogram, clipping, bit-depth use and long-term trends" },
     ToolInfo { short: "Logger", title: "Logger & alarms", weight: 0.8, tip: "Log measurements to CSV and raise alarms on thresholds" },
     ToolInfo { short: "Reference", title: "Reference & limit masks", weight: 1.0, tip: "Pass/fail masks, reference curves and an A/B difference trace" },
+    ToolInfo { short: "Transfer", title: "Live transfer function", weight: 2.4, tip: "Magnitude, phase and coherence between a reference and a measured channel while music or noise plays" },
+    ToolInfo { short: "SPL", title: "Sound level meter", weight: 1.6, tip: "dB SPL with A/C/Z and Fast/Slow/Impulse weighting, Leq, Lmax, peak, L10/L50/L90" },
+    ToolInfo { short: "Distortion", title: "Distortion sweeps", weight: 2.4, tip: "THD vs frequency and level, IMD vs level and swept harmonic analysis" },
+    ToolInfo { short: "Sequence", title: "Test sequence", weight: 1.6, tip: "Scripted tests: drive the generator, measure, sweep and check against limits (pass/fail)" },
+    ToolInfo { short: "Report", title: "Report & export", weight: 1.2, tip: "Create an HTML / PDF measurement report and export responses (FRD, REW text, impulse WAV)" },
+    ToolInfo { short: "EQ", title: "EQ design", weight: 2.0, tip: "Fit parametric filters to a measurement, preview, export Equalizer APO / biquads / FIR" },
+];
+
+/// How the Tools menu groups the tools (indices into `INFO`).
+pub const GROUPS: [(&str, &[usize]); 4] = [
+    ("Measure", &[2, 3, 11, 10, 5]),
+    ("Analyse", &[1, 4, 6, 9, 8]),
+    ("Test & design", &[12, 14]),
+    ("Record & report", &[0, 7, 13]),
 ];
 
 pub fn all() -> Vec<Box<dyn Tool>> {
@@ -62,6 +84,12 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(stats::Stats::new()),
         Box::new(logger::Logger::new()),
         Box::new(reference::Reference::new()),
+        Box::new(transfer::LiveTf::new()),
+        Box::new(spl::Spl::new()),
+        Box::new(distortion::Distortion::new()),
+        Box::new(sequence::Sequence::new()),
+        Box::new(reportui::ReportTool::new()),
+        Box::new(eqtool::EqTool::new()),
     ];
     debug_assert_eq!(v.len(), TOOL_COUNT);
     v
@@ -77,9 +105,33 @@ pub enum AudioReq {
     Restart,
 }
 
+/// Change of the generator settings requested by a tool (`None` = leave as is).
+#[derive(Default, Clone)]
+pub struct GenCmd {
+    pub wave: Option<crate::tonegen::Wave>,
+    pub freq: Option<f32>,
+    /// both channels
+    pub level_db: Option<f32>,
+    pub on: Option<bool>,
+}
+
+/// A measurement report to create.
+pub struct ReportReq {
+    pub title: String,
+    pub notes: String,
+    pub include: Vec<String>,
+    pub open: bool,
+    /// file to write instead of a time-stamped one in Documents\VisuScope
+    pub path: Option<std::path::PathBuf>,
+}
+
 /// What tools may ask the app to do.
 #[derive(Default)]
 pub struct Requests {
+    pub report: Option<ReportReq>,
+    /// quit the program with this exit code (headless runs)
+    pub exit: Option<i32>,
+    pub gen_cmd: Option<GenCmd>,
     pub start_gen: bool,
     pub audio: AudioReq,
     pub note: Option<String>,
@@ -95,9 +147,12 @@ pub struct Ctx<'a> {
     pub unit_name: &'static str,
     pub snaps: &'a [Snapshot],
     pub gen_running: bool,
+    /// current generator settings
+    pub tg: &'a crate::tonegen::GenParams,
     /// output devices (default first), for tools that play sound
     pub out_devs: &'a [crate::audio::DevInfo],
     pub sweep: &'a mut sweep::Sweep,
+    pub lib: &'a mut traces::Library,
     pub req: &'a mut Requests,
 }
 
@@ -118,6 +173,12 @@ pub trait Tool {
     fn status(&self) -> Option<(String, Color32)> {
         None
     }
+    /// What this tool can contribute to a measurement report (empty when it has nothing yet).
+    fn report(&self, _cx: &Ctx) -> Vec<crate::report::Section> {
+        Vec::new()
+    }
+    /// Text command from the application (command line runs).
+    fn command(&mut self, _c: &str) {}
     fn save(&self, _o: &mut SettingsOut) {}
     fn load(&mut self, _i: &SettingsIn) {}
 }
@@ -221,6 +282,19 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_groups_cover_every_tool_once() {
+        assert_eq!(INFO.len(), TOOL_COUNT);
+        assert_eq!(all().len(), TOOL_COUNT);
+        let mut seen = vec![0; TOOL_COUNT];
+        for (_, g) in GROUPS.iter() {
+            for &k in g.iter() {
+                seen[k] += 1;
+            }
+        }
+        assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
+    }
 
     #[test]
     fn notes_and_dates() {

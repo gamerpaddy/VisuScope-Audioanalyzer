@@ -10,6 +10,8 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 
 **Input**
 - Microphone, line input, or loopback of any playback device
+- Any device channel as L and R, with a level meter per channel
+- Microphone calibration files (0 / 90 degrees, e.g. UMIK-1) correct the spectrum views
 - Reconnects when the device format changes
 - Plays and analyzes audio files (WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ALAC, MKV) with optional sound output
 - Records to WAV (16/24 bit, 32 bit float) with pre-roll
@@ -30,6 +32,10 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Frequency response by sweep: magnitude, phase, group delay, coherence
 - Impulse response with RT60, EDT, C50, C80, D50
 - Loudness (EBU R128), true peak, PPM, VU
+- Live transfer function: magnitude, phase and coherence between a reference and a measured channel while music or noise plays, with automatic delay compensation
+- Sound level meter: A/C/Z, Fast/Slow/Impulse, Leq, Lmax, peak, L10/L50/L90, calibrator or specification calibration
+- Distortion sweeps: THD / THD+N vs frequency and level, IMD (SMPTE, CCIF) vs level, harmonics 2 to 6 from one sweep (Farina)
+- Room acoustics: RT60 / EDT / clarity per octave band, waterfall (CSD), STI and %ALcons, room modes with theoretical axial modes
 - Peak list with note names, tuner
 - Signal statistics: histogram, clipping, bit depth use, trends
 - Reference curves and limit masks with pass/fail
@@ -42,7 +48,14 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - White, pink, brown, blue and violet noise
 - Harmonics, phase, jitter, bit depth with dither
 
+**Automation and output**
+- Test sequences: a small script drives the generator, measures, sweeps and checks limits (pass/fail); `visuscope --run test.vss --report result.txt` runs it from the command line (exit code 0 pass, 1 fail, 2 error)
+- Measurement report as HTML (print to PDF), response export as FRD / REW text, impulse response as WAV
+- EQ design: parametric filters fitted to a measurement, exported as Equalizer APO text, biquads or a linear / minimum phase FIR
+
 **Interface**
+- Stored traces: name, recolour, overlay, show relative to one trace, average, save and load
+- Fractional-octave smoothing of the spectrum
 - Floating windows, auto tiling, saved layouts (Ctrl+1 to 9), pop-out windows
 - Settings are remembered between runs
 - PNG screenshots
