@@ -24,7 +24,6 @@ pub mod octave;
 pub mod peaks;
 pub mod profiler;
 pub mod plot;
-pub mod recorder;
 pub mod reportui;
 pub mod reference;
 pub mod response;
@@ -38,9 +37,9 @@ pub mod tap;
 pub mod transfer;
 pub mod wavio;
 
-pub const TOOL_COUNT: usize = 18;
+pub const TOOL_COUNT: usize = 17;
 /// Index of the routing graph's window in `INFO` (it only exists while the graph is switched on).
-pub const ROUTING: usize = 16;
+pub const ROUTING: usize = 15;
 
 pub struct ToolInfo {
     pub short: &'static str,
@@ -52,7 +51,6 @@ pub struct ToolInfo {
 
 /// Same order as `all()`.
 pub const INFO: [ToolInfo; TOOL_COUNT] = [
-    ToolInfo { short: "Recorder", title: "Recorder & file player", weight: 0.9, tip: "Record the input to WAV, or play a WAV file through the analysers" },
     ToolInfo { short: "Octave", title: "Octave analyser", weight: 2.4, tip: "1/1 to 1/24 octave band levels with A/C weighting and a target curve" },
     ToolInfo { short: "Response", title: "Frequency response", weight: 2.4, tip: "Sweep measurement: magnitude, phase, group delay, coherence" },
     ToolInfo { short: "Impulse", title: "Impulse response & RT60", weight: 2.0, tip: "Impulse response, decay curve, RT60 / EDT, clarity" },
@@ -74,15 +72,14 @@ pub const INFO: [ToolInfo; TOOL_COUNT] = [
 
 /// How the Tools menu groups the tools (indices into `INFO`).
 pub const GROUPS: [(&str, &[usize]); 4] = [
-    ("Measure", &[2, 3, 11, 10, 5]),
-    ("Analyse", &[1, 4, 6, 9, 8, 17]),
-    ("Test & design", &[12, 14]),
-    ("Record & report", &[15, 16, 0, 7, 13]),
+    ("Measure", &[1, 2, 10, 9, 4]),
+    ("Analyse", &[0, 3, 5, 8, 7, 16]),
+    ("Test & design", &[11, 13]),
+    ("Record & report", &[14, 15, 6, 12]),
 ];
 
 pub fn all() -> Vec<Box<dyn Tool>> {
     let v: Vec<Box<dyn Tool>> = vec![
-        Box::new(recorder::Recorder::new()),
         Box::new(octave::Octave::new()),
         Box::new(response::Response::new()),
         Box::new(impulse::Impulse::new()),
@@ -145,8 +142,6 @@ pub struct Requests {
     pub start_gen: bool,
     pub audio: AudioReq,
     pub note: Option<String>,
-    /// audio files to open in the timeline (also opens its window)
-    pub send_to_daw: Vec<std::path::PathBuf>,
 }
 
 /// Read-only view of the app state plus the few things tools may change.

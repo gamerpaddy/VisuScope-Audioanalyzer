@@ -223,12 +223,27 @@ impl Daw {
         self.toolbar(ui, cx, &mut p);
         let avail = ui.available_rect_before_wrap();
         ui.allocate_rect(avail, Sense::hover());
-        let an_h = if self.an_open && avail.height() > 330.0 { (avail.height() * 0.40).clamp(150.0, 240.0) } else { 0.0 };
-        let body = Rect::from_min_max(avail.min, pos2(avail.max.x, avail.max.y - an_h));
+        // the analysis goes below the tracks when the window is tall enough, to the right of them when it is wide
+        // but low, and is left out when there is no room for either
+        let (mut an_h, mut an_w) = (0.0f32, 0.0f32);
+        if self.an_open {
+            // (VISUSCOPE_AN_SIDE=1 forces the side placement for screenshots)
+            if avail.height() > 330.0 && std::env::var_os("VISUSCOPE_AN_SIDE").is_none() {
+                an_h = (avail.height() * 0.40).clamp(150.0, 240.0);
+            } else if avail.width() >= 900.0 && avail.height() >= 170.0 {
+                an_w = (avail.width() * 0.36).clamp(340.0, 560.0);
+            }
+        }
+        self.an_hidden = self.an_open && an_h == 0.0 && an_w == 0.0;
+        let body = Rect::from_min_max(avail.min, pos2(avail.max.x - an_w, avail.max.y - an_h));
         self.keys(ui, cx, &mut p, whole);
         self.body(ui, cx, &mut p, body);
         if an_h > 0.0 {
             let an = Rect::from_min_max(pos2(avail.min.x, avail.max.y - an_h + 4.0), avail.max);
+            self.analysis_panel(ui, cx, &p, an);
+            self.schedule_analysis(&p);
+        } else if an_w > 0.0 {
+            let an = Rect::from_min_max(pos2(avail.max.x - an_w + 4.0, avail.min.y), avail.max);
             self.analysis_panel(ui, cx, &p, an);
             self.schedule_analysis(&p);
         }
@@ -274,7 +289,7 @@ impl Daw {
                 self.loop_on = !self.loop_on;
             }
             ui.toggle_value(&mut self.follow, "Follow").on_hover_text("Scroll the view with the playhead");
-            ui.toggle_value(&mut self.snap, "Snap").on_hover_text("Snap clips, the playhead and selections to the grid, clip edges and the playhead (hold Alt to bypass)");
+            ui.toggle_value(&mut self.snap, "Snap").on_hover_text("Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Shift to move freely)");
             ui.separator();
             if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last timeline edit (Ctrl+Z)").clicked() {
                 self.undo(p);
@@ -402,7 +417,7 @@ impl Daw {
                     ui.label(RichText::new(path.display().to_string()).small().weak());
                 }
             });
-            ui.toggle_value(&mut self.an_open, "Analysis").on_hover_text("Statistics, spectrum and spectrogram of the selection");
+            ui.toggle_value(&mut self.an_open, "Analysis").on_hover_text(if self.an_hidden { "Statistics, spectrum and spectrogram of the selection: the window is too small to show them, make it larger" } else { "Statistics, spectrum and spectrogram of the selection (below the tracks, or to their right in a low, wide window)" });
             ui.menu_button("Output", |ui| {
                 if graph_on() {
                     ui.label("The timeline plays into the Routing window:\nconnect its Timeline out node to an output or the analyser.");
@@ -661,7 +676,7 @@ impl Daw {
         if !self.snap || alt {
             return f;
         }
-        let tol = (8.0 / view.pps * view.sr) as i64;
+        let tol = (10.0 / view.pps * view.sr) as i64;
         let step = time_step(70.0 / view.pps) * view.sr;
         let grid = ((f as f64 / step).round() * step) as i64;
         let mut best = (tol + 1, f);
@@ -770,12 +785,14 @@ impl Daw {
 
         // ---- interaction on the lanes
         let lane_resp = ui.interact(lanes_area, ui.scope_id().with("daw_lanes"), Sense::click_and_drag());
-        let alt = ui.input(|i| i.modifiers.alt);
+        // clips snap to each other, the playhead and the grid; holding Shift (or Alt) moves them freely
+        let alt = ui.input(|i| i.modifiers.alt || i.modifiers.shift);
         let shift = ui.input(|i| i.modifiers.shift);
         let hover = lane_resp.hover_pos();
         if let Some(h) = hover {
             if self.drag.is_none() {
-                match self.hit(p, &view, &rows, h) {
+                // only a clip that is selected can be moved, trimmed or faded: the others just show where a selection starts
+                match self.hit(p, &view, &rows, h).filter(|k| self.sel.contains(&p.tracks[k.ti].clips[k.ci].id)) {
                     Some(Hit { kind: DragKind::TrimL | DragKind::TrimR, .. }) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
                     Some(Hit { kind: DragKind::FadeIn | DragKind::FadeOut, .. }) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
                     Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
@@ -785,15 +802,10 @@ impl Daw {
         }
         if lane_resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
-                match self.hit(p, &view, &rows, pos) {
+                // a clip has to be selected (clicked) first; dragging an unselected one selects a time range instead
+                match self.hit(p, &view, &rows, pos).filter(|k| self.sel.contains(&p.tracks[k.ti].clips[k.ci].id)) {
                     Some(h) => {
                         let id = p.tracks[h.ti].clips[h.ci].id;
-                        if !self.sel.contains(&id) {
-                            if !shift {
-                                self.sel.clear();
-                            }
-                            self.sel.insert(id);
-                        }
                         self.sel_track = Some(p.tracks[h.ti].id);
                         self.checkpoint(p);
                         let orig: Vec<(Clip, usize)> = if h.kind == DragKind::Move {
@@ -852,9 +864,7 @@ impl Daw {
                         self.sel_track = Some(p.tracks[h.ti].id);
                     }
                     None => {
-                        let pts = self.snap_points(p, &[]);
-                        let f = self.snap_to(&view, &pts, view.frame(pos.x), alt).max(0);
-                        self.seek(f);
+                        // the playback cursor is placed in the ruler above, not by clicking in the tracks
                         if !shift {
                             self.sel.clear();
                             self.range = None;
@@ -1076,6 +1086,16 @@ impl Daw {
                 FontId::proportional(14.0),
                 Color32::from_rgb(110, 122, 140),
             );
+        }
+        // a white guide line where the ruler would put the playback cursor
+        if let (Some(h), None) = (hover, &self.drag) {
+            if lanes_area.contains(h) && self.range_anchor.is_none() {
+                let pts = self.snap_points(p, &[]);
+                let f = self.snap_to(&view, &pts, view.frame(h.x), alt).max(0);
+                let x = view.x(f);
+                painter.with_clip_rect(lanes_area.union(ruler)).line_segment([pos2(x, ruler.top()), pos2(x, lanes_area.bottom())], Stroke::new(1.0, Color32::from_white_alpha(110)));
+                painter.with_clip_rect(ruler).add(Shape::convex_polygon(vec![pos2(x - 4.0, ruler.bottom() - 7.0), pos2(x + 4.0, ruler.bottom() - 7.0), pos2(x, ruler.bottom())], Color32::from_white_alpha(170), Stroke::NONE));
+            }
         }
         // hover readout
         if let (Some(h), None) = (hover, &self.drag) {
@@ -1314,9 +1334,26 @@ impl Daw {
         lp.with_clip_rect(vis).extend(shapes);
     }
 
+    /// A click on a track header: selects it; with Ctrl it joins or leaves the group of selected tracks.
+    fn click_track(&mut self, ui: &Ui, id: u32) {
+        if ui.input(|i| i.modifiers.command) {
+            if self.sel_tracks.is_empty() {
+                if let Some(cur) = self.sel_track {
+                    self.sel_tracks.insert(cur);
+                }
+            }
+            if !self.sel_tracks.remove(&id) {
+                self.sel_tracks.insert(id);
+            }
+        } else {
+            self.sel_tracks.clear();
+        }
+        self.sel_track = Some(id);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn track_header(&mut self, ui: &mut Ui, p: &mut Project, ti: usize, hr: Rect, clip: Rect, remove: &mut Option<usize>, swap: &mut Option<(usize, usize)>, dup: &mut Option<usize>) {
-        let selected = self.sel_track == Some(p.tracks[ti].id);
+        let selected = self.sel_track == Some(p.tracks[ti].id) || self.sel_tracks.contains(&p.tracks[ti].id);
         let col = track_color(&p.tracks[ti]);
         let painter = ui.painter().with_clip_rect(hr.intersect(clip));
         painter.rect_filled(hr, 0.0, if selected { HDR_SEL } else { HDR_BG });
@@ -1325,7 +1362,7 @@ impl Daw {
         // click on the empty header selects the track; right-click opens the track menu
         let bg_resp = ui.interact(hr.intersect(clip), ui.scope_id().with(("daw_hdr", id)), Sense::click());
         if bg_resp.clicked() {
-            self.sel_track = Some(id);
+            self.click_track(ui, id);
         }
         bg_resp.context_menu(|ui| {
             if ui.button("Rename").clicked() {
@@ -1428,6 +1465,17 @@ impl Daw {
                 *dup = Some(ti);
                 ui.close();
             }
+            let n_sel = self.merge_ids(p).len();
+            ui.separator();
+            ui.label(RichText::new(if n_sel >= 2 { format!("{n_sel} tracks selected") } else { "Ctrl + click track names to select several".to_string() }).small().weak());
+            if ui.add_enabled(n_sel >= 2, egui::Button::new("Merge selected tracks into one")).on_hover_text("Mix them as they sound into one track and remove the originals (undo brings them back)").clicked() {
+                self.act_merge_tracks(p, true);
+                ui.close();
+            }
+            if ui.add_enabled(n_sel >= 2, egui::Button::new("Mix selected tracks to a new track")).on_hover_text("Keep the originals").clicked() {
+                self.act_merge_tracks(p, false);
+                ui.close();
+            }
             if ui.button("Delete track").clicked() {
                 *remove = Some(ti);
                 ui.close();
@@ -1467,9 +1515,9 @@ impl Daw {
                     if r.double_clicked() {
                         self.renaming = Some((id, p.tracks[ti].name.clone()));
                     } else if r.clicked() {
-                        self.sel_track = Some(id);
+                        self.click_track(ui, id);
                     }
-                    r.on_hover_text("Double-click to rename");
+                    r.on_hover_text("Double-click to rename.  Ctrl + click: select more tracks (to merge them)");
                 }
                 let t = &mut p.tracks[ti];
                 if mini_toggle(ui, "M", t.mute, Color32::from_rgb(235, 190, 70), "Mute") {
@@ -1580,7 +1628,9 @@ impl Daw {
                 ui.data_mut(|d| d.insert_temp(pre_id, (before, now)));
             }
         }
-        if r.double_clicked() {
+        // a slider only senses dragging, so clicks (double-click, right-click) need a widget of their own on top
+        let click = ui.interact(r.rect, id.with("click"), Sense::click());
+        if click.double_clicked() {
             if let Some((pv, _)) = ui.data(|d| d.get_temp::<(f32, f64)>(pre_id)) {
                 *v = pv;
             }
@@ -1588,11 +1638,11 @@ impl Daw {
         } else if r.changed() {
             changed = true;
         }
-        if r.secondary_clicked() {
+        if click.secondary_clicked() {
             *v = default;
             changed = true;
         }
-        r.on_hover_text(format!("{tip}\nDouble-click: type a value.  Right-click: reset."));
+        click.on_hover_text(format!("{tip}\nDouble-click: type a value.  Right-click: reset."));
         changed
     }
 
@@ -1800,12 +1850,21 @@ impl Daw {
             return;
         };
         // wide enough for "-10.4 / -14.2 dBFS" and "+0.00093 / +0.00001" in the monospace values
-        let stats_w = 250.0f32.min(body.width() * 0.34);
-        let rest = body.width() - stats_w - 12.0;
-        let spec_w = rest * 0.56;
-        let stats_r = Rect::from_min_size(body.min, vec2(stats_w, body.height()));
-        let spec_r = Rect::from_min_size(pos2(stats_r.right() + 6.0, body.top()), vec2(spec_w, body.height()));
-        let spg_r = Rect::from_min_max(pos2(spec_r.right() + 6.0, body.top()), body.max);
+        // a narrow panel (to the right of the tracks) stacks the three parts instead of putting them side by side
+        let (stats_r, spec_r, spg_r) = if body.width() < 600.0 {
+            let stats_h = (body.height() * 0.34).clamp(70.0, 168.0);
+            let half = (body.height() - stats_h - 12.0) * 0.5;
+            let s = Rect::from_min_size(body.min, vec2(body.width(), stats_h));
+            let sp = Rect::from_min_size(pos2(body.left(), s.bottom() + 6.0), vec2(body.width(), half));
+            (s, sp, Rect::from_min_max(pos2(body.left(), sp.bottom() + 6.0), body.max))
+        } else {
+            let stats_w = 250.0f32.min(body.width() * 0.34);
+            let rest = body.width() - stats_w - 12.0;
+            let spec_w = rest * 0.56;
+            let s = Rect::from_min_size(body.min, vec2(stats_w, body.height()));
+            let sp = Rect::from_min_size(pos2(s.right() + 6.0, body.top()), vec2(spec_w, body.height()));
+            (s, sp, Rect::from_min_max(pos2(sp.right() + 6.0, body.top()), body.max))
+        };
         self.stats_grid(ui, &out, stats_r);
         self.spectrum_plot(ui, &out, spec_r);
         self.spectrogram_view(ui, &out, spg_r, (a, b), p.sr);

@@ -102,15 +102,19 @@ impl Biquad {
     }
 }
 
-/// Four band parametric equaliser.
+/// Most bands an equaliser node can have.
+pub const EQ_MAX_BANDS: usize = 12;
+
+/// Parametric equaliser with up to `EQ_MAX_BANDS` bands (the node's parameters hold four values per band).
 #[derive(Clone, Default)]
 pub struct EqUnit {
-    pub bands: [Biquad; 4],
+    pub bands: Vec<Biquad>,
 }
 
 impl EqUnit {
     /// `p` is the node's parameter list: type, freq, gain, Q per band.
     pub fn set(&mut self, p: &[f32], fs: f32) {
+        self.bands.resize((p.len() / 4).clamp(1, EQ_MAX_BANDS), Biquad::default());
         for (i, b) in self.bands.iter_mut().enumerate() {
             let o = i * 4;
             let (t, f, g, q) = (p.get(o).copied().unwrap_or(6.0).round() as usize, p.get(o + 1).copied().unwrap_or(1000.0), p.get(o + 2).copied().unwrap_or(0.0), p.get(o + 3).copied().unwrap_or(1.0));
@@ -120,12 +124,14 @@ impl EqUnit {
                 2 => BqType::HighShelf,
                 3 => BqType::HighPass,
                 4 => BqType::LowPass,
-                5 => BqType::Notch,
+                // a notch is a narrow dip: its depth is the (negative) level of the band
+                5 => BqType::Bell,
                 _ => {
                     b.active = false;
                     continue;
                 }
             };
+            let g = if t == 5 { -g.abs() } else { g };
             b.set(ty, fs, f, g, q);
         }
     }
@@ -404,6 +410,308 @@ pub fn utility(l: &mut [f32], r: &mut [f32], mode: usize) {
     }
 }
 
+// ---------------------------------------------------------------------- distortion family
+
+/// One-pole low-pass (the tone control of the distortions) and a DC blocker, per channel.
+#[derive(Clone, Copy, Default)]
+struct Tone {
+    a: f32,
+    z: [f32; 2],
+}
+
+impl Tone {
+    fn set(&mut self, hz: f32, fs: f32) {
+        self.a = 1.0 - (-2.0 * PI * hz.clamp(20.0, fs * 0.45) / fs).exp();
+    }
+    #[inline]
+    fn tick(&mut self, x: f32, c: usize) -> f32 {
+        self.z[c] += self.a * (x - self.z[c]);
+        self.z[c]
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DcBlock {
+    z: [f32; 2],
+}
+
+impl DcBlock {
+    #[inline]
+    fn tick(&mut self, x: f32, c: usize) -> f32 {
+        // removes what is slower than about 10 Hz
+        self.z[c] += 0.0015 * (x - self.z[c]);
+        x - self.z[c]
+    }
+}
+
+/// Adds even harmonics (2nd, 4th ... from a squared signal) and odd harmonics (3rd, 5th ... from a cubed one).
+#[derive(Clone, Default)]
+pub struct HarmUnit {
+    even: f32,
+    odd: f32,
+    out: f32,
+    dc: DcBlock,
+}
+
+impl HarmUnit {
+    pub fn set(&mut self, p: &[f32]) {
+        self.even = p.first().copied().unwrap_or(30.0) * 0.01;
+        self.odd = p.get(1).copied().unwrap_or(0.0) * 0.01;
+        self.out = db_to_lin(p.get(2).copied().unwrap_or(0.0));
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        for (c, ch) in [l, r].into_iter().enumerate() {
+            for v in ch.iter_mut() {
+                let x = *v;
+                // x^2 of a sine is half its amplitude at twice the frequency (plus DC, which is removed); x^3 gives a quarter at three times
+                let e = self.dc.tick(x * x, c);
+                *v = (x + self.even * e * 2.0 + self.odd * x * x * x * 4.0 / 3.0) * self.out;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum DistShape {
+    Soft,
+    Hard,
+    Asym,
+    Fold,
+}
+
+#[inline]
+fn shape(x: f32, s: DistShape) -> f32 {
+    match s {
+        DistShape::Soft => x.tanh(),
+        DistShape::Hard => x.clamp(-1.0, 1.0),
+        // a bias before the curve makes the two halves differ: even harmonics
+        DistShape::Asym => (x + 0.35).tanh() - 0.35f32.tanh(),
+        DistShape::Fold => {
+            let t = (x + 1.0).rem_euclid(4.0);
+            if t < 2.0 { t - 1.0 } else { 3.0 - t }
+        }
+    }
+}
+
+/// Overdrive / distortion: gain, a shaping curve, a tone low-pass and a dry / wet mix.
+#[derive(Clone)]
+pub struct DistUnit {
+    drive: f32,
+    shape: DistShape,
+    mix: f32,
+    out: f32,
+    tone: Tone,
+    dc: DcBlock,
+}
+
+impl Default for DistUnit {
+    fn default() -> Self {
+        Self { drive: 4.0, shape: DistShape::Soft, mix: 1.0, out: 0.5, tone: Tone::default(), dc: DcBlock::default() }
+    }
+}
+
+impl DistUnit {
+    pub fn set(&mut self, p: &[f32], fs: f32) {
+        self.drive = db_to_lin(p.first().copied().unwrap_or(12.0));
+        self.shape = match p.get(1).copied().unwrap_or(0.0).round() as usize {
+            1 => DistShape::Hard,
+            2 => DistShape::Asym,
+            3 => DistShape::Fold,
+            _ => DistShape::Soft,
+        };
+        self.tone.set(p.get(2).copied().unwrap_or(12000.0), fs);
+        self.mix = p.get(3).copied().unwrap_or(100.0) * 0.01;
+        self.out = db_to_lin(p.get(4).copied().unwrap_or(-6.0));
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        for (c, ch) in [l, r].into_iter().enumerate() {
+            for v in ch.iter_mut() {
+                let dry = *v;
+                let mut y = shape(dry * self.drive, self.shape);
+                y = self.dc.tick(y, c);
+                y = self.tone.tick(y, c) * self.out;
+                *v = dry * (1.0 - self.mix) + y * self.mix;
+            }
+        }
+    }
+}
+
+/// Fuzz: a lot of gain into an uneven clipper, with a gate that lets the fuzz sputter when the input fades.
+#[derive(Clone, Default)]
+pub struct FuzzUnit {
+    gain: f32,
+    bias: f32,
+    gate: f32,
+    out: f32,
+    tone: Tone,
+    dc: DcBlock,
+    env: f32,
+    g: f32,
+}
+
+impl FuzzUnit {
+    pub fn set(&mut self, p: &[f32], fs: f32) {
+        let amt = p.first().copied().unwrap_or(70.0) * 0.01;
+        self.gain = 1.0 + amt * amt * 120.0;
+        self.bias = 0.25 * amt;
+        // 0 % = open, 100 % = closes below about -25 dB
+        self.gate = db_to_lin(-70.0 + 45.0 * p.get(1).copied().unwrap_or(10.0) * 0.01) * if p.get(1).copied().unwrap_or(10.0) > 0.5 { 1.0 } else { 0.0 };
+        self.tone.set(p.get(2).copied().unwrap_or(5000.0), fs);
+        self.out = db_to_lin(p.get(3).copied().unwrap_or(-10.0));
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        for i in 0..l.len() {
+            let level = l[i].abs().max(r[i].abs());
+            self.env = if level > self.env { level } else { self.env * 0.9995 };
+            let target = if self.env > self.gate { 1.0 } else { 0.0 };
+            self.g += (target - self.g) * if target > self.g { 0.02 } else { 0.002 };
+            for (c, v) in [&mut l[i], &mut r[i]].into_iter().enumerate() {
+                let x = *v * self.gain + self.bias;
+                // the negative half clips earlier than the positive one
+                let y = if x > 0.0 { x.min(1.0) } else { x.max(-0.7) };
+                let y = self.dc.tick(y, c) * self.g;
+                *v = self.tone.tick(y, c) * self.out;
+            }
+        }
+    }
+}
+
+/// Bit crusher: fewer bits and / or a held sample (sample rate reduction).
+#[derive(Clone, Default)]
+pub struct CrushUnit {
+    levels: f32,
+    hold: usize,
+    mix: f32,
+    count: usize,
+    held: [f32; 2],
+}
+
+impl CrushUnit {
+    pub fn set(&mut self, p: &[f32]) {
+        let bits = p.first().copied().unwrap_or(8.0).round().clamp(1.0, 24.0);
+        self.levels = 2f32.powf(bits - 1.0);
+        self.hold = (p.get(1).copied().unwrap_or(1.0).round() as usize).clamp(1, 64);
+        self.mix = p.get(2).copied().unwrap_or(100.0) * 0.01;
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        for i in 0..l.len() {
+            if self.count == 0 {
+                // 2^bits levels: -levels ..= levels - 1
+                let q = |x: f32| (x * self.levels).round().clamp(-self.levels, self.levels - 1.0) / self.levels;
+                self.held = [q(l[i]), q(r[i])];
+            }
+            self.count = (self.count + 1) % self.hold;
+            l[i] = l[i] * (1.0 - self.mix) + self.held[0] * self.mix;
+            r[i] = r[i] * (1.0 - self.mix) + self.held[1] * self.mix;
+        }
+    }
+}
+
+/// Timing jitter / wow and flutter: a short delay line whose delay moves by random (or sine) amounts.
+#[derive(Clone)]
+pub struct JitterUnit {
+    buf: [Vec<f32>; 2],
+    pos: usize,
+    fs: f32,
+    depth: f32,
+    rate: f32,
+    sine: bool,
+    mix: f32,
+    phase: f32,
+    rng: u32,
+    from: f32,
+    to: f32,
+}
+
+impl JitterUnit {
+    pub fn new(fs: f32) -> Self {
+        let n = ((fs * 0.006) as usize + 64).next_power_of_two();
+        Self { buf: [vec![0.0; n], vec![0.0; n]], pos: 0, fs, depth: 0.0, rate: 8.0, sine: false, mix: 1.0, phase: 0.0, rng: 0x1234_5678, from: 0.0, to: 0.0 }
+    }
+
+    pub fn set(&mut self, p: &[f32]) {
+        // depth in microseconds (the delay swings by +- this much)
+        self.depth = p.first().copied().unwrap_or(100.0).clamp(0.0, 2000.0) * 1e-6 * self.fs;
+        self.rate = p.get(1).copied().unwrap_or(8.0).max(0.05);
+        self.sine = p.get(2).copied().unwrap_or(0.0) >= 0.5;
+        self.mix = p.get(3).copied().unwrap_or(100.0) * 0.01;
+    }
+
+    fn rand(&mut self) -> f32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0
+    }
+
+    /// Delay of the unit in frames when the modulation is at its centre.
+    pub fn centre_delay(&self) -> f32 {
+        self.depth + 2.0
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        let mask = self.buf[0].len() - 1;
+        for i in 0..l.len() {
+            self.phase += self.rate / self.fs;
+            if self.phase >= 1.0 {
+                self.phase -= 1.0;
+                self.from = self.to;
+                self.to = self.rand();
+            }
+            let m = if self.sine { (2.0 * PI * self.phase).sin() } else { self.from + (self.to - self.from) * self.phase };
+            let d = (self.depth + 2.0 + self.depth * m).clamp(1.0, mask as f32 - 2.0);
+            let (di, fr) = (d.floor() as usize, d.fract());
+            for (c, v) in [&mut l[i], &mut r[i]].into_iter().enumerate() {
+                self.buf[c][self.pos & mask] = *v;
+                let a = self.buf[c][self.pos.wrapping_sub(di) & mask];
+                let b = self.buf[c][self.pos.wrapping_sub(di + 1) & mask];
+                let wet = a + (b - a) * fr;
+                *v = *v * (1.0 - self.mix) + wet * self.mix;
+            }
+            self.pos = self.pos.wrapping_add(1);
+        }
+    }
+}
+
+/// Tremolo: the level swings with a low frequency oscillator.
+#[derive(Clone, Default)]
+pub struct TremUnit {
+    rate: f32,
+    depth: f32,
+    shape: usize,
+    phase: f32,
+    fs: f32,
+}
+
+impl TremUnit {
+    pub fn set(&mut self, p: &[f32], fs: f32) {
+        self.fs = fs;
+        self.rate = p.first().copied().unwrap_or(5.0);
+        self.depth = p.get(1).copied().unwrap_or(50.0) * 0.01;
+        self.shape = p.get(2).copied().unwrap_or(0.0).round() as usize;
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        for i in 0..l.len() {
+            self.phase = (self.phase + self.rate / self.fs.max(1.0)).fract();
+            let s = match self.shape {
+                1 => 1.0 - 4.0 * (self.phase - 0.5).abs(),
+                2 => {
+                    // a square wave with short ramps (no clicks)
+                    ((self.phase * 2.0 * PI).sin() * 8.0).clamp(-1.0, 1.0)
+                }
+                _ => (self.phase * 2.0 * PI).sin(),
+            };
+            let g = 1.0 - self.depth * 0.5 * (1.0 - s);
+            l[i] *= g;
+            r[i] *= g;
+        }
+    }
+}
 // ---------------------------------------------------------------------- sample rate conversion
 
 /// Streaming resampler for one source: frames come in at the source rate, go out at the graph rate.
@@ -520,6 +828,128 @@ mod tests {
         assert!((g - 12.0).abs() < 0.5, "{g}");
     }
 
+    #[test]
+    fn eq_notch_depth_follows_the_gain_and_more_bands_work() {
+        let fs = 48000.0;
+        let mut eq = EqUnit::default();
+        // one notch at 1 kHz, -30 dB deep, plus a ninth band: 9 bands in all
+        let mut p: Vec<f32> = Vec::new();
+        for b in 0..9 {
+            p.extend(if b == 0 { [5.0, 1000.0, -30.0, 4.0] } else if b == 8 { [0.0, 4000.0, 6.0, 1.0] } else { [6.0, 1000.0, 0.0, 1.0] });
+        }
+        eq.set(&p, fs);
+        assert_eq!(eq.bands.len(), 9);
+        assert!((eq.response_db(fs, 1000.0) + 30.0).abs() < 1.0, "{}", eq.response_db(fs, 1000.0));
+        assert!(eq.response_db(fs, 100.0).abs() < 0.5);
+        assert!((eq.response_db(fs, 4000.0) - 6.0).abs() < 0.6);
+        // a shallower notch really is shallower
+        p[2] = -10.0;
+        eq.set(&p, fs);
+        assert!((eq.response_db(fs, 1000.0) + 10.0).abs() < 1.0);
+    }
+
+    /// Level (linear amplitude) of one frequency in a signal, by correlation over whole periods.
+    fn tone_level(x: &[f32], f: f32, fs: f32) -> f32 {
+        let (mut re, mut im) = (0f64, 0f64);
+        for (i, v) in x.iter().enumerate() {
+            let w = 2.0 * std::f64::consts::PI * f as f64 * i as f64 / fs as f64;
+            re += *v as f64 * w.cos();
+            im += *v as f64 * w.sin();
+        }
+        (2.0 * (re * re + im * im).sqrt() / x.len() as f64) as f32
+    }
+
+    #[test]
+    fn harmonics_node_makes_even_or_odd_harmonics() {
+        let fs = 48000.0;
+        let run = |even: f32, odd: f32| {
+            let mut u = HarmUnit::default();
+            u.set(&[even, odd, 0.0]);
+            let mut l = sine(1000.0, fs, 48000, 0.8);
+            let mut r = l.clone();
+            u.process(&mut l, &mut r);
+            l[8000..].to_vec()
+        };
+        let e = run(100.0, 0.0);
+        assert!(tone_level(&e, 2000.0, fs) > 0.15, "2nd {}", tone_level(&e, 2000.0, fs));
+        assert!(tone_level(&e, 3000.0, fs) < 0.01, "3rd {}", tone_level(&e, 3000.0, fs));
+        let o = run(0.0, 100.0);
+        assert!(tone_level(&o, 3000.0, fs) > 0.1, "3rd {}", tone_level(&o, 3000.0, fs));
+        assert!(tone_level(&o, 2000.0, fs) < 0.01, "2nd {}", tone_level(&o, 2000.0, fs));
+        // nothing added: the input comes back
+        let n = run(0.0, 0.0);
+        assert!((tone_level(&n, 1000.0, fs) - 0.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn distortions_stay_bounded_and_add_harmonics() {
+        let fs = 48000.0;
+        for shape in 0..4 {
+            let mut u = DistUnit::default();
+            u.set(&[24.0, shape as f32, 20000.0, 100.0, 0.0], fs);
+            let mut l = sine(500.0, fs, 24000, 0.9);
+            let mut r = l.clone();
+            u.process(&mut l, &mut r);
+            let peak = l.iter().fold(0f32, |m, v| m.max(v.abs()));
+            assert!(peak <= 1.5 && peak > 0.2, "shape {shape} peak {peak}");
+            let h3 = tone_level(&l[4000..], 1500.0, fs);
+            let h2 = tone_level(&l[4000..], 1000.0, fs);
+            if shape == 2 {
+                assert!(h2 > 0.02, "asymmetric clipping makes even harmonics: {h2}");
+            }
+            if shape == 0 || shape == 1 {
+                assert!(h3 > 0.02 && h2 < 0.01, "symmetric clipping makes odd harmonics: h2 {h2} h3 {h3}");
+            }
+        }
+        let mut fz = FuzzUnit::default();
+        fz.set(&[100.0, 0.0, 8000.0, -6.0], fs);
+        let mut l = sine(200.0, fs, 24000, 0.5);
+        let mut r = l.clone();
+        fz.process(&mut l, &mut r);
+        assert!(l.iter().all(|v| v.abs() <= 1.0) && l.iter().any(|v| v.abs() > 0.2));
+    }
+
+    #[test]
+    fn bitcrusher_jitter_and_tremolo() {
+        let fs = 48000.0;
+        let mut c = CrushUnit::default();
+        c.set(&[3.0, 1.0, 100.0]);
+        let mut l = sine(300.0, fs, 4800, 0.9);
+        let mut r = l.clone();
+        c.process(&mut l, &mut r);
+        let mut levels: Vec<i32> = l.iter().map(|v| (v * 1000.0).round() as i32).collect();
+        levels.sort();
+        levels.dedup();
+        assert!(levels.len() <= 8, "3 bits have at most 8 levels, got {}", levels.len());
+        // held samples: with a hold of 8 the output changes at most every 8th frame
+        let mut c2 = CrushUnit::default();
+        c2.set(&[24.0, 8.0, 100.0]);
+        let mut l = sine(300.0, fs, 4800, 0.9);
+        let mut r = l.clone();
+        c2.process(&mut l, &mut r);
+        assert!(l.windows(2).filter(|w| w[0] != w[1]).count() <= 4800 / 8 + 1);
+        // jitter with no depth is a plain short delay; with depth it still carries the signal
+        let mut j = JitterUnit::new(fs);
+        j.set(&[0.0, 8.0, 0.0, 100.0]);
+        let mut l = sine(1000.0, fs, 9600, 0.5);
+        let mut r = l.clone();
+        j.process(&mut l, &mut r);
+        assert!((tone_level(&l[2000..], 1000.0, fs) - 0.5).abs() < 0.02);
+        j.set(&[800.0, 20.0, 0.0, 100.0]);
+        let mut l = sine(1000.0, fs, 9600, 0.5);
+        let mut r = l.clone();
+        j.process(&mut l, &mut r);
+        let clean = tone_level(&l[2000..], 1000.0, fs);
+        assert!(clean < 0.5 && clean > 0.1, "jitter smears the tone: {clean}");
+        // tremolo at full depth goes to silence at the bottom of its swing
+        let mut t = TremUnit::default();
+        t.set(&[10.0, 100.0, 0.0], fs);
+        let mut l = vec![1.0f32; 4800];
+        let mut r = l.clone();
+        t.process(&mut l, &mut r);
+        let (lo, hi) = l.iter().fold((9f32, -9f32), |(a, b), v| (a.min(*v), b.max(*v)));
+        assert!(lo < 0.05 && hi > 0.95, "{lo} {hi}");
+    }
     #[test]
     fn filters_cut_the_right_side() {
         let fs = 48000.0;

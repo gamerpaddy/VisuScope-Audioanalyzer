@@ -25,8 +25,10 @@ pub struct Counters {
     pub eng_tick_sum_us: AtomicU64,
     pub eng_ticks: AtomicU64,
     pub eng_late: AtomicU32,
-    /// frames per tick of the routing graph (last)
+    /// frames per tick of the routing graph (last), summed over the ticks of a second, and the graph rate
     pub eng_block: AtomicU32,
+    pub eng_block_sum: AtomicU64,
+    pub eng_sr: AtomicU32,
 }
 
 pub static C: Counters = Counters {
@@ -42,6 +44,8 @@ pub static C: Counters = Counters {
     eng_ticks: AtomicU64::new(0),
     eng_late: AtomicU32::new(0),
     eng_block: AtomicU32::new(0),
+    eng_block_sum: AtomicU64::new(0),
+    eng_sr: AtomicU32::new(0),
 };
 
 /// Bookkeeping a capture callback keeps for itself; `done` publishes it.
@@ -92,6 +96,9 @@ pub struct Sec {
     pub callbacks: u32,
     pub eng_tick_max_ms: f32,
     pub eng_tick_avg_ms: f32,
+    /// average frames per tick of the routing engine and what that is in milliseconds
+    pub eng_block_frames: f32,
+    pub eng_block_ms: f32,
     /// system wide, percent (None when the counters are not available)
     pub dpc: f32,
     pub dpc_worst: f32,
@@ -119,6 +126,18 @@ pub struct State {
     pub counters_ok: bool,
     pub total_hiccups: u32,
     pub cpu_name: String,
+}
+
+/// Safety buffer in milliseconds (Options): extra audio the outputs and the routing graph hold back so that short
+/// stalls of the system do not become gaps in the sound. Costs the same amount of delay.
+static SAFETY_MS: AtomicU32 = AtomicU32::new(0);
+
+pub fn safety_ms() -> u32 {
+    SAFETY_MS.load(Relaxed)
+}
+
+pub fn set_safety_ms(ms: u32) {
+    SAFETY_MS.store(ms.min(1000), Relaxed);
 }
 
 pub fn state() -> &'static Mutex<State> {
@@ -177,6 +196,9 @@ fn sample_loop() {
         let ticks = C.eng_ticks.swap(0, Relaxed).max(1);
         s.eng_tick_max_ms = C.eng_tick_max_us.swap(0, Relaxed) as f32 / 1000.0;
         s.eng_tick_avg_ms = C.eng_tick_sum_us.swap(0, Relaxed) as f32 / ticks as f32 / 1000.0;
+        s.eng_block_frames = C.eng_block_sum.swap(0, Relaxed) as f32 / ticks as f32;
+        let esr = C.eng_sr.load(Relaxed);
+        s.eng_block_ms = if esr > 0 { s.eng_block_frames * 1000.0 / esr as f32 } else { 0.0 };
         if let Some(c) = sys.as_mut() {
             if let Some(v) = c.read() {
                 s.dpc = v.dpc;
@@ -217,7 +239,10 @@ fn sample_loop() {
         // the first seconds (devices opening, windows being created) are not what the user wants to hear about
         if !what.is_empty() && s.t > 6.0 {
             s.hiccup = true;
-            let cause = diagnose(&s, d_late > 0 || gap_bad);
+            let mut cause = diagnose(&s, d_late > 0 || gap_bad);
+            if d_uf > 0 || gap_bad {
+                cause.0.push_str(" Raising the safety buffer in Options adds delay but hides short stalls.");
+            }
             let mut st = state().lock();
             st.total_hiccups += 1;
             st.events.push_front(Event { t: s.t, what: what.join("; "), cause: cause.0, severe: cause.1 });

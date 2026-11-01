@@ -13,8 +13,7 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Any device channel as L and R, with a level meter per channel
 - Microphone calibration files (0 / 90 degrees, e.g. UMIK-1) correct the spectrum views
 - Reconnects when the device format changes
-- Plays and analyzes audio files (WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ALAC, MKV) with optional sound output
-- Records to WAV (16/24 bit, 32 bit float) with pre-roll
+- Audio files (WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ALAC, MKV) and recording are handled by the Timeline: load, play and analyse them there, record any input to WAV (float)
 
 **Views**
 - Spectrum: FFT 1024 to 262144, many window functions, live/average/max/min traces, cursors, snapshots, CSV export
@@ -70,6 +69,8 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Stereo tracks can show their left and right channel as sub-tracks (`LR` button) with their own mute and gain; right-click a track to convert it to mono or split it into a left and a right track (panned hard left / right)
 - Right-click a track or an empty lane to import a file onto that track or to choose the input it records from
 - Mouse wheel zooms, Shift+wheel pans, Alt+wheel (or the wheel over the headers) scrolls the tracks; double-click a slider to type a value, right-click resets it
+- Clips snap to each other, the playhead and the grid (hold Shift to move freely); a clip must be selected before it can be moved, trimmed or faded, and the playback cursor is set in the ruler (a white guide line shows where). A clip that is moved over another one crossfades with it instead of clicking
+- Ctrl + click on the track names selects several tracks: *Merge selected tracks into one* mixes them as they sound into a single track (undo brings the originals back), *Mix to a new track* keeps them. The analysis panel goes below the tracks, to the right of them in a low wide window, and is left out when there is no room
 - Playback leaves the live input in the analysers by default. Turn on *Output > Show the timeline in the analysers* (or press *Loop & play*) to let spectrum, scope, loudness ... follow the master or the selected track
 - Analysis of the selection: levels, LUFS, true peak, clipping, spectrum and spectrogram; store the spectrum as a trace
 - Mixdown, stems and bounce; projects are saved as `.vsproj` and restored automatically
@@ -84,11 +85,13 @@ Off by default; switch it on in **Options > Routing graph (node editor)**. Every
 
 **Nodes.** Press **Space** over the canvas to search all nodes (type `eq`, `comp`, `input` ...). Drag from an output dot to an input dot to connect; an output can feed any number of inputs, which is how you split a signal to the analyser, a timeline track and an output at once. Drag an input dot away to move or drop a wire, drop a wire on empty canvas to add a node that is connected right away, right-click a wire to insert a node into it. `B` bypasses a node, `x` removes it, Delete removes the selection, Shift-drag selects several, drag the background to pan, `F` fits everything.
 
-- **Sources:** input devices (pick any two channels as left / right, with a trim in dB and a delay in ms to line up interfaces), generators, the timeline (master or one track), the file player
-- **Effects:** gain / polarity, 4-band equalizer with live curve, high- and low-pass (12 to 48 dB/oct), compressor and limiter (gain reduction meters), noise gate, delay, stereo width and balance, channel utility (mono, swap, invert)
-- **Routing:** a mixer with up to 8 inputs (level and mute each)
-- **Sinks:** the analyser (spectrum, scope, loudness ... read what is connected to it), output devices, timeline tracks (arm a track and connect something to its record node)
+- **Sources:** input devices (pick any two channels as left / right, with a trim in dB and a delay in ms to line up several interfaces), generators, the timeline (master or one track)
+- **Effects:** gain / polarity, equalizer (up to 12 bands, notch with adjustable depth, live curve, *Draw* mode: drag the dots in the graph, wheel = width, click empty space = new band, right-click a dot = remove), high- and low-pass (12 to 48 dB/oct), compressor and limiter (gain reduction meters), noise gate, delay, stereo width and balance, channel utility (mono, swap, invert)
+- **Distortion and character:** harmonics (add even or odd harmonics, 2nd / 4th ... or 3rd / 5th ...), distortion (soft, hard clip, asymmetric, fold-back, with tone and mix), fuzz (with a gate that sputters), bit crusher (bits and sample hold), jitter / wow and flutter (random or sine timing modulation), tremolo
+- **Routing:** a mixer with 1 to 8 inputs (level and mute each), *Split left / right* (two outputs, one channel each) and *Merge left / right* (two inputs become one stereo signal). Every wire carries a stereo pair: the dot shows the left half in cyan and the right half in pink; split and merge ports show one channel
+- **Sinks:** the analyser (spectrum, scope, loudness ... read what is connected to it), output devices, timeline tracks (arm a track and connect something to its record node). Connect *Timeline out* (master or a track) to a *Timeline record* node to record the master out, or a processed track, onto a new track inside the program; the delay of the loop is compensated
 
+The *Routings* menu in the toolbar saves the current patch under a name and lists all saved routings to load or delete. The mouse wheel zooms the node window about the pointer (Alt + wheel pans, the zoom button resets to 100 %).
 Each node shows a level meter; wires brighten with the signal. A loop is refused, and an output that is captured by the input feeding it is marked as feedback. The graph is saved automatically and restored at the next start.
 
 ![Generators](docs/generators.png)
@@ -100,6 +103,10 @@ Each node shows a level meter; wires brighten with the signal. A loop is refused
 ![Layout previews](docs/layouts.png)
 
 The Layouts menu shows every preset as a small picture of its arrangement (also for presets you saved). Auto tiling gives the heaviest window the most room (the routing graph first) and lays the timeline out as a full-width strip so it stays wider than tall whenever the area allows it.
+
+## Safety buffer
+
+*Options > Safety buffer* holds back extra audio before it is played (output devices, the monitor, timeline playback) and cushions the sources of the routing graph. It adds the same amount of delay and hides short stalls of the system, so use it when the Profiler reports an output that ran dry or the sound crackles.
 
 ## Profiler
 

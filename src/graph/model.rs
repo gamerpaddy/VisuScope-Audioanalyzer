@@ -10,7 +10,6 @@ pub enum Kind {
     Input,
     Generator,
     TimelineOut,
-    FilePlayer,
     Gain,
     Eq,
     Filter,
@@ -18,9 +17,19 @@ pub enum Kind {
     Limiter,
     Gate,
     Delay,
+    Harmonics,
+    Distortion,
+    Fuzz,
+    Crusher,
+    Jitter,
+    Tremolo,
     Stereo,
     Utility,
     Mixer,
+    /// stereo in, two outputs: the left channel and the right channel, each on both sides
+    Split,
+    /// two inputs (left, right) made into one stereo signal
+    Merge,
     Analyzer,
     Output,
     TimelineRec,
@@ -73,10 +82,22 @@ const P_COMP: &[ParamDef] = &[
 const P_LIMIT: &[ParamDef] = &[s("Ceiling", -24.0, 0.0, -1.0, " dB"), l("Release", 1.0, 500.0, 60.0, " ms")];
 const P_GATE: &[ParamDef] = &[s("Threshold", -90.0, 0.0, -50.0, " dB"), l("Attack", 0.1, 50.0, 2.0, " ms"), l("Release", 5.0, 1000.0, 120.0, " ms"), s("Range", -90.0, 0.0, -80.0, " dB")];
 const P_DELAY: &[ParamDef] = &[s("Time", 0.0, 2000.0, 250.0, " ms"), s("Feedback", 0.0, 95.0, 30.0, " %"), s("Mix", 0.0, 100.0, 50.0, " %")];
+const P_HARM: &[ParamDef] = &[s("Even", 0.0, 100.0, 30.0, " %"), s("Odd", 0.0, 100.0, 0.0, " %"), s("Output", -24.0, 12.0, 0.0, " dB")];
+const P_DIST: &[ParamDef] = &[
+    s("Drive", 0.0, 48.0, 12.0, " dB"),
+    c("Shape", 0, &["Soft (tube-like)", "Hard clip", "Asymmetric (even)", "Fold-back"]),
+    l("Tone", 500.0, 20000.0, 12000.0, " Hz"),
+    s("Mix", 0.0, 100.0, 100.0, " %"),
+    s("Output", -36.0, 12.0, -6.0, " dB"),
+];
+const P_FUZZ: &[ParamDef] = &[s("Fuzz", 0.0, 100.0, 70.0, " %"), s("Gate", 0.0, 100.0, 10.0, " %"), l("Tone", 300.0, 20000.0, 5000.0, " Hz"), s("Output", -36.0, 12.0, -10.0, " dB")];
+const P_CRUSH: &[ParamDef] = &[s("Bits", 1.0, 24.0, 8.0, ""), s("Hold", 1.0, 64.0, 1.0, ""), s("Mix", 0.0, 100.0, 100.0, " %")];
+const P_JITTER: &[ParamDef] = &[s("Depth", 0.0, 2000.0, 100.0, " us"), l("Rate", 0.1, 5000.0, 8.0, " Hz"), c("Shape", 0, &["Random", "Sine"]), s("Mix", 0.0, 100.0, 100.0, " %")];
+const P_TREM: &[ParamDef] = &[l("Rate", 0.1, 30.0, 5.0, " Hz"), s("Depth", 0.0, 100.0, 50.0, " %"), c("Shape", 0, &["Sine", "Triangle", "Square"])];
 const P_STEREO: &[ParamDef] = &[s("Width", 0.0, 200.0, 100.0, " %"), s("Balance", -100.0, 100.0, 0.0, " %")];
 const P_UTIL: &[ParamDef] = &[c("Mode", 0, &["Stereo (through)", "Left to both", "Right to both", "Mono sum", "Swap L/R", "Invert left", "Invert right", "Invert both"])];
 const P_MIXER: &[ParamDef] = &[
-    s("Inputs", 2.0, MIX_MAX as f32, 4.0, ""),
+    s("Inputs", 1.0, MIX_MAX as f32, 4.0, ""),
     s("Master", -60.0, 12.0, 0.0, " dB"),
     s("In 1", -60.0, 12.0, 0.0, " dB"), s("In 2", -60.0, 12.0, 0.0, " dB"), s("In 3", -60.0, 12.0, 0.0, " dB"), s("In 4", -60.0, 12.0, 0.0, " dB"),
     s("In 5", -60.0, 12.0, 0.0, " dB"), s("In 6", -60.0, 12.0, 0.0, " dB"), s("In 7", -60.0, 12.0, 0.0, " dB"), s("In 8", -60.0, 12.0, 0.0, " dB"),
@@ -102,11 +123,10 @@ const FX: (u8, u8, u8) = (90, 110, 170);
 const SNK: (u8, u8, u8) = (170, 100, 80);
 
 impl Kind {
-    pub const ALL: [Kind; 17] = [
+    pub const ALL: [Kind; 24] = [
         Kind::Input,
         Kind::Generator,
         Kind::TimelineOut,
-        Kind::FilePlayer,
         Kind::Gain,
         Kind::Eq,
         Kind::Filter,
@@ -114,9 +134,17 @@ impl Kind {
         Kind::Limiter,
         Kind::Gate,
         Kind::Delay,
+        Kind::Harmonics,
+        Kind::Distortion,
+        Kind::Fuzz,
+        Kind::Crusher,
+        Kind::Jitter,
+        Kind::Tremolo,
         Kind::Stereo,
         Kind::Utility,
         Kind::Mixer,
+        Kind::Split,
+        Kind::Merge,
         Kind::Analyzer,
         Kind::Output,
         Kind::TimelineRec,
@@ -128,7 +156,6 @@ impl Kind {
             Kind::Input => k("Input device", "Source", "microphone line interface loopback capture adc", 0, 1, P_INPUT, SRC),
             Kind::Generator => k("Generator", "Source", "tone sine square noise sweep signal", 0, 1, P_GEN, SRC),
             Kind::TimelineOut => k("Timeline out", "Source", "daw track master playback", 0, 1, P_NONE, SRC),
-            Kind::FilePlayer => k("File player", "Source", "recorder wav mp3 file playback", 0, 1, P_NONE, SRC),
             Kind::Gain => k("Gain", "Effect", "volume level trim phase invert", 1, 1, P_GAIN, FX),
             Kind::Eq => k("Equalizer", "Effect", "eq parametric bell shelf tone", 1, 1, P_EQ, FX),
             Kind::Filter => k("Filter", "Effect", "highpass lowpass hp lp cut butterworth", 1, 1, P_FILTER, FX),
@@ -136,9 +163,17 @@ impl Kind {
             Kind::Limiter => k("Limiter", "Effect", "dynamics ceiling brickwall peak", 1, 1, P_LIMIT, FX),
             Kind::Gate => k("Noise gate", "Effect", "dynamics expander silence", 1, 1, P_GATE, FX),
             Kind::Delay => k("Delay", "Effect", "echo time feedback", 1, 1, P_DELAY, FX),
+            Kind::Harmonics => k("Harmonics (even / odd)", "Effect", "even odd harmonics exciter saturation second third overtones", 1, 1, P_HARM, FX),
+            Kind::Distortion => k("Distortion", "Effect", "overdrive distort clip saturate drive tube fold", 1, 1, P_DIST, FX),
+            Kind::Fuzz => k("Fuzz", "Effect", "fuzz box guitar clip sputter", 1, 1, P_FUZZ, FX),
+            Kind::Crusher => k("Bit crusher", "Effect", "bitcrusher bit depth sample rate reduce lofi quantise", 1, 1, P_CRUSH, FX),
+            Kind::Jitter => k("Jitter / wow & flutter", "Effect", "jitter clock timing wow flutter vibrato modulation", 1, 1, P_JITTER, FX),
+            Kind::Tremolo => k("Tremolo", "Effect", "tremolo amplitude modulation lfo", 1, 1, P_TREM, FX),
             Kind::Stereo => k("Stereo width", "Effect", "width balance pan mid side", 1, 1, P_STEREO, FX),
             Kind::Utility => k("Channel utility", "Effect", "mono swap invert left right channel phase", 1, 1, P_UTIL, FX),
             Kind::Mixer => k("Mixer", "Routing", "mix sum combine merge bus", MIX_MAX, 1, P_MIXER, (150, 120, 70)),
+            Kind::Split => k("Split left / right", "Routing", "split channels left right separate mono dual", 1, 2, P_NONE, (150, 120, 70)),
+            Kind::Merge => k("Merge left / right", "Routing", "merge combine channels left right stereo join", 2, 1, P_NONE, (150, 120, 70)),
             Kind::Analyzer => k("Analyzer", "Sink", "spectrum scope analysis meter display", 1, 0, P_NONE, SNK),
             Kind::Output => k("Output device", "Sink", "speakers headphones playback monitor dac", 1, 0, P_OUTPUT, SNK),
             Kind::TimelineRec => k("Timeline record", "Sink", "daw track record arm", 1, 0, P_NONE, SNK),
@@ -154,7 +189,6 @@ impl Kind {
             Kind::Input => "in",
             Kind::Generator => "gen",
             Kind::TimelineOut => "tlo",
-            Kind::FilePlayer => "file",
             Kind::Gain => "gain",
             Kind::Eq => "eq",
             Kind::Filter => "filt",
@@ -162,9 +196,17 @@ impl Kind {
             Kind::Limiter => "lim",
             Kind::Gate => "gate",
             Kind::Delay => "dly",
+            Kind::Harmonics => "harm",
+            Kind::Distortion => "dist",
+            Kind::Fuzz => "fuzz",
+            Kind::Crusher => "crush",
+            Kind::Jitter => "jit",
+            Kind::Tremolo => "trem",
             Kind::Stereo => "wid",
             Kind::Utility => "util",
             Kind::Mixer => "mix",
+            Kind::Split => "split",
+            Kind::Merge => "merge",
             Kind::Analyzer => "ana",
             Kind::Output => "out",
             Kind::TimelineRec => "tlr",
@@ -204,7 +246,7 @@ impl Node {
     /// Number of input ports (a mixer has as many as its "Inputs" parameter says).
     pub fn inputs(&self) -> usize {
         match self.kind {
-            Kind::Mixer => (self.p.first().copied().unwrap_or(4.0).round() as usize).clamp(2, MIX_MAX),
+            Kind::Mixer => (self.p.first().copied().unwrap_or(4.0).round() as usize).clamp(1, MIX_MAX),
             k => k.info().inputs,
         }
     }
@@ -221,6 +263,8 @@ impl Node {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Edge {
     pub from: NodeId,
+    /// output of `from` (only a split node has a second one)
+    pub from_port: u8,
     pub to: NodeId,
     /// input port of `to`
     pub port: u8,
@@ -284,11 +328,19 @@ impl Graph {
         false
     }
 
-    /// Connect the output of `from` to an input port of `to`. An existing connection on that port is replaced.
+    /// Connect the (first) output of `from` to an input port of `to`. An existing connection on that port is replaced.
     pub fn connect(&mut self, from: NodeId, to: NodeId, port: u8) -> Result<(), &'static str> {
+        self.connect_from(from, 0, to, port)
+    }
+
+    /// Same, from a chosen output of `from`.
+    pub fn connect_from(&mut self, from: NodeId, from_port: u8, to: NodeId, port: u8) -> Result<(), &'static str> {
         let (Some(f), Some(t)) = (self.node(from), self.node(to)) else { return Err("unknown node") };
         if f.outputs() == 0 {
             return Err("this node has no output");
+        }
+        if from_port as usize >= f.outputs() {
+            return Err("this node has no such output");
         }
         if port as usize >= t.inputs() {
             return Err("this node has no such input");
@@ -297,7 +349,7 @@ impl Graph {
             return Err("that would make a loop");
         }
         self.disconnect(to, port);
-        self.edges.push(Edge { from, to, port });
+        self.edges.push(Edge { from, from_port, to, port });
         Ok(())
     }
 
@@ -352,7 +404,7 @@ impl Graph {
             out.push_str(&format!("node {}|{}|{}|{}|{}|{}|{}\n", n.id, n.kind.code(), n.x, n.y, n.bypass as u8, esc(&n.s), p.join(",")));
         }
         for e in &self.edges {
-            out.push_str(&format!("edge {}|{}|{}\n", e.from, e.to, e.port));
+            out.push_str(&format!("edge {}|{}|{}|{}\n", e.from, e.to, e.port, e.from_port));
         }
         out
     }
@@ -377,10 +429,15 @@ impl Graph {
                 n.bypass = f[4] == "1";
                 n.s = unesc(f[5]);
                 for (i, v) in f[6].split(',').enumerate() {
-                    if let (Some(slot), Ok(v)) = (n.p.get_mut(i), v.parse::<f32>()) {
-                        if v.is_finite() {
-                            *slot = v;
-                        }
+                    let Ok(v) = v.parse::<f32>() else { continue };
+                    if !v.is_finite() {
+                        continue;
+                    }
+                    if let Some(slot) = n.p.get_mut(i) {
+                        *slot = v;
+                    } else if kind == Kind::Eq && i == n.p.len() && i < 4 * 12 {
+                        // an equaliser keeps four values per extra band
+                        n.p.push(v);
                     }
                 }
                 g.next = g.next.max(id);
@@ -389,7 +446,7 @@ impl Graph {
                 let f: Vec<&str> = r.split('|').collect();
                 if f.len() >= 3 {
                     if let (Ok(a), Ok(b), Ok(p)) = (f[0].parse(), f[1].parse(), f[2].parse::<u8>()) {
-                        let _ = g.connect(a, b, p);
+                        let _ = g.connect_from(a, f.get(3).and_then(|v| v.parse().ok()).unwrap_or(0), b, p);
                     }
                 }
             }
@@ -449,6 +506,18 @@ mod tests {
         assert!(live.contains(&a) && live.contains(&m) && !live.contains(&dead));
         g.remove(m);
         assert!(g.edges.is_empty());
+    }
+
+    #[test]
+    fn an_equaliser_keeps_its_extra_bands_when_saved() {
+        let mut g = Graph::default();
+        let e = g.add(Kind::Eq, 0.0, 0.0);
+        g.node_mut(e).unwrap().p.extend([5.0, 2500.0, -20.0, 3.0, 0.0, 6000.0, 4.0, 1.5]);
+        let h = Graph::decode(&g.encode()).unwrap();
+        let p = &h.node(e).unwrap().p;
+        assert_eq!(p.len(), 24);
+        assert_eq!(&p[16..20], &[5.0, 2500.0, -20.0, 3.0]);
+        assert_eq!(p[23], 1.5);
     }
 
     #[test]

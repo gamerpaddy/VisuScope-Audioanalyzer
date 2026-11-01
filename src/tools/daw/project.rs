@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 /// Frames per overview block (min / max pairs for drawing waveforms).
 pub const OV_BLOCK: usize = 256;
+/// Length of the fades where a clip lies over another one (seconds).
+pub const XFADE_SECS: f32 = 0.012;
 pub const MAX_TRACKS: usize = 64;
 
 /// Audio that clips refer to. Immutable once created, shared between the UI, the play thread and undo steps.
@@ -394,13 +396,21 @@ impl Project {
             tl.fill(0.0);
             tr.fill(0.0);
             let mut any = false;
-            for c in t.clips.iter().filter(|c| !c.muted) {
+            let xf = ((XFADE_SECS * self.sr as f32) as i64).max(8);
+            for (ci, c) in t.clips.iter().enumerate().filter(|(_, c)| !c.muted) {
                 let a = start.max(c.start);
                 let b = (start + n as i64).min(c.end());
                 if a >= b {
                     continue;
                 }
                 any = true;
+                // overlapping clips: the one that comes later in the list (moved last, drawn on top) replaces what is
+                // under it, with short fades at the edges of the overlap
+                let uppers: Vec<(i64, i64)> = t.clips.iter().enumerate().filter(|(j, o)| *j > ci && !o.muted && o.start < b && o.end() > a).map(|(_, o)| (o.start, o.end())).collect();
+                let low_start = t.clips.iter().enumerate().any(|(j, o)| j < ci && !o.muted && o.start <= c.start && o.end() > c.start);
+                let low_end = t.clips.iter().enumerate().any(|(j, o)| j < ci && !o.muted && o.start < c.end() && o.end() >= c.end());
+                let crossing = !uppers.is_empty() || low_start || low_end;
+                let xlen = xf.min((c.len as i64 / 2).max(1));
                 let g = db_to_lin(c.gain_db);
                 let two = c.src.stereo();
                 let (pl, pr) = pan_gains(t.pan, two && t.chan == Chan::Stereo);
@@ -409,7 +419,22 @@ impl Project {
                 for f in a..b {
                     let rel = (f - c.start) as usize;
                     let si = c.src_index(rel);
-                    let e = if plain { g } else { c.env(rel, g) };
+                    let mut e = if plain { g } else { c.env(rel, g) };
+                    if crossing {
+                        if low_start && f - c.start < xlen {
+                            e *= smooth((f - c.start) as f32 / xlen as f32);
+                        }
+                        if low_end && c.end() - f <= xlen {
+                            e *= smooth((c.end() - f) as f32 / xlen as f32);
+                        }
+                        for &(us, ue) in &uppers {
+                            if f >= us && f < ue {
+                                let xu = xf.min((ue - us) / 2).max(1);
+                                let cover = smooth((f - us) as f32 / xu as f32).min(smooth((ue - f) as f32 / xu as f32));
+                                e *= 1.0 - cover;
+                            }
+                        }
+                    }
                     let (mut sl, mut sr) = (c.src.at(0, si), c.src.at(1, si));
                     if two {
                         sl *= cg[0];
@@ -685,6 +710,31 @@ mod tests {
         // left stays hard left at full level, right hard right
         let (l, r) = at(&p);
         assert!((l - 0.5).abs() < 1e-5 && (r - 0.25).abs() < 1e-5, "{l} {r}");
+    }
+
+    #[test]
+    fn overlapping_clips_crossfade_instead_of_clicking() {
+        let mut p = Project::new(48000);
+        let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        let flat = |v: f32, n: usize| Arc::new(Source::new(9, "c".into(), vec![vec![v; n]]));
+        p.add_clip(ti, flat(1.0, 4800), 0);
+        // a quieter clip lies on top of the middle of the first one (added last = on top)
+        p.add_clip(ti, flat(0.5, 960), 2000);
+        let (l, _) = p.render(0, 4800, None);
+        let pan = 1.0 / std::f32::consts::SQRT_2; // mono material is panned with -3 dB at the centre
+        // untouched parts are as before, the top clip replaces what is under it in the middle
+        assert!((l[500] - pan).abs() < 1e-3);
+        assert!((l[2480] - 0.5 * pan).abs() < 1e-3, "{}", l[2480]);
+        assert!((l[4000] - pan).abs() < 1e-3);
+        // around the edges the level moves smoothly: no jump bigger than a small step between samples
+        let worst = (1990..3000).map(|i| (l[i + 1] - l[i]).abs()).fold(0f32, f32::max);
+        assert!(worst < 0.05, "step {worst}");
+        // a clip without anything under it keeps its hard edge
+        let mut q = Project::new(48000);
+        let t2 = q.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        q.add_clip(t2, flat(1.0, 1000), 100);
+        let (m, _) = q.render(0, 1200, None);
+        assert!((m[100] - pan).abs() < 1e-3 && (m[1099] - pan).abs() < 1e-3);
     }
 
     #[test]

@@ -19,7 +19,8 @@ impl Queue {
     /// Append samples; if the output falls far behind (clock drift) the oldest ones are dropped.
     pub fn push(&mut self, l: &[f32], r: &[f32]) {
         self.buf.extend(l.iter().copied().zip(r.iter().copied()));
-        let cap = (self.src_sr as usize * 4 / 10).max(4096);
+        // the backlog that is tolerated grows with the safety buffer
+        let cap = (self.src_sr as usize * (400 + 2 * crate::prof::safety_ms() as usize) / 1000).max(4096);
         if self.buf.len() > cap {
             let drop = self.buf.len() - cap / 2;
             self.buf.drain(..drop);
@@ -126,11 +127,13 @@ where
                 return;
             }
             let g = f32::from_bits(gain.load(Relaxed));
+            let safety_ms = crate::prof::safety_ms() as usize;
             let Some(mut q) = q.try_lock() else { return };
             let step = q.src_sr.max(1) as f64 / out_sr as f64;
             // pre-buffer ~60 ms before (re)starting so short hiccups do not stutter
             if !primed {
-                if q.buf.len() < (q.src_sr as usize * 6 / 100).max(64) {
+                // 60 ms of cushion, plus the safety buffer chosen in Options
+                if q.buf.len() < (q.src_sr as usize * (60 + safety_ms) / 1000).max(64) {
                     return;
                 }
                 primed = true;

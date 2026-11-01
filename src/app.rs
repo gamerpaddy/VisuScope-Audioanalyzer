@@ -1,4 +1,4 @@
-﻿use crate::audio::{self, AudioHandle, DevInfo};
+use crate::audio::{self, AudioHandle, DevInfo};
 use crate::cal::{fmt_volts, Calib, Unit, DBU_REF_V};
 use crate::colormap::Cmap;
 use crate::dsp::{self, Window};
@@ -122,6 +122,8 @@ pub struct App {
     pub graph_applied: bool,
     pub graph_hook: bool,
     pub open_hook: bool,
+    /// extra delay in ms that keeps the outputs from running dry (see `prof::safety_ms`)
+    pub safety_ms: u32,
     /// all generators for the routing graph (the first is `tg`) and what was last handed to it
     pub gens_shared: Arc<parking_lot::Mutex<Vec<GenParams>>>,
     pub gen_extra: Vec<GenParams>,
@@ -337,6 +339,7 @@ impl App {
             graph_applied: false,
             graph_hook: false,
             open_hook: false,
+            safety_ms: 0,
             gens_shared: Arc::new(parking_lot::Mutex::new(vec![GenParams::default()])),
             gen_extra: Vec::new(),
             gen_tab: 0,
@@ -465,6 +468,8 @@ impl App {
         kv("auto_tile", &self.auto_tile);
         kv("win_snap", &self.snap_on);
         kv("graph_on", &self.graph_on);
+        kv("layout_ver", &2);
+        kv("safety_ms", &self.safety_ms);
         kv("meas_ch", &self.meas_ch);
         kv("readout_hz", &self.readout_hz);
         kv("fps_cap", &self.fps_cap);
@@ -599,6 +604,9 @@ impl App {
         set!(self.auto_tile, "auto_tile");
         set!(self.snap_on, "win_snap");
         set!(self.graph_on, "graph_on");
+        set!(self.safety_ms, "safety_ms");
+        self.safety_ms = self.safety_ms.min(1000);
+        crate::prof::set_safety_ms(self.safety_ms);
         set!(self.snap_peak, "snap_peak");
         if let Some(v) = get::<usize>(&m, "smooth_oct") {
             self.smooth_oct = v.min(SMOOTH_OCT.len() - 1);
@@ -727,14 +735,17 @@ impl App {
         let off = self.unit_off(0);
         self.db_lo += off;
         self.db_hi += off;
+        // layouts saved before the recorder window was removed number the tool windows one higher
+        let old_layout = get::<u32>(&m, "layout_ver").unwrap_or(1) < 2;
         for i in 0..WIN_COUNT {
-            if let Some(o) = get::<bool>(&m, &format!("w{i}_open")) {
+            let src = if old_layout && i >= crate::windows::BUILTIN { i + 1 } else { i };
+            if let Some(o) = get::<bool>(&m, &format!("w{src}_open")) {
                 self.wins[i].open = o;
             }
-            if let Some(o) = get::<bool>(&m, &format!("w{i}_collapsed")) {
+            if let Some(o) = get::<bool>(&m, &format!("w{src}_collapsed")) {
                 self.wins[i].collapsed = o;
             }
-            if let Some(r) = m.get(format!("w{i}_rect").as_str()) {
+            if let Some(r) = m.get(format!("w{src}_rect").as_str()) {
                 let v: Vec<f32> = r.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                 if v.len() == 4 && v[2] > 100.0 && v[3] > 80.0 {
                     self.wins[i].rect = Some(egui::Rect::from_min_size(egui::pos2(v[0], v[1]), egui::vec2(v[2], v[3])));

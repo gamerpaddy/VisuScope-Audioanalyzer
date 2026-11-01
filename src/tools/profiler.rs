@@ -100,9 +100,9 @@ impl Tool for Profiler {
             let worst10 = |f: fn(&Sec) -> f32| recent_secs.iter().map(|s| f(s)).fold(0f32, f32::max);
             let (fr, sr) = (prof::C.cb_frames.load(Relaxed), prof::C.cb_sr.load(Relaxed));
             let period = if sr > 0 { fr as f32 * 1000.0 / sr as f32 } else { 0.0 };
-            let blk = prof::C.eng_block.load(Relaxed);
-            let eng_sr = cx.sh.sr.load(Relaxed).max(1);
-            let block_ms = blk as f32 * 1000.0 / eng_sr as f32;
+            // the engine block changes with every tick: show the average of the last full second so that it can be read
+            let blk = last.eng_block_frames.round() as u32;
+            let block_ms = last.eng_block_ms;
             {
                 let row = |ui: &mut Ui, k: &str, v: String, warn: bool| {
                     ui.label(RichText::new(k).small().weak());
@@ -112,7 +112,7 @@ impl Tool for Profiler {
                 row(ui, "Late wake-ups in 10 s", format!(">2 ms: {}   >5 ms: {}   >10 ms: {}", recent_secs.iter().map(|s| s.late2).sum::<u32>(), recent_secs.iter().map(|s| s.late5).sum::<u32>(), recent_secs.iter().map(|s| s.late10).sum::<u32>()), recent_secs.iter().any(|s| s.late10 > 0));
                 row(ui, "Input callback", if sr > 0 { format!("buffer {period:.1} ms ({fr} frames @ {sr} Hz), worst gap {:.1} ms, worst run {:.2} ms", worst10(|s| s.cb_gap_max_ms), worst10(|s| s.cb_dur_max_ms)) } else { "no stream".into() }, period > 0.0 && worst10(|s| s.cb_gap_max_ms) > period * 2.5 + 4.0);
                 if cx.graph_on {
-                    row(ui, "Routing engine", format!("tick avg {:.2} ms, max {:.2} ms, block {blk} frames ({block_ms:.1} ms)", last.eng_tick_avg_ms, worst10(|s| s.eng_tick_max_ms)), worst10(|s| s.eng_tick_max_ms) > 8.0);
+                    row(ui, "Routing engine", format!("tick avg {:.2} ms, max {:.2} ms, block about {blk} frames ({block_ms:.0} ms)", last.eng_tick_avg_ms, worst10(|s| s.eng_tick_max_ms)), worst10(|s| s.eng_tick_max_ms) > 8.0);
                 }
                 row(ui, "Analysis (DSP thread)", format!("{:.2} ms per frame at {:.0} fps", cx.an.dsp_ms, cx.an.dsp_fps), cx.an.dsp_ms > 12.0);
                 if ok {
@@ -120,8 +120,9 @@ impl Tool for Profiler {
                     row(ui, "Interrupt time", format!("{:.1} %   {:.0} interrupts/s", last.intr, last.int_rate), last.intr >= 5.0);
                     row(ui, "CPU", format!("{:.0} %   queue {:.0}   {:.0} context switches/s", last.cpu, last.queue, last.ctx_rate), last.cpu >= 92.0);
                 }
-                let est = period + if cx.graph_on { block_ms } else { 0.0 } + 60.0;
-                row(ui, "Input to output delay", format!("about {est:.0} ms (input buffer {period:.0} ms + {} + output cushion 60 ms)", if cx.graph_on { format!("engine block {block_ms:.0} ms") } else { "no engine".into() }), false);
+                let safety = prof::safety_ms() as f32;
+                let est = period + if cx.graph_on { block_ms } else { 0.0 } + 60.0 + safety;
+                row(ui, "Input to output delay", format!("about {est:.0} ms (input buffer {period:.0} ms + {} + output cushion 60 ms + safety buffer {safety:.0} ms)", if cx.graph_on { format!("engine block {:.0} ms", (block_ms / 5.0).round() * 5.0) } else { "no engine".into() }), false);
             }
             bars(ui, "Timer latency", &secs, |s| s.wake_max_ms, 10.0, Some(5.0), " ms");
             bars(ui, "Input callback gap", &secs, |s| s.cb_gap_max_ms, (period * 3.0).max(20.0), if period > 0.0 { Some(period * 2.5 + 4.0) } else { None }, " ms");
@@ -144,7 +145,7 @@ impl Tool for Profiler {
             }
             egui::CollapsingHeader::new(RichText::new("What helps against crackling").small()).default_open(false).show(ui, |ui| {
                 for t in [
-                    "Raise the audio buffer of the interface (its control panel); it trades delay for safety.",
+                    "Raise the safety buffer in Options (adds a little delay, hides short stalls of the system), or the audio buffer of the interface (its control panel).",
                     "Windows power plan: High performance; switch off USB selective suspend and core parking.",
                     "DPC time above a few percent: update or disable the driver that LatencyMon names (network, Wi-Fi, graphics, USB).",
                     "Lower the load: smaller FFT, lower FFT rate, fewer open windows, a lower UI frame rate cap in Options.",

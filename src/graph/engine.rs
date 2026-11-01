@@ -36,7 +36,6 @@ pub struct Bus {
     /// the graph is on: the timeline and the file player hand their audio to it
     pub on: AtomicBool,
     pub tl: Mutex<TlBus>,
-    pub file: Mutex<(u32, VecDeque<[f32; 2]>)>,
     /// timeline tracks (id, name), published by the timeline for the node editor
     pub tracks: Mutex<Vec<(u32, String)>>,
     /// timeline tracks whose own signal the graph reads
@@ -45,6 +44,8 @@ pub struct Bus {
     pub virt: Mutex<HashMap<String, Arc<Capture>>>,
     /// tracks that asked for a record node
     pub rec_requests: Mutex<Vec<(u32, String)>>,
+    /// record nodes (capture ids) that receive audio from a timeline output: a loopback inside the program
+    pub virt_loop: Mutex<std::collections::HashSet<String>>,
 }
 
 pub fn bus() -> &'static Bus {
@@ -77,12 +78,6 @@ impl Bus {
         let mut t = self.tl.lock();
         t.master.clear();
         t.tracks.clear();
-    }
-
-    pub fn file_push(&self, sr: u32, l: &[f32], r: &[f32]) {
-        let mut f = self.file.lock();
-        f.0 = sr;
-        push_capped(&mut f.1, sr, l, r);
     }
 
     /// Ask the node editor for a "Timeline record" node of this track.
@@ -184,7 +179,6 @@ enum Rt {
     Input { dev: String, rs: Option<Rs>, li: usize, ri: usize, gain: f32, delay: DelayUnit, primed: bool },
     Gen { st: GenState, idx: usize },
     Tl { track: Option<u32>, rs: Option<Rs>, sr: u32, primed: bool },
-    File { rs: Option<Rs>, sr: u32, primed: bool },
     Gain(f32),
     Width { w: f32, b: f32 },
     Util(usize),
@@ -194,7 +188,15 @@ enum Rt {
     Lim(LimiterUnit),
     Gate(GateUnit),
     Dly(DelayUnit),
+    Harm(HarmUnit),
+    Dist(DistUnit),
+    Fuzz(FuzzUnit),
+    Crush(CrushUnit),
+    Jit(JitterUnit),
+    Trem(TremUnit),
     Mix { gain: [f32; MIX_MAX], mute: [bool; MIX_MAX], master: f32 },
+    Split,
+    Merge,
     Out { dev: String, q: Arc<Mutex<Queue>>, status: Arc<Mutex<String>>, _h: Option<monitor::Handle>, gain: f32, mute: bool },
     Rec { id: String },
 }
@@ -203,9 +205,11 @@ struct RtNode {
     id: NodeId,
     kind: Kind,
     bypass: bool,
-    /// per input port: index of the feeding node in the processing order
-    src: Vec<Option<usize>>,
+    /// per input port: the feeding node (index in the processing order) and which of its outputs
+    src: Vec<Option<(usize, u8)>>,
     out: [Vec<f32>; 2],
+    /// second output (split nodes only)
+    out2: [Vec<f32>; 2],
     peak: [f32; 2],
     extra: f32,
     rt: Rt,
@@ -329,14 +333,21 @@ impl Run {
             Kind::Input => Rt::Input { dev: String::new(), rs: None, li: 0, ri: 1, gain: 1.0, delay: DelayUnit::new(0.5, fs), primed: false },
             Kind::Generator => Rt::Gen { st: GenState::new(self.rate as f64), idx: 0 },
             Kind::TimelineOut => Rt::Tl { track: None, rs: None, sr: 0, primed: false },
-            Kind::FilePlayer => Rt::File { rs: None, sr: 0, primed: false },
             Kind::Eq => Rt::Eq(EqUnit::default()),
             Kind::Filter => Rt::Filter(FilterUnit::default()),
             Kind::Comp => Rt::Comp(CompUnit::default()),
             Kind::Limiter => Rt::Lim(LimiterUnit::default()),
             Kind::Gate => Rt::Gate(GateUnit::default()),
             Kind::Delay => Rt::Dly(DelayUnit::new(2.0, fs)),
+            Kind::Harmonics => Rt::Harm(HarmUnit::default()),
+            Kind::Distortion => Rt::Dist(DistUnit::default()),
+            Kind::Fuzz => Rt::Fuzz(FuzzUnit::default()),
+            Kind::Crusher => Rt::Crush(CrushUnit::default()),
+            Kind::Jitter => Rt::Jit(JitterUnit::new(fs)),
+            Kind::Tremolo => Rt::Trem(TremUnit::default()),
             Kind::Mixer => Rt::Mix { gain: [1.0; MIX_MAX], mute: [false; MIX_MAX], master: 1.0 },
+            Kind::Split => Rt::Split,
+            Kind::Merge => Rt::Merge,
             Kind::Output => {
                 let q = Arc::new(Mutex::new(Queue { buf: VecDeque::new(), src_sr: self.rate }));
                 // the sentinel device name makes `apply` open the stream
@@ -348,7 +359,8 @@ impl Run {
             Kind::Utility => Rt::Util(0),
             Kind::Analyzer => Rt::None,
         };
-        RtNode { id: n.id, kind: n.kind, bypass: false, src: Vec::new(), out: blank(), peak: [0.0; 2], extra: 0.0, rt }
+        let out2 = if n.kind == Kind::Split { blank() } else { [Vec::new(), Vec::new()] };
+        RtNode { id: n.id, kind: n.kind, bypass: false, src: Vec::new(), out: blank(), out2, peak: [0.0; 2], extra: 0.0, rt }
     }
 
     /// Bring a runtime node in line with the parameters of its graph node.
@@ -382,6 +394,12 @@ impl Run {
             Rt::Lim(u) => u.set(&n.p, fs),
             Rt::Gate(u) => u.set(&n.p, fs),
             Rt::Dly(u) => u.set(&n.p, fs),
+            Rt::Harm(u) => u.set(&n.p),
+            Rt::Dist(u) => u.set(&n.p, fs),
+            Rt::Fuzz(u) => u.set(&n.p, fs),
+            Rt::Crush(u) => u.set(&n.p),
+            Rt::Jit(u) => u.set(&n.p),
+            Rt::Trem(u) => u.set(&n.p, fs),
             Rt::Mix { gain, mute, master } => {
                 *master = db_to_lin(n.param(1));
                 for k in 0..MIX_MAX {
@@ -401,7 +419,7 @@ impl Run {
                 *mute = n.param(1) >= 0.5;
             }
             Rt::Rec { id } => *id = n.s.parse::<u32>().map(|t| format!("graph:{t}")).unwrap_or_default(),
-            Rt::File { .. } | Rt::None => {}
+            Rt::Split | Rt::Merge | Rt::None => {}
         }
     }
 
@@ -426,7 +444,7 @@ impl Run {
                 _ => self.make(n),
             };
             rn.bypass = n.bypass;
-            rn.src = (0..n.inputs()).map(|p| g.edge_into(id, p as u8).and_then(|e| idx.get(&e.from).copied())).collect();
+            rn.src = (0..n.inputs()).map(|p| g.edge_into(id, p as u8).and_then(|e| idx.get(&e.from).map(|&i| (i, e.from_port)))).collect();
             self.apply(&mut rn, n);
             idx.insert(id, nodes.len());
             nodes.push(rn);
@@ -435,6 +453,13 @@ impl Run {
         self.nodes = nodes;
         self.master = self.nodes.iter().position(|n| n.kind == Kind::Input);
         self.sync_devices(g);
+        // record nodes that are fed from the timeline (directly or through effects): internal loopbacks
+        let mut has_tl = vec![false; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            has_tl[i] = matches!(self.nodes[i].rt, Rt::Tl { .. }) || self.nodes[i].src.iter().flatten().any(|&(s, _)| has_tl[s]);
+        }
+        let loops: HashSet<String> = self.nodes.iter().enumerate().filter_map(|(i, n)| if let (Rt::Rec { id }, true) = (&n.rt, has_tl[i]) { Some(id.clone()).filter(|s| !s.is_empty()) } else { None }).collect();
+        *bus().virt_loop.lock() = loops;
         let want: Vec<u32> = g.nodes.iter().filter(|n| n.kind == Kind::TimelineOut).filter_map(|n| n.s.parse().ok()).collect();
         *bus().want_tracks.lock() = want;
         bus().on.store(true, Relaxed);
@@ -566,26 +591,6 @@ impl Run {
                 }
             }
         }
-        {
-            let mut f = bus().file.lock();
-            let sr = f.0;
-            for n in self.nodes.iter_mut() {
-                if let Rt::File { rs, sr: rsr, .. } = &mut n.rt {
-                    if sr == 0 {
-                        continue;
-                    }
-                    if rs.is_none() || *rsr != sr {
-                        *rs = Some(Rs::new(sr, self.rate));
-                        *rsr = sr;
-                    }
-                    if let Some(rs) = rs.as_mut() {
-                        while let Some(fr) = f.1.pop_front() {
-                            rs.push_frame(fr);
-                        }
-                    }
-                }
-            }
-        }
 
         // 2. how many frames
         if total_now != self.last_total {
@@ -611,6 +616,8 @@ impl Run {
             n
         };
         prof::C.eng_block.store(n_total as u32, Relaxed);
+        prof::C.eng_block_sum.fetch_add(n_total as u64, Relaxed);
+        prof::C.eng_sr.store(self.rate, Relaxed);
         let clocked = master_ok && force.is_none();
 
         // 3. run
@@ -622,7 +629,8 @@ impl Run {
         }
 
         // 4. sources that run on another clock must not pile up or run dry for long
-        let (keep_hi, keep_lo) = (self.rate as usize * 15 / 100, self.rate as usize * 6 / 100);
+        let safety = crate::prof::safety_ms() as usize;
+        let (keep_hi, keep_lo) = (self.rate as usize * (150 + 2 * safety) / 1000, self.rate as usize * (60 + safety) / 1000);
         for (i, n) in self.nodes.iter_mut().enumerate() {
             let is_master = Some(i) == self.master && clocked;
             match &mut n.rt {
@@ -631,7 +639,7 @@ impl Run {
                         rs.trim(keep_lo * 2);
                     }
                 }
-                Rt::Tl { rs: Some(rs), .. } | Rt::File { rs: Some(rs), .. } => {
+                Rt::Tl { rs: Some(rs), .. } => {
                     if rs.queued() > keep_hi * 2 {
                         rs.trim(keep_lo * 2);
                     }
@@ -671,12 +679,13 @@ impl Run {
     fn chunk(&mut self, n: usize, clocked: bool) {
         let sh = self.e.sh.clone();
         let rate = self.rate;
-        let prime = rate as usize / 40;
+        let safety = crate::prof::safety_ms() as usize;
+        let prime = rate as usize * (25 + safety) / 1000;
         for i in 0..self.nodes.len() {
             let (before, rest) = self.nodes.split_at_mut(i);
             let node = &mut rest[0];
             let is_master = clocked && Some(i) == self.master;
-            let inp = node.src.first().copied().flatten().map(|s| &before[s].out);
+            let inp = node.src.first().copied().flatten().map(|(s, p)| outbuf(&before[s], p));
             let [o0, o1] = &mut node.out;
             match &mut node.rt {
                 Rt::Input { rs, gain, delay, primed, .. } => {
@@ -707,7 +716,7 @@ impl Run {
                         }
                     }
                 }
-                Rt::Tl { rs, primed, .. } | Rt::File { rs, primed, .. } => {
+                Rt::Tl { rs, primed, .. } => {
                     let got = match rs {
                         Some(rs) => pull(rs, primed, prime, false, &mut o0[..n], &mut o1[..n]),
                         None => 0,
@@ -719,15 +728,41 @@ impl Run {
                     o0[..n].fill(0.0);
                     o1[..n].fill(0.0);
                     for (p, s) in node.src.iter().enumerate() {
-                        let Some(s) = s else { continue };
+                        let Some((s, sp)) = s else { continue };
                         if mute[p.min(MIX_MAX - 1)] {
                             continue;
                         }
                         let g = gain[p.min(MIX_MAX - 1)] * *master;
-                        let src = &before[*s].out;
+                        let src = outbuf(&before[*s], *sp);
                         for k in 0..n {
                             o0[k] += src[0][k] * g;
                             o1[k] += src[1][k] * g;
+                        }
+                    }
+                }
+                Rt::Split => {
+                    // out 1: the left channel on both sides, out 2: the right channel on both sides
+                    match inp {
+                        Some(b) => {
+                            o0[..n].copy_from_slice(&b[0][..n]);
+                            o1[..n].copy_from_slice(&b[0][..n]);
+                            node.out2[0][..n].copy_from_slice(&b[1][..n]);
+                            node.out2[1][..n].copy_from_slice(&b[1][..n]);
+                        }
+                        None => {
+                            o0[..n].fill(0.0);
+                            o1[..n].fill(0.0);
+                            node.out2[0][..n].fill(0.0);
+                            node.out2[1][..n].fill(0.0);
+                        }
+                    }
+                }
+                Rt::Merge => {
+                    // each input is reduced to mono: the first becomes the left channel, the second the right
+                    for (k, dst) in [&mut *o0, &mut *o1].into_iter().enumerate() {
+                        match node.src.get(k).copied().flatten().map(|(s, p)| outbuf(&before[s], p)) {
+                            Some(b) => (0..n).for_each(|j| dst[j] = 0.5 * (b[0][j] + b[1][j])),
+                            None => dst[..n].fill(0.0),
                         }
                     }
                 }
@@ -803,6 +838,12 @@ impl Run {
                                 node.extra = if u.open { 1.0 } else { 0.0 };
                             }
                             Rt::Dly(u) => u.process(l, r),
+                            Rt::Harm(u) => u.process(l, r),
+                            Rt::Dist(u) => u.process(l, r),
+                            Rt::Fuzz(u) => u.process(l, r),
+                            Rt::Crush(u) => u.process(l, r),
+                            Rt::Jit(u) => u.process(l, r),
+                            Rt::Trem(u) => u.process(l, r),
                             _ => {}
                         }
                     }
@@ -828,6 +869,11 @@ fn pull(rs: &mut Rs, primed: &mut bool, prime: usize, is_clock: bool, l: &mut [f
         *primed = false;
     }
     got
+}
+
+/// The buffers of output `port` of a node.
+fn outbuf(n: &RtNode, port: u8) -> &[Vec<f32>; 2] {
+    if port == 1 { &n.out2 } else { &n.out }
 }
 
 fn peak2(a: &[f32], b: &[f32], prev: [f32; 2]) -> [f32; 2] {

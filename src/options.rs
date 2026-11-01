@@ -31,6 +31,7 @@ impl App {
                 }
             }
         }
+        crate::prof::set_safety_ms(self.safety_ms);
         let mut all = vec![self.tg.clone()];
         all.extend(self.gen_extra.iter().cloned());
         if all != self.gens_sent {
@@ -85,6 +86,17 @@ impl App {
             ui.label(RichText::new("Routing").strong());
             ui.checkbox(&mut self.graph_on, "Routing graph (node editor)").on_hover_text("Connect all inputs and outputs in one window, with effects in between. The separate input / output pickers of the other windows are hidden while it is on.");
             ui.label(RichText::new("Off by default. Inputs, generators, the timeline and the output devices become nodes; the analysers read what you connect to the Analyzer node.").small().weak());
+            ui.separator();
+            ui.label(RichText::new("Safety buffer").strong());
+            ui.horizontal(|ui| {
+                ui.add(egui::Slider::new(&mut self.safety_ms, 0..=500).suffix(" ms").text("extra delay"));
+                for (label, v) in [("off", 0u32), ("40", 40), ("100", 100), ("250", 250)] {
+                    if ui.small_button(label).clicked() {
+                        self.safety_ms = v;
+                    }
+                }
+            });
+            ui.label(RichText::new("Holds back that much audio before it is played (output devices, monitor, timeline playback) and cushions the sources of the routing graph, so short stalls of the system do not become gaps or crackles. It adds the same amount of delay: raise it when the Profiler reports an output that ran dry.").small().weak());
             ui.separator();
             ui.label(RichText::new("Performance").strong());
             ui.add(egui::Slider::new(&mut self.fps_cap, 15.0..=241.0).text("UI frame rate cap").custom_formatter(|v, _| if v > 240.0 { "max".into() } else { format!("{v:.0}") }));

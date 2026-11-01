@@ -162,6 +162,48 @@ impl Daw {
         });
     }
 
+    /// Tracks chosen for merging: the ones selected with Ctrl + click plus the current track.
+    pub(super) fn merge_ids(&self, p: &Project) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.sel_tracks.iter().copied().collect();
+        if let Some(t) = self.sel_track {
+            if !ids.contains(&t) && !ids.is_empty() {
+                ids.push(t);
+            }
+        }
+        ids.retain(|id| p.track_index(*id).is_some());
+        ids
+    }
+
+    /// Mix the chosen tracks (as they sound: fader, pan, mute) into one new track over the time they cover. With
+    /// `replace` the original tracks are removed afterwards (one undo step brings them back).
+    pub(super) fn act_merge_tracks(&mut self, p: &Project, replace: bool) {
+        let ids = self.merge_ids(p);
+        if ids.len() < 2 {
+            self.note = "Select two or more tracks first: Ctrl + click on their names".into();
+            return;
+        }
+        let clips = p.tracks.iter().filter(|t| ids.contains(&t.id)).flat_map(|t| t.clips.iter());
+        let (a, b) = clips.fold((i64::MAX, i64::MIN), |(a, b), c| (a.min(c.start), b.max(c.end())));
+        if b <= a {
+            self.note = "The selected tracks have no clips".into();
+            return;
+        }
+        let first = ids.iter().filter_map(|id| p.track_index(*id)).min().unwrap_or(0);
+        let mut q = p.clone();
+        q.tracks.retain(|t| ids.contains(&t.id) && !t.mute);
+        q.tracks.iter_mut().for_each(|t| t.solo = false);
+        q.master_db = 0.0;
+        let name = format!("Merged ({})", ids.iter().filter_map(|id| p.track_index(*id)).map(|i| p.tracks[i].name.clone()).take(3).collect::<Vec<_>>().join(" + "));
+        let sid = self.new_src_id();
+        let remove = if replace { ids } else { Vec::new() };
+        self.spawn_job("daw-merge", move |jobs| {
+            let src = q.bounce(a, b, None, sid, name);
+            // the new track goes below the first merged track when the originals stay
+            let index = if remove.is_empty() { first + 1 } else { first };
+            jobs.lock().push(Job::Merged(src, a, remove, index));
+        });
+    }
+
     // ------------------------------------------------------------------ analysis
 
     /// The time range that analysis, bounce and looping refer to: the selection, else the selected

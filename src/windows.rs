@@ -1,4 +1,4 @@
-﻿//! A small desktop inside the application: draggable, resizable, snapping windows with thin title bars
+//! A small desktop inside the application: draggable, resizable, snapping windows with thin title bars
 //! (built-in views and the pluggable tools). Windows snap to each other and to the edges of the area,
 //! dock to halves / quarters when released against an edge, and neighbours that sit flush against an
 //! edge follow when it is resized (hold Alt to resize one window only, Ctrl to move without snapping).
@@ -856,17 +856,35 @@ impl App {
         let statuses = self.tool_statuses();
         egui::Panel::bottom("statusbar").show(ui, |ui| {
             ui.horizontal(|ui| {
+                // every part has a fixed width, so that text that changes or flashes (alarms, recording time,
+                // frame rates) never pushes the parts to its right around
+                let cell = |ui: &mut Ui, w: f32, add: &mut dyn FnMut(&mut Ui)| {
+                    ui.allocate_ui_with_layout(vec2(w, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_width(w);
+                        ui.set_max_width(w);
+                        add(ui);
+                    });
+                };
                 let xr = self.sh.xruns.load(std::sync::atomic::Ordering::Relaxed);
-                ui.label(egui::RichText::new(format!("{}   xruns {xr}", self.sh.status.lock())).small());
+                let status = self.sh.status.lock().clone();
+                cell(ui, 270.0, &mut |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(format!("{status}   xruns {xr}")).small()).truncate());
+                });
                 if self.sh.feeding_silence.load(std::sync::atomic::Ordering::Relaxed) {
                     ui.label(egui::RichText::new("no audio from device (silent loopback or stalled stream) - showing silence").small().color(egui::Color32::from_rgb(255, 190, 80)));
                 }
-                for (text, col) in statuses {
-                    ui.separator();
-                    ui.label(egui::RichText::new(text).small().strong().color(col));
-                }
                 ui.separator();
-                ui.label(egui::RichText::new(format!("UI {:.0} fps ({:.1} ms)   DSP {:.0} fps ({:.2} ms)", self.ui_fps, self.ms[WIN_COUNT], self.an.dsp_fps, self.an.dsp_ms)).small().weak());
+                // the alarms and recording messages of the tools share one box of constant size
+                cell(ui, 250.0, &mut |ui| {
+                    for (text, col) in &statuses {
+                        ui.add(egui::Label::new(egui::RichText::new(text).small().strong().color(*col)).truncate());
+                    }
+                });
+                ui.separator();
+                let perf = format!("UI {:.0} fps ({:.1} ms)   DSP {:.0} fps ({:.2} ms)", self.ui_fps, self.ms[WIN_COUNT], self.an.dsp_fps, self.an.dsp_ms);
+                cell(ui, 290.0, &mut |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&perf).small().weak()).truncate());
+                });
                 if !self.note.is_empty() {
                     ui.separator();
                     ui.label(egui::RichText::new(&self.note).small());
@@ -950,7 +968,7 @@ mod tests {
 
     #[test]
     fn timeline_is_a_wide_strip_and_the_routing_window_gets_the_most_room() {
-        let (tl, rt) = (BUILTIN + 15, BUILTIN + 16);
+        let (tl, rt) = (BUILTIN + 14, BUILTIN + 15);
         assert!(wants_wide(tl) && !wants_wide(rt));
         for a in [Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 900.0)), Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 1000.0)), Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 900.0))] {
             let items: Vec<(usize, f32)> = vec![(tl, win_weight(tl)), (rt, win_weight(rt)), (0, win_weight(0)), (4, win_weight(4)), (5, win_weight(5))];

@@ -189,6 +189,9 @@ enum Job {
     Saved(Result<PathBuf, String>, bool),
     Loaded(Result<file::Loaded, String>, bool, PathBuf),
     Bounced(Arc<Source>, i64),
+    /// the mix of several tracks: the new source, where it starts, the tracks it replaces (may be empty), and where
+    /// the new track goes (index of the first track that was merged)
+    Merged(Arc<Source>, i64, Vec<u32>, usize),
     Done(String),
 }
 
@@ -269,6 +272,8 @@ pub struct Daw {
     range: Option<(i64, i64)>,
     sel: BTreeSet<u32>,
     sel_track: Option<u32>,
+    /// more tracks selected with Ctrl + click on the track headers (for merging)
+    sel_tracks: BTreeSet<u32>,
     clip_buf: Vec<(Clip, i64, usize)>,
     // options
     snap: bool,
@@ -311,6 +316,8 @@ pub struct Daw {
     /// track and frame the file chosen in `open_dlg` goes to (right-click import)
     import_target: Option<(u32, i64)>,
     bus_t: Instant,
+    /// the analysis is switched on but the window has no room for it
+    an_hidden: bool,
     /// track whose channels should be split into two tracks after this frame
     split_req: Option<u32>,
     /// timeline frame under the last right-click
@@ -339,6 +346,17 @@ pub struct Daw {
 /// The routing graph is running: tracks record from graph nodes and playback goes to the graph.
 fn graph_on() -> bool {
     crate::graph::bus().on.load(Relaxed)
+}
+
+/// Delay (ms) between the timeline playing a sound and a record node of the routing graph receiving it, for a
+/// record node that is fed (also) from a timeline output node: the take is placed that much earlier.
+fn graph_loop_ms(dev: &str) -> f32 {
+    if dev.starts_with("graph:") && crate::graph::bus().virt_loop.lock().contains(dev) {
+        // the engine cushions its timeline sources (25 ms + the safety buffer), plus the blocks of the player and the engine
+        25.0 + crate::prof::safety_ms() as f32 + 6.0
+    } else {
+        0.0
+    }
 }
 
 /// Input of a track that records what its "Timeline record" node in the routing graph receives (stereo).
@@ -374,6 +392,7 @@ impl Daw {
             range: None,
             sel: BTreeSet::new(),
             sel_track: None,
+            sel_tracks: BTreeSet::new(),
             clip_buf: Vec::new(),
             snap: true,
             follow: true,
@@ -407,6 +426,7 @@ impl Daw {
             feed_once: false,
             import_target: None,
             bus_t: Instant::now(),
+            an_hidden: false,
             split_req: None,
             ctx_frame: 0,
             val_edit: None,
@@ -692,7 +712,7 @@ impl Daw {
                 self.note = format!("Timeline: input of {} is not ready ({})", t.name, cap.status.lock());
                 return;
             };
-            plan.push(RecPlan { track_id: t.id, dev: t.input.dev.clone(), lanes: t.input.mode.lanes(ch), name: t.name.clone(), gain_db: t.in_db, shift_ms: t.in_ms });
+            plan.push(RecPlan { track_id: t.id, dev: t.input.dev.clone(), lanes: t.input.mode.lanes(ch), name: t.name.clone(), gain_db: t.in_db, shift_ms: t.in_ms + graph_loop_ms(&t.input.dev) });
         }
         if plan.is_empty() {
             self.note = "Timeline: arm a track with the R button first".into();
@@ -738,7 +758,7 @@ impl Daw {
                 let Some(t) = takes.get(&r.dev) else { continue };
                 gap |= t.gap;
                 let g = db_to_lin(r.gain_db);
-                let chans: Vec<Vec<f32>> = r
+                let mut chans: Vec<Vec<f32>> = r
                     .lanes
                     .iter()
                     .filter_map(|&l| t.lanes.get(l))
@@ -750,6 +770,17 @@ impl Daw {
                         v
                     })
                     .collect();
+                // an input that arrives late is placed earlier (its own trim on top of the global compensation);
+                // what would start before the beginning of the timeline is cut off instead of being moved
+                let own = (r.shift_ms * sr as f32 / 1000.0) as i64;
+                let mut place = start - off - own;
+                if place < 0 {
+                    let cut = (-place) as usize;
+                    for c in chans.iter_mut() {
+                        c.drain(..cut.min(c.len()));
+                    }
+                    place = 0;
+                }
                 if chans.is_empty() || chans[0].is_empty() {
                     continue;
                 }
@@ -758,9 +789,7 @@ impl Daw {
                 if file::write_wav(&path, &s, sr).is_ok() {
                     *s.saved.lock() = Some(path);
                 }
-                // an input that arrives late is placed earlier (its own trim on top of the global compensation)
-                let own = (r.shift_ms * sr as f32 / 1000.0) as i64;
-                out.push((r.track_id, Arc::new(s), start - off - own));
+                out.push((r.track_id, Arc::new(s), place));
             }
             jobs.lock().push(Job::Recorded(out, gap));
         });
@@ -987,6 +1016,19 @@ impl Daw {
                         p.add_clip(ti, src, at);
                     });
                     self.note = "Bounced to a new track".into();
+                }
+                Job::Merged(src, at, remove, index) => {
+                    let n = remove.len();
+                    self.with_proj(|p| {
+                        p.tracks.retain(|t| !remove.contains(&t.id));
+                        let ti = p.add_track(Some(src.name.clone()), Input { dev: String::new(), mode: Mode::Mix });
+                        p.add_clip(ti, src, at);
+                        // the merged track takes the place of the first of the tracks
+                        let t = p.tracks.remove(ti);
+                        p.tracks.insert(index.min(p.tracks.len()), t);
+                    });
+                    self.sel_tracks.clear();
+                    self.note = if n > 0 { format!("Merged {n} tracks into one") } else { "Mixed the tracks to a new track".into() };
                 }
                 Job::Done(m) => self.note = m,
             }

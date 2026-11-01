@@ -34,19 +34,18 @@ const fn t(k: usize) -> usize {
     BUILTIN + k
 }
 // tool windows (index into `tools::INFO`)
-const REC: usize = t(0);
-const OCT: usize = t(1);
-const RESP: usize = t(2);
-const IMP: usize = t(3);
-const PEAKS: usize = t(4);
-const LOUD: usize = t(5);
-const STATS: usize = t(6);
-const LOG: usize = t(7);
-const REFN: usize = t(8);
-const SPL: usize = t(10);
-const DIST: usize = t(11);
-const EQ: usize = t(14);
-const DAW: usize = t(15);
+const OCT: usize = t(0);
+const RESP: usize = t(1);
+const IMP: usize = t(2);
+const PEAKS: usize = t(3);
+const LOUD: usize = t(4);
+const STATS: usize = t(5);
+const LOG: usize = t(6);
+const REFN: usize = t(7);
+const SPL: usize = t(9);
+const DIST: usize = t(10);
+const EQ: usize = t(13);
+const DAW: usize = t(14);
 // built-in windows
 const SPEC: usize = 0;
 const SPG: usize = 1;
@@ -69,7 +68,7 @@ const fn p(group: &'static str, name: &'static str, wins: &'static [usize], rect
     Preset { group, name, wins, rects }
 }
 
-const ROUTING_WIN: usize = t(16);
+const ROUTING_WIN: usize = t(15);
 
 /// A preset as rectangles in 0..1 space: its own arrangement, or what auto tiling would make of it.
 fn preview_builtin(pr: &Preset) -> Vec<(usize, Rect)> {
@@ -98,7 +97,7 @@ fn tiled_unit(items: &[(usize, f32)]) -> Vec<(usize, Rect)> {
 
 fn win_color(i: usize) -> egui::Color32 {
     const C: [(u8, u8, u8); 8] = [(70, 130, 200), (200, 110, 70), (90, 170, 120), (170, 100, 190), (200, 170, 70), (80, 170, 180), (190, 90, 120), (120, 130, 160)];
-    if i == t(15) {
+    if i == t(14) {
         return egui::Color32::from_rgb(70, 160, 110);
     }
     if i == ROUTING_WIN {
@@ -132,7 +131,7 @@ fn pos_below(r: Rect) -> egui::Pos2 {
 }
 
 /// Ctrl+1..9 pick the first nine.
-const PRESETS: [Preset; 27] = [
+const PRESETS: [Preset; 26] = [
     p("Classic", "Overview", &[0, 1, 2, 3, 4, 5], &[]),
     p("Classic", "Analysis", &[SPEC, SPG, MEAS, OCT, PEAKS], &[]),
     p("Classic", "Scope & generator", &[SCOPE, SPEC, GEN, MEAS], &[]),
@@ -155,7 +154,6 @@ const PRESETS: [Preset; 27] = [
     p("Acoustics", "Room EQ", &[RESP, EQ, REFN, IMP], &[[0.0, 0.0, 0.55, 0.55], [0.55, 0.0, 0.45, 0.55], [0.0, 0.55, 0.40, 0.45], [0.40, 0.55, 0.60, 0.45]]),
     p("Acoustics", "Distortion lab", &[DIST, SPEC, MEAS, GEN], &[[0.0, 0.0, 0.60, 1.0], [0.60, 0.0, 0.40, 0.50], [0.60, 0.50, 0.20, 0.50], [0.80, 0.50, 0.20, 0.50]]),
     p("Acoustics", "Impulse & RT60", &[IMP, RESP, GEN], &[[0.0, 0.0, 0.6, 1.0], [0.6, 0.0, 0.4, 0.65], [0.6, 0.65, 0.4, 0.35]]),
-    p("More", "Recorder + spectrum", &[REC, SPEC, SPG], &[[0.0, 0.0, 0.34, 1.0], [0.34, 0.0, 0.66, 0.5], [0.34, 0.5, 0.66, 0.5]]),
     p("More", "Everything", &[0, 1, 2, 3, 4, 5, OCT, LOUD, DAW], &[]),
     p("Routing", "Patchbay", &[ROUTING_WIN], &[[0.0, 0.0, 1.0, 1.0]]),
     p("Routing", "Patchbay + analysers", &[ROUTING_WIN, SPEC, SPG, LOUD], &[[0.0, 0.0, 0.62, 1.0], [0.62, 0.0, 0.38, 0.40], [0.62, 0.40, 0.38, 0.32], [0.62, 0.72, 0.38, 0.28]]),
@@ -177,7 +175,8 @@ impl UserPreset {
         format!("{}|{}|{}", self.name, open, rects.join(";"))
     }
 
-    fn decode(s: &str) -> Option<Self> {
+    /// `old`: saved before the recorder window was removed, every tool window index is one too high.
+    fn decode(s: &str, old: bool) -> Option<Self> {
         let mut p = s.split('|');
         let (name, open, rects) = (p.next()?, p.next()?, p.next()?);
         let mut open: Vec<bool> = open.chars().map(|c| c == '1').collect();
@@ -188,6 +187,12 @@ impl UserPreset {
                 (v.len() == 4).then(|| [v[0], v[1], v[2], v[3]])
             })
             .collect();
+        if old && open.len() > BUILTIN {
+            open.remove(BUILTIN);
+            if rects.len() > BUILTIN {
+                rects.remove(BUILTIN);
+            }
+        }
         open.resize(WIN_COUNT, false);
         rects.resize(WIN_COUNT, None);
         (!name.is_empty()).then(|| Self { name: name.to_string(), open, rects })
@@ -204,8 +209,9 @@ impl App {
 
     pub fn presets_load(&mut self, m: &std::collections::HashMap<&str, &str>) {
         self.presets.clear();
+        let old = m.get("layout_ver").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1) < 2;
         for i in 0..32 {
-            match m.get(format!("preset_{i}").as_str()).and_then(|s| UserPreset::decode(s)) {
+            match m.get(format!("preset_{i}").as_str()).and_then(|s| UserPreset::decode(s, old)) {
                 Some(p) => self.presets.push(p),
                 None => break,
             }
@@ -479,7 +485,7 @@ mod tests {
         let mut rects = vec![None; WIN_COUNT];
         rects[0] = Some([0.1, 0.2, 0.5, 0.6]);
         let p = UserPreset { name: "My layout".into(), open, rects };
-        let q = UserPreset::decode(&p.encode()).unwrap();
+        let q = UserPreset::decode(&p.encode(), false).unwrap();
         assert_eq!(q.name, "My layout");
         assert!(q.open[0] && q.open[10] && !q.open[1]);
         assert_eq!(q.rects[0], Some([0.1, 0.2, 0.5, 0.6]));
