@@ -242,6 +242,13 @@ fn spawn_watchdog(sh: Arc<Shared>) {
         .ok();
 }
 
+/// True for the text of a NaN or infinite number.
+pub fn is_not_finite(v: &str) -> bool {
+    let s = v.trim().to_ascii_lowercase();
+    let s = s.trim_start_matches(|c| c == '+' || c == '-');
+    s.starts_with("nan") || s.starts_with("inf")
+}
+
 fn settings_path() -> std::path::PathBuf {
     let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
     base.join("visuscope").join("settings.txt")
@@ -526,7 +533,8 @@ impl App {
         let Ok(text) = std::fs::read_to_string(settings_path()) else { return };
         let m: std::collections::HashMap<&str, &str> = text.lines().filter_map(|l| l.split_once('=')).collect();
         fn get<T: std::str::FromStr>(m: &std::collections::HashMap<&str, &str>, k: &str) -> Option<T> {
-            m.get(k).and_then(|v| v.trim().parse().ok())
+            // a number that is NaN or infinite (a damaged file) is treated as missing: it would poison every calculation
+            m.get(k).filter(|v| !is_not_finite(v)).and_then(|v| v.trim().parse().ok())
         }
         if let Some(id) = m.get("device") {
             if let Some(i) = self.devices.iter().position(|d| d.id == *id) {
@@ -1524,7 +1532,11 @@ impl eframe::App for App {
                 );
             }
         }
-        if self.fps_cap >= 241.0 {
+        // nothing is visible while the window is minimised: a few frames a second keep the program alive
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        if minimized {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        } else if self.fps_cap >= 241.0 {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(1.0 / self.fps_cap));

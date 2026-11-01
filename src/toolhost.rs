@@ -150,7 +150,7 @@ impl App {
             out.extend(t.report(&cx).into_iter().filter(|s| want(s.id)));
         }
         if want("Traces") && self.lib.items.iter().any(|m| m.visible) {
-            let series: Vec<Series> = self.lib.items.iter().filter(|m| m.visible).enumerate().map(|(i, m)| Series { name: m.name.clone(), color: COLORS[i % COLORS.len()], pts: m.f.iter().copied().zip(m.mag.iter().copied()).collect() }).collect();
+            let series: Vec<Series> = self.lib.items.iter().filter(|m| m.visible && m.f.len() >= 2 && m.mag.len() >= 2).enumerate().map(|(i, m)| Series { name: m.name.clone(), color: COLORS[i % COLORS.len()], pts: m.f.iter().copied().zip(m.mag.iter().copied()).collect() }).collect();
             let x = (series.iter().map(|s| s.pts[0].0).fold(f32::MAX, f32::min), series.iter().map(|s| s.pts.last().unwrap().0).fold(0.0, f32::max));
             let y = auto_range(&series, 5.0, 20.0);
             out.push(Section { id: "Traces", title: "Stored traces".into(), blocks: vec![Block::Plot(PlotSpec { title: "Stored traces".into(), xlog: true, xlabel: "Hz".into(), ylabel: "dB".into(), x, y, series })] });

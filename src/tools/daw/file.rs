@@ -187,14 +187,14 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 continue;
             };
             let (off, len) = (f[4].parse::<usize>().unwrap_or(0), f[5].parse::<usize>().unwrap_or(0));
-            if len == 0 || off + len > src.len() {
+            if len == 0 || off.checked_add(len).is_none_or(|e| e > src.len()) {
                 missing += 1;
                 continue;
             }
             let mut c = Clip {
                 id: cid,
                 src,
-                start: f[3].parse().unwrap_or(0),
+                start: f[3].parse::<i64>().unwrap_or(0).clamp(-1_000_000_000_000, 1_000_000_000_000),
                 off,
                 len,
                 gain_db: num(f.get(6)).clamp(-90.0, 36.0),
@@ -261,6 +261,66 @@ mod tests {
         let (y, _) = q.render(1200, 5200, None);
         for i in 0..x.len() {
             assert!((x[i] - y[i]).abs() < 1e-6, "frame {i}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damaged_project_files_never_panic_and_play_safely() {
+        let dir = std::env::temp_dir().join(format!("visuscope_daw_fuzz_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.vsproj");
+        let mut p = Project::new(48000);
+        for k in 0..3 {
+            let ti = p.add_track(Some(format!("tr {k}")), Input { dev: String::new(), mode: Mode::Mix });
+            let l: Vec<f32> = (0..3000).map(|i| (i as f32 * 0.02).sin() * 0.4).collect();
+            let src = Arc::new(Source::new(10 + k, format!("s{k}"), vec![l.clone(), l]));
+            let c = p.add_clip(ti, src.clone(), 100 * k as i64);
+            p.clip_mut(c).unwrap().fade_in = 50;
+            p.add_clip(ti, src, 4000);
+        }
+        save(&p, &path).unwrap();
+        let good = std::fs::read(&path).unwrap();
+        let mut seed = 0xD1B5_4A32_D192_ED03u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let fuzz = dir.join("fuzz.vsproj");
+        for case in 0..800 {
+            let mut b = good.clone();
+            for _ in 0..1 + next() % 8 {
+                let i = (next() % b.len() as u64) as usize;
+                b[i] = match next() % 5 {
+                    0 => b'9',
+                    1 => b'|',
+                    2 => b'-',
+                    3 => b'\n',
+                    _ => next() as u8,
+                };
+            }
+            if next() % 4 == 0 {
+                b.truncate((next() % b.len() as u64) as usize);
+            }
+            std::fs::write(&fuzz, &b).unwrap();
+            let r = std::panic::catch_unwind(|| {
+                if let Ok(l) = load(&fuzz) {
+                    // a loaded project can be mixed everywhere without a panic, and the clips lie inside their audio
+                    let q = l.proj;
+                    for t in &q.tracks {
+                        for c in &t.clips {
+                            assert!(c.len >= 1 && c.off + c.len <= c.src.len(), "clip out of its source");
+                        }
+                    }
+                    let end = q.end_frame().clamp(0, 20_000);
+                    let _ = q.render(0, end, None);
+                    let _ = q.render(-500, 500, None);
+                }
+            });
+            assert!(r.is_ok(), "case {case} panicked");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

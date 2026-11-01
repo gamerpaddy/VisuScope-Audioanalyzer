@@ -217,7 +217,7 @@ pub struct SettingsIn<'a> {
 
 impl SettingsIn<'_> {
     pub fn get<T: FromStr>(&self, k: &str) -> Option<T> {
-        self.m.get(format!("{}{k}", self.pre).as_str()).and_then(|v| v.trim().parse().ok())
+        self.m.get(format!("{}{k}", self.pre).as_str()).filter(|v| !crate::app::is_not_finite(v)).and_then(|v| v.trim().parse().ok())
     }
     pub fn str(&self, k: &str) -> Option<String> {
         self.m.get(format!("{}{k}", self.pre).as_str()).map(|v| v.to_string())
@@ -307,6 +307,16 @@ mod tests {
             }
         }
         assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
+    }
+
+    #[test]
+    fn damaged_numbers_in_settings_are_ignored() {
+        for bad in ["NaN", "nan", "-inf", "+Infinity", " inf "] {
+            assert!(crate::app::is_not_finite(bad), "{bad}");
+        }
+        for ok in ["0", "-3.5", "1e5", "60", ""] {
+            assert!(!crate::app::is_not_finite(ok), "{ok}");
+        }
     }
 
     #[test]

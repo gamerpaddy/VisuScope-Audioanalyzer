@@ -65,10 +65,10 @@ const P_INPUT: &[ParamDef] = &[s("Left ch", 1.0, 32.0, 1.0, ""), s("Right ch", 1
 const P_GEN: &[ParamDef] = &[s("Generator", 1.0, 8.0, 1.0, "")];
 const P_GAIN: &[ParamDef] = &[s("Gain", -60.0, 24.0, 0.0, " dB"), c("Phase", 0, &["normal", "inverted"])];
 const P_EQ: &[ParamDef] = &[
-    c("1 type", 1, EQ_TYPES), l("1 freq", 20.0, 20000.0, 100.0, " Hz"), s("1 gain", -18.0, 18.0, 0.0, " dB"), l("1 Q", 0.1, 10.0, 0.7, ""),
-    c("2 type", 0, EQ_TYPES), l("2 freq", 20.0, 20000.0, 500.0, " Hz"), s("2 gain", -18.0, 18.0, 0.0, " dB"), l("2 Q", 0.1, 10.0, 1.0, ""),
-    c("3 type", 0, EQ_TYPES), l("3 freq", 20.0, 20000.0, 2500.0, " Hz"), s("3 gain", -18.0, 18.0, 0.0, " dB"), l("3 Q", 0.1, 10.0, 1.0, ""),
-    c("4 type", 2, EQ_TYPES), l("4 freq", 20.0, 20000.0, 8000.0, " Hz"), s("4 gain", -18.0, 18.0, 0.0, " dB"), l("4 Q", 0.1, 10.0, 0.7, ""),
+    c("1 type", 1, EQ_TYPES), l("1 freq", 20.0, 20000.0, 100.0, " Hz"), s("1 gain", -60.0, 24.0, 0.0, " dB"), l("1 Q", 0.1, 10.0, 0.7, ""),
+    c("2 type", 0, EQ_TYPES), l("2 freq", 20.0, 20000.0, 500.0, " Hz"), s("2 gain", -60.0, 24.0, 0.0, " dB"), l("2 Q", 0.1, 10.0, 1.0, ""),
+    c("3 type", 0, EQ_TYPES), l("3 freq", 20.0, 20000.0, 2500.0, " Hz"), s("3 gain", -60.0, 24.0, 0.0, " dB"), l("3 Q", 0.1, 10.0, 1.0, ""),
+    c("4 type", 2, EQ_TYPES), l("4 freq", 20.0, 20000.0, 8000.0, " Hz"), s("4 gain", -60.0, 24.0, 0.0, " dB"), l("4 Q", 0.1, 10.0, 0.7, ""),
 ];
 const P_FILTER: &[ParamDef] = &[c("Type", 0, &["High-pass", "Low-pass"]), l("Freq", 20.0, 20000.0, 80.0, " Hz"), c("Slope", 1, &["12 dB/oct", "24 dB/oct", "48 dB/oct"])];
 const P_COMP: &[ParamDef] = &[
@@ -256,7 +256,32 @@ impl Node {
     }
 
     pub fn param(&self, i: usize) -> f32 {
-        self.p.get(i).copied().unwrap_or_else(|| self.kind.info().params.get(i).map_or(0.0, |d| d.def))
+        let defs = self.kind.info().params;
+        let d = if self.kind == Kind::Eq { defs.get(i % 16) } else { defs.get(i) };
+        match (self.p.get(i).copied(), d) {
+            (Some(v), Some(d)) if v.is_finite() => v.clamp(d.min, d.max),
+            (_, Some(d)) => d.def,
+            (Some(v), None) if v.is_finite() => v,
+            _ => 0.0,
+        }
+    }
+
+    /// The parameters limited to the range of their definitions (a damaged file or a typo cannot make a filter blow up);
+    /// the extra bands of an equaliser follow the first four.
+    pub fn clamped(&self) -> Vec<f32> {
+        let defs = self.kind.info().params;
+        self.p
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let d = if self.kind == Kind::Eq { defs.get(i % 16) } else { defs.get(i) };
+                match d {
+                    Some(d) if v.is_finite() => v.clamp(d.min, d.max),
+                    Some(d) => d.def,
+                    None => 0.0,
+                }
+            })
+            .collect()
     }
 }
 
@@ -440,6 +465,7 @@ impl Graph {
                         n.p.push(v);
                     }
                 }
+                n.p = n.clamped();
                 g.next = g.next.max(id);
                 g.nodes.push(n);
             } else if let Some(r) = l.strip_prefix("edge ") {
@@ -518,6 +544,57 @@ mod tests {
         assert_eq!(p.len(), 24);
         assert_eq!(&p[16..20], &[5.0, 2500.0, -20.0, 3.0]);
         assert_eq!(p[23], 1.5);
+    }
+
+    #[test]
+    fn damaged_graph_text_never_panics_and_is_limited() {
+        let mut g = Graph::starter("dev", None);
+        for k in Kind::ALL {
+            if k != Kind::Analyzer {
+                g.add(k, 10.0, 10.0);
+            }
+        }
+        let good = g.encode();
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..1500 {
+            let mut b = good.clone().into_bytes();
+            for _ in 0..1 + next() % 6 {
+                let i = (next() % b.len() as u64) as usize;
+                b[i] = match next() % 4 {
+                    0 => b'9',
+                    1 => b'|',
+                    2 => b'-',
+                    _ => next() as u8,
+                };
+            }
+            if next() % 4 == 0 {
+                b.truncate((next() % b.len() as u64) as usize);
+            }
+            let Ok(text) = String::from_utf8(b) else { continue };
+            let result = std::panic::catch_unwind(|| {
+                if let Some(h) = Graph::decode(&text) {
+                    let _ = (h.order(), h.live(), h.encode());
+                    for n in &h.nodes {
+                        // whatever was in the file, the values are inside their ranges
+                        let defs = n.kind.info().params;
+                        for (i, v) in n.p.iter().enumerate() {
+                            let d = if n.kind == Kind::Eq { defs.get(i % 16) } else { defs.get(i) };
+                            if let Some(d) = d {
+                                assert!(v.is_finite() && *v >= d.min && *v <= d.max, "{:?} param {i} = {v}", n.kind);
+                            }
+                        }
+                        assert!(n.inputs() >= 1 || n.kind.is_source());
+                    }
+                }
+            });
+            assert!(result.is_ok(), "decode panicked on: {text:?}");
+        }
     }
 
     #[test]

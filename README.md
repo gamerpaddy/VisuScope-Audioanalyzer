@@ -13,6 +13,7 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Any device channel as L and R, with a level meter per channel
 - Microphone calibration files (0 / 90 degrees, e.g. UMIK-1) correct the spectrum views
 - Reconnects when the device format changes
+- Damaged or unusual files (corrupt audio, project, routing or settings files, odd file names, absurd headers) give an error message instead of a crash
 - Audio files (WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ALAC, MKV) and recording are handled by the Timeline: load, play and analyse them there, record any input to WAV (float)
 
 **Views**

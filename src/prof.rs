@@ -179,6 +179,8 @@ pub fn start() {
             if over > 10000 {
                 LATE10.fetch_add(1, Relaxed);
             }
+            // a few hundred probes a second are plenty to see a stall, and every wake-up costs power
+            std::thread::sleep(Duration::from_millis(3));
         })
         .ok();
     std::thread::Builder::new().name("prof-sample".into()).spawn(sample_loop).ok();

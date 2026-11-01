@@ -527,7 +527,10 @@ impl Daw {
         std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
-                f(&jobs);
+                // a task that panics (a damaged file, a bug) must not leave the program waiting for it
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&jobs))).is_err() {
+                    jobs.lock().push(Job::Done("A background task failed (see the log); the file may be damaged".into()));
+                }
                 busy.fetch_sub(1, Relaxed);
             })
             .ok();

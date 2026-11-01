@@ -36,6 +36,11 @@ pub struct StereoState {
     peak: f32,
     tl: Vec<f32>,
     tr: Vec<f32>,
+    /// the picture has to be built and uploaded again (something is lit, or it just went dark)
+    dirty: bool,
+    lit: bool,
+    /// brightness the uploaded picture was built with
+    built_bright: f32,
 }
 
 impl StereoState {
@@ -65,6 +70,9 @@ impl StereoState {
             peak: 0.0,
             tl: Vec::new(),
             tr: Vec::new(),
+            dirty: true,
+            lit: true,
+            built_bright: -1.0,
         }
     }
 
@@ -96,12 +104,22 @@ impl StereoState {
         if self.clear {
             self.buf.fill(0.0);
             self.clear = false;
+            self.dirty = true;
         }
         let decay = if self.hold { 1.0 } else { (-dt / (self.persist_ms * 0.001).max(0.002)).exp() };
+        let mut any = false;
         if decay < 1.0 {
             for v in self.buf.iter_mut() {
                 *v *= decay;
+                if *v < 1e-3 {
+                    // dark enough to show nothing: exactly zero, so that an idle picture stops costing anything
+                    *v = 0.0;
+                } else {
+                    any = true;
+                }
             }
+        } else {
+            any = self.buf.iter().any(|v| *v > 0.0);
         }
         let pk = self.tl.iter().chain(self.tr.iter()).fold(0.0f32, |m, v| m.max(v.abs()));
         self.peak = pk.max(self.peak * 0.985);
@@ -140,6 +158,11 @@ impl StereoState {
             }
             prev = Some((px, py));
         }
+        // new points make the picture change; so does the last frame before it goes dark
+        let drew = n > 0 && self.buf.iter().step_by(97).any(|v| *v > 0.0) || any;
+        let was = self.lit;
+        self.lit = drew;
+        self.dirty |= drew || was;
         let corr = |lr: f64, ll: f64, rr: f64| (lr / (ll * rr + 1e-24).sqrt()) as f32;
         self.corr_f = corr(self.lr_f, self.ll_f, self.rr_f);
         self.corr_s = corr(self.lr_s, self.ll_s, self.rr_s);
@@ -203,16 +226,20 @@ impl App {
         let (resp, painter) = ui.allocate_painter(vec2(side, side), Sense::hover());
         let r = resp.rect;
         painter.rect_filled(r, 2.0, BG);
-        {
+        let rebuild = self.stereo.dirty || self.stereo.tex.is_none() || (self.stereo.built_bright - self.stereo.brightness).abs() > 1e-6;
+        if rebuild {
+            self.stereo.dirty = false;
+            self.stereo.built_bright = self.stereo.brightness;
             let s = &self.stereo;
-            let px: Vec<Color32> = s
-                .buf
-                .iter()
-                .map(|&v| {
-                    let g = (v * s.brightness).clamp(0.0, 1.0).powf(0.55);
+            // the colour curve is a table of 1024 steps (a power per pixel and frame was the most expensive part of this window)
+            let lut: Vec<Color32> = (0..1024)
+                .map(|i| {
+                    let g = (i as f32 / 1023.0).powf(0.55);
                     Color32::from_rgb((g * g * 150.0) as u8, (g * 255.0) as u8, (g * g * 120.0) as u8)
                 })
                 .collect();
+            let k = s.brightness * 1023.0;
+            let px: Vec<Color32> = s.buf.iter().map(|&v| lut[(v * k).clamp(0.0, 1023.0) as usize]).collect();
             let img = ColorImage::new([G, G], px);
             match &mut self.stereo.tex {
                 Some(t) => t.set(img, TextureOptions::LINEAR),

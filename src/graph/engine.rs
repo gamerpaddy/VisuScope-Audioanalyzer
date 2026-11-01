@@ -271,7 +271,7 @@ impl Run {
                 std::thread::sleep(Duration::from_millis(60));
                 continue;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(3));
             let gap = last_loop.elapsed();
             last_loop = Instant::now();
             // the engine thread itself was not scheduled for a long time: the audio will have dropped out
@@ -280,14 +280,26 @@ impl Run {
             }
             self.was_active = true;
             let rev = self.e.rev.load(Relaxed);
-            if rev != self.rev {
-                self.rev = rev;
-                let g = self.e.graph_clone();
-                self.rebuild(&g);
+            let t0 = Instant::now();
+            // a panic inside the graph must not end the audio thread: drop the running state and start over
+            let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if rev != self.rev {
+                    self.rev = rev;
+                    let g = self.e.graph_clone();
+                    self.rebuild(&g);
+                }
+                self.tick(None);
+            }));
+            if guarded.is_err() {
+                crate::log::log("routing graph: panic in the engine, restarting it");
+                self.nodes.clear();
+                self.caps.clear();
+                self.claimed = false;
+                self.rev = 0;
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
             }
-            let t = Instant::now();
-            self.tick(None);
-            let us = t.elapsed().as_micros() as u64;
+            let us = t0.elapsed().as_micros() as u64;
             prof::C.eng_tick_max_us.fetch_max(us, Relaxed);
             prof::C.eng_tick_sum_us.fetch_add(us, Relaxed);
             prof::C.eng_ticks.fetch_add(1, Relaxed);
@@ -367,6 +379,8 @@ impl Run {
     fn apply(&mut self, rn: &mut RtNode, n: &Node) {
         let fs = self.rate as f32;
         let default_in = self.e.default_in.lock().clone();
+        // parameters are limited to their ranges before they reach a filter
+        let pv = n.clamped();
         match &mut rn.rt {
             Rt::Input { dev, rs, li, ri, gain, delay, primed } => {
                 let want = if n.s.is_empty() { default_in } else { n.s.clone() };
@@ -388,18 +402,18 @@ impl Run {
                 *b = n.param(1) * 0.01;
             }
             Rt::Util(m) => *m = n.param(0).round() as usize,
-            Rt::Eq(u) => u.set(&n.p, fs),
-            Rt::Filter(u) => u.set(&n.p, fs),
-            Rt::Comp(u) => u.set(&n.p, fs),
-            Rt::Lim(u) => u.set(&n.p, fs),
-            Rt::Gate(u) => u.set(&n.p, fs),
-            Rt::Dly(u) => u.set(&n.p, fs),
-            Rt::Harm(u) => u.set(&n.p),
-            Rt::Dist(u) => u.set(&n.p, fs),
-            Rt::Fuzz(u) => u.set(&n.p, fs),
-            Rt::Crush(u) => u.set(&n.p),
-            Rt::Jit(u) => u.set(&n.p),
-            Rt::Trem(u) => u.set(&n.p, fs),
+            Rt::Eq(u) => u.set(&pv, fs),
+            Rt::Filter(u) => u.set(&pv, fs),
+            Rt::Comp(u) => u.set(&pv, fs),
+            Rt::Lim(u) => u.set(&pv, fs),
+            Rt::Gate(u) => u.set(&pv, fs),
+            Rt::Dly(u) => u.set(&pv, fs),
+            Rt::Harm(u) => u.set(&pv),
+            Rt::Dist(u) => u.set(&pv, fs),
+            Rt::Fuzz(u) => u.set(&pv, fs),
+            Rt::Crush(u) => u.set(&pv),
+            Rt::Jit(u) => u.set(&pv),
+            Rt::Trem(u) => u.set(&pv, fs),
             Rt::Mix { gain, mute, master } => {
                 *master = db_to_lin(n.param(1));
                 for k in 0..MIX_MAX {
@@ -954,6 +968,36 @@ mod tests {
         let (l, _) = ring_tail(&sh, 8192);
         let rms2 = (l.iter().map(|v| v * v).sum::<f32>() / l.len() as f32).sqrt();
         assert!(rms2 < rms * 0.7 && rms2 > 0.1, "{rms2} vs {rms}");
+    }
+
+    #[test]
+    fn extreme_parameters_do_not_make_noise_or_nan() {
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let mut prev = gn;
+        // every effect in a chain, every parameter at its extremes, alternating low and high
+        for (k, kind) in Kind::ALL.into_iter().filter(|k| !k.is_source() && !k.is_sink() && !matches!(k, Kind::Mixer | Kind::Split | Kind::Merge)).enumerate() {
+            let id = g.add(kind, 0.0, 0.0);
+            let defs = kind.info().params;
+            let n = g.node_mut(id).unwrap();
+            for (i, d) in defs.iter().enumerate() {
+                n.p[i] = if (i + k) % 2 == 0 { d.min } else { d.max };
+            }
+            if kind == Kind::Eq {
+                n.p.extend([5.0, 20000.0, -60.0, 10.0, 0.0, 20.0, 18.0, 0.1]);
+            }
+            g.connect(prev, id, 0).unwrap();
+            prev = id;
+        }
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.connect(prev, an, 0).unwrap();
+        let (mut run, sh) = engine_with(g, vec![GenParams { on: true, level_db: [-6.0; 2], ..GenParams::default() }]);
+        for _ in 0..80 {
+            run.tick(Some(1024));
+        }
+        let (l, r) = ring_tail(&sh, 16384);
+        assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()), "NaN or infinity came out");
+        assert!(l.iter().chain(r.iter()).all(|v| v.abs() < 1000.0), "the chain blew up");
     }
 
     #[test]

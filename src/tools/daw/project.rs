@@ -24,7 +24,11 @@ pub struct Source {
 }
 
 impl Source {
-    pub fn new(id: u32, name: String, ch: Vec<Vec<f32>>) -> Self {
+    pub fn new(id: u32, name: String, mut ch: Vec<Vec<f32>>) -> Self {
+        // a source always has a channel (an empty one reads as silence)
+        if ch.is_empty() {
+            ch.push(Vec::new());
+        }
         let ov = ch.iter().map(|c| c.chunks(OV_BLOCK).map(|b| b.iter().fold((0f32, 0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)))).collect()).collect();
         Self { id, name, ch, ov, saved: Mutex::new(None) }
     }
@@ -39,7 +43,7 @@ impl Source {
 
     #[inline]
     pub fn at(&self, c: usize, i: usize) -> f32 {
-        self.ch[c.min(self.ch.len() - 1)][i]
+        self.ch[c.min(self.ch.len() - 1)].get(i).copied().unwrap_or(0.0)
     }
 }
 
@@ -175,7 +179,7 @@ impl Clip {
     pub fn peak(&self) -> f32 {
         let mut pk = 0f32;
         for c in &self.src.ch {
-            for &v in &c[self.off..self.off + self.len] {
+            for &v in c.get(self.off..self.off + self.len).unwrap_or(&[]) {
                 pk = pk.max(v.abs());
             }
         }

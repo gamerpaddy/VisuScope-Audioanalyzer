@@ -111,6 +111,12 @@ impl WavData {
     }
 }
 
+/// Most samples (all channels together) that are read into memory: about 1.2 GB of floats.
+pub const MAX_SAMPLES: u64 = 300_000_000;
+/// Most channels and the range of sample rates a file may declare.
+pub const MAX_CHANNELS: u16 = 64;
+pub const SR_RANGE: std::ops::RangeInclusive<u32> = 2000..=768_000;
+
 /// Every channel of the file as its own vector.
 pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -128,6 +134,9 @@ pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> 
         let size = u32::from_le_bytes([ch_hdr[4], ch_hdr[5], ch_hdr[6], ch_hdr[7]]) as u64;
         match &ch_hdr[0..4] {
             b"fmt " => {
+                if !(16..=1024).contains(&size) {
+                    return Err("bad fmt chunk".into());
+                }
                 let mut b = vec![0u8; size as usize];
                 file.read_exact(&mut b).map_err(|e| e.to_string())?;
                 if b.len() < 16 {
@@ -148,6 +157,12 @@ pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> 
                 if ch == 0 || sr == 0 {
                     return Err("data before fmt".into());
                 }
+                if ch > MAX_CHANNELS {
+                    return Err(format!("{ch} channels are not supported"));
+                }
+                if !SR_RANGE.contains(&sr) {
+                    return Err(format!("unsupported sample rate ({sr} Hz)"));
+                }
                 let bytes = (bits / 8) as usize;
                 if bytes == 0 || !matches!((tag, bits), (1, 8) | (1, 16) | (1, 24) | (1, 32) | (3, 32) | (3, 64)) {
                     return Err(format!("unsupported format (tag {tag}, {bits} bit)"));
@@ -156,6 +171,9 @@ pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> 
                 let size = size.min(avail);
                 let frame_bytes = bytes * ch as usize;
                 let frames = size as usize / frame_bytes;
+                if frames as u64 * ch as u64 > MAX_SAMPLES {
+                    return Err("the file is too large to load".into());
+                }
                 let mut out: Vec<Vec<f32>> = (0..ch).map(|_| Vec::with_capacity(frames)).collect();
                 let mut buf = vec![0u8; frame_bytes * 16384];
                 let mut left = frames;

@@ -247,8 +247,12 @@ fn routings_dir() -> std::path::PathBuf {
 
 /// A name that is safe to use as a file name (empty when nothing usable is left).
 fn clean_name(s: &str) -> String {
-    let n: String = s.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')')).collect();
-    n.trim().trim_matches('.').to_string()
+    let n: String = s.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')')).take(80).collect();
+    let n = n.trim_matches(|c: char| c == '.' || c == ' ').to_string();
+    // Windows treats these names as devices (CON.txt is the console): make them ordinary names
+    let stem = n.split('.').next().unwrap_or("").to_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem[3..].chars().all(|c| c.is_ascii_digit()));
+    if reserved { format!("{n}_") } else { n }
 }
 
 fn list_routings() -> Vec<String> {
@@ -1592,6 +1596,13 @@ mod tests {
         unsafe { std::env::set_var("VISUSCOPE_ROUTINGS_DIR", &dir) };
         assert!(list_routings().is_empty());
         assert_eq!(clean_name("  ../evil/na:me*? "), "evilname");
+        // device names, trailing dots and spaces, and very long names
+        assert_eq!(clean_name("con"), "con_");
+        assert_eq!(clean_name("NUL.txt"), "NUL.txt_");
+        assert_eq!(clean_name("Lpt1"), "Lpt1_");
+        assert_eq!(clean_name("COM10"), "COM10");
+        assert_eq!(clean_name("name. . "), "name");
+        assert_eq!(clean_name(&"x".repeat(300)).len(), 80);
         let mut g = Graph::starter("dev", None);
         let eq = g.add(Kind::Eq, 5.0, 6.0);
         g.node_mut(eq).unwrap().p[2] = 3.0;
