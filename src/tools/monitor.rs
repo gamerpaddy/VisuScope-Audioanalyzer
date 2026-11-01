@@ -40,6 +40,11 @@ impl Drop for Handle {
 
 pub fn start(queue: Arc<Mutex<Queue>>, gain: Arc<AtomicU32>, dev_id: Option<String>, status: Arc<Mutex<String>>) -> Handle {
     let stop = Arc::new(AtomicBool::new(false));
+    // screenshot and test runs never open an output device (nobody wants a test tone in the headphones)
+    if crate::prof::test_mode() {
+        *status.lock() = "test run: no sound output".into();
+        return Handle { stop };
+    }
     let stop2 = stop.clone();
     std::thread::Builder::new()
         .name("monitor-out".into())

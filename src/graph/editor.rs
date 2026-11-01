@@ -195,8 +195,11 @@ pub struct Routing {
     eq_new: Option<(NodeId, usize)>,
     eq_over: bool,
     eq_over_prev: bool,
-    /// zoom of the canvas (Shift + wheel)
+    /// zoom of the canvas (wheel)
     zoom: f32,
+    /// size of every node in model units as drawn last frame, and a request to move overlapping nodes apart
+    sizes: HashMap<NodeId, (f32, f32)>,
+    tidy_pending: bool,
 }
 
 type Vec2 = egui::Vec2;
@@ -213,12 +216,12 @@ fn demo_graph(input: &str) -> Graph {
     let gain = g.add(Kind::Harmonics, 290.0, 20.0);
     let mx = g.add(Kind::Mixer, 290.0, 190.0);
     let eq = g.add(Kind::Eq, 540.0, 60.0);
-    let sp = g.add(Kind::Split, 820.0, 60.0);
-    let mg = g.add(Kind::Merge, 1050.0, 60.0);
-    let cp = g.add(Kind::Comp, 1050.0, 200.0);
-    let an = g.add(Kind::Analyzer, 1330.0, 60.0);
-    let out = g.add(Kind::Output, 1330.0, 170.0);
-    let tl = g.add(Kind::TimelineRec, 1330.0, 310.0);
+    let sp = g.add(Kind::Split, 920.0, 60.0);
+    let mg = g.add(Kind::Merge, 1150.0, 60.0);
+    let cp = g.add(Kind::Comp, 1150.0, 200.0);
+    let an = g.add(Kind::Analyzer, 1430.0, 60.0);
+    let out = g.add(Kind::Output, 1430.0, 170.0);
+    let tl = g.add(Kind::TimelineRec, 1430.0, 310.0);
     for (a, b, p) in [(inp, gain, 0), (gain, mx, 2), (g1, mx, 0), (g2, mx, 1), (mx, eq, 0), (eq, sp, 0), (mg, cp, 0), (cp, an, 0), (cp, out, 0), (cp, tl, 0)] {
         let _ = g.connect(a, b, p);
     }
@@ -280,7 +283,7 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, eq_over: false, eq_over_prev: false, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, eq_over: false, eq_over_prev: false, sizes: HashMap::new(), tidy_pending: true, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     fn push(&mut self) {
@@ -298,6 +301,7 @@ impl Routing {
         if std::env::var("VISUSCOPE_GRAPH").as_deref() == Ok("demo") {
             self.g = demo_graph(&cx.default_in);
         }
+        self.tidy_pending = true;
         e.set_graph(self.g.clone());
         self.eng = Some(e);
         self.fit_next = true;
@@ -310,6 +314,55 @@ impl Routing {
         let _ = std::fs::write(file(), self.g.encode());
         self.dirty = false;
         self.last_save = Instant::now();
+    }
+
+    /// Rectangle of a node in model units (a guess for nodes that have not been drawn yet).
+    fn node_rect(&self, n: &Node) -> Rect {
+        let (w, h) = self.sizes.get(&n.id).copied().unwrap_or((node_w(n.kind), 150.0));
+        Rect::from_min_size(pos2(n.x, n.y), vec2(w, h))
+    }
+
+    /// The first free place for a node of this kind at or below `at`: a new node must not land on another one.
+    fn free_place(&self, at: Pos2, kind: Kind) -> Pos2 {
+        let (w, h) = (node_w(kind), 170.0);
+        let mut p = at;
+        for step in 0..40 {
+            let r = Rect::from_min_size(p, vec2(w, h)).expand(8.0);
+            if !self.g.nodes.iter().any(|o| self.node_rect(o).intersects(r)) {
+                return p;
+            }
+            // down first, then a column to the right
+            p.y += 40.0;
+            if step % 8 == 7 {
+                p = pos2(p.x + w + 30.0, at.y);
+            }
+        }
+        at
+    }
+
+    /// Move nodes that overlap apart (the one that is lower or more to the right gives way).
+    fn tidy(&mut self) {
+        for _ in 0..30 {
+            let mut order: Vec<usize> = (0..self.g.nodes.len()).collect();
+            order.sort_by(|&a, &b| (self.g.nodes[a].y, self.g.nodes[a].x).partial_cmp(&(self.g.nodes[b].y, self.g.nodes[b].x)).unwrap_or(std::cmp::Ordering::Equal));
+            let mut moved = false;
+            for (k, &i) in order.iter().enumerate() {
+                for &j in &order[..k] {
+                    let (ri, rj) = (self.node_rect(&self.g.nodes[i]), self.node_rect(&self.g.nodes[j]));
+                    if !ri.expand(6.0).intersects(rj) {
+                        continue;
+                    }
+                    let (dy, dx) = (rj.bottom() + 18.0 - ri.top(), rj.right() + 18.0 - ri.left());
+                    let n = &mut self.g.nodes[i];
+                    if dy <= dx { n.y += dy } else { n.x += dx }
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        self.dirty = true;
     }
 
     fn free_spot(&self) -> Pos2 {
@@ -335,6 +388,7 @@ impl Routing {
     }
 
     fn add_entry(&mut self, en: &Entry, at: Pos2, link: Link) {
+        let at = self.free_place(at, en.kind);
         let id = self.g.add(en.kind, at.x, at.y);
         if let Some(n) = self.g.node_mut(id) {
             n.s = en.s.clone();
@@ -936,6 +990,7 @@ impl Routing {
                         self.sel_wire = None;
                         self.cur_name = n.clone();
                         self.fit_next = true;
+                        self.tidy_pending = true;
                         self.note = format!("Loaded routing {n}");
                         self.push();
                         ui.close();
@@ -958,6 +1013,12 @@ impl Routing {
     fn canvas(&mut self, ui: &mut Ui, cx: &Ctx, canvas: Rect) {
         let origin = canvas.min + self.pan;
         self.eq_over_prev = std::mem::take(&mut self.eq_over);
+        // nodes that were saved on top of each other (or grew over their neighbours) are moved apart once their sizes are known
+        if self.tidy_pending && self.g.nodes.iter().all(|n| self.sizes.contains_key(&n.id)) {
+            self.tidy_pending = false;
+            self.tidy();
+            self.push();
+        }
         let painter = ui.painter_at(canvas);
         painter.rect_filled(canvas, 0.0, CANVAS_BG);
         // dot grid
@@ -1100,6 +1161,11 @@ impl Routing {
                 used_h = h;
             }
             let full = Rect::from_min_size(top_left, vec2(w, hdr + used_h.max(row)));
+            if body_changed && n.kind == Kind::Eq {
+                // a band was added or removed: the node grows or shrinks
+                self.tidy_pending = true;
+            }
+            self.sizes.insert(id, (w / z, full.height() / z));
             // header
             let header = Rect::from_min_size(top_left, vec2(w, hdr));
             let (r, g, b) = info.color;
@@ -1428,6 +1494,9 @@ impl Tool for Routing {
             if ui.button("Fit").on_hover_text("Show all nodes (F)").clicked() {
                 self.fit_next = true;
             }
+            if ui.button("Tidy").on_hover_text("Move nodes apart that overlap").clicked() {
+                self.tidy_pending = true;
+            }
             self.routings_menu(ui, cx);
             if ui.small_button(format!("{:.0} %", self.zoom * 100.0)).on_hover_text("Zoom of the node window: Shift + mouse wheel (click: back to 100 %)").clicked() {
                 self.zoom = 1.0;
@@ -1535,6 +1604,30 @@ mod tests {
         assert_eq!(back.node(eq).unwrap().p[2], 3.0);
         assert!(load_routing("missing").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nodes_do_not_land_on_each_other_and_overlaps_are_tidied() {
+        let mut r = Routing::new();
+        let a = r.g.add(Kind::Eq, 100.0, 100.0);
+        let b = r.g.add(Kind::Comp, 120.0, 130.0);
+        let c = r.g.add(Kind::Gain, 100.0, 100.0);
+        for id in [a, b, c] {
+            let n = r.g.node(id).unwrap().clone();
+            r.sizes.insert(id, (node_w(n.kind), 180.0));
+        }
+        r.tidy();
+        let rects: Vec<Rect> = [a, b, c].iter().map(|id| r.node_rect(r.g.node(*id).unwrap())).collect();
+        for i in 0..3 {
+            for j in i + 1..3 {
+                assert!(!rects[i].intersects(rects[j]), "{:?} overlaps {:?}", rects[i], rects[j]);
+            }
+        }
+        // a node added where something already is goes to a free place
+        r.add_entry(&entry(Kind::Delay), rects[0].center(), Link::None);
+        let d = r.g.nodes.last().unwrap().clone();
+        let rd = Rect::from_min_size(pos2(d.x, d.y), vec2(node_w(Kind::Delay), 170.0));
+        assert!(rects.iter().all(|x| !x.intersects(rd)), "the new node sits on another one");
     }
 
     #[test]

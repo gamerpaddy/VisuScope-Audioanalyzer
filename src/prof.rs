@@ -132,6 +132,12 @@ pub struct State {
 /// stalls of the system do not become gaps in the sound. Costs the same amount of delay.
 static SAFETY_MS: AtomicU32 = AtomicU32::new(0);
 
+/// A test or screenshot run (set by the environment hooks): nothing may play sound on the machine.
+pub fn test_mode() -> bool {
+    static T: OnceLock<bool> = OnceLock::new();
+    *T.get_or_init(|| ["VISUSCOPE_SHOT", "VISUSCOPE_GRAPH", "VISUSCOPE_LAYOUT", "VISUSCOPE_NO_SOUND", "VISUSCOPE_DAW_DEMO"].iter().any(|k| std::env::var_os(k).is_some()))
+}
+
 pub fn safety_ms() -> u32 {
     SAFETY_MS.load(Relaxed)
 }

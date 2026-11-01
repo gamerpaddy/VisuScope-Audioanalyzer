@@ -547,6 +547,11 @@ fn sleep_unless_stopped(stop: &AtomicBool, ms: u64) {
 /// Starts the output stream; rebuilds it automatically if the device format changes or it is invalidated.
 pub fn start(params: Arc<Mutex<GenParams>>, id: String, status: Arc<Mutex<String>>) -> GenHandle {
     let stop = Arc::new(AtomicBool::new(false));
+    // screenshot and test runs never play sound on the machine
+    if crate::prof::test_mode() {
+        *status.lock() = "test run: no sound output".into();
+        return GenHandle { stop };
+    }
     let stop2 = stop.clone();
     std::thread::Builder::new()
         .name("generator".into())
