@@ -444,34 +444,96 @@ impl DcBlock {
     }
 }
 
-/// Adds even harmonics (2nd, 4th ... from a squared signal) and odd harmonics (3rd, 5th ... from a cubed one).
-#[derive(Clone, Default)]
+/// Adds a series of even harmonics (2nd, 4th, 6th ...) and / or of odd ones (3rd, 5th, 7th ...) to the signal.
+/// The input is first normalised by its own level, so the harmonics keep the same size relative to the signal whether it is
+/// loud or quiet; at 100 % their total is about half the level of the signal. "Richness" decides how far up the series reaches.
+#[derive(Clone)]
 pub struct HarmUnit {
     even: f32,
     odd: f32,
     out: f32,
+    /// shape of the even term (exponent of |x|), drive of the odd term, and the gains / constants that make each
+    /// term a pure series of harmonics of a fixed size
+    pe: f32,
+    k_odd: f32,
+    mean_e: f32,
+    f1_odd: f32,
+    ge: f32,
+    go: f32,
+    env: [f32; 2],
+    release: f32,
     dc: DcBlock,
 }
 
+impl Default for HarmUnit {
+    fn default() -> Self {
+        let mut u = Self { even: 0.3, odd: 0.0, out: 1.0, pe: 1.0, k_odd: 3.0, mean_e: 0.0, f1_odd: 0.0, ge: 1.0, go: 1.0, env: [0.0; 2], release: 0.999, dc: DcBlock::default() };
+        u.tune(0.5);
+        u
+    }
+}
+
 impl HarmUnit {
-    pub fn set(&mut self, p: &[f32]) {
+    /// Work out the constants of the two shapers for a richness between 0 and 1 (numerically, over one cycle).
+    fn tune(&mut self, rich: f32) {
+        self.pe = 1.0 - 0.75 * rich;
+        self.k_odd = 1.5 + 12.0 * rich;
+        const N: usize = 1024;
+        let (mut me, mut f1) = (0f64, 0f64);
+        for i in 0..N {
+            let s = (2.0 * std::f64::consts::PI * (i as f64 + 0.5) / N as f64).sin();
+            me += s.abs().powf(self.pe as f64);
+            f1 += (self.k_odd as f64 * s).tanh() * s;
+        }
+        self.mean_e = (me / N as f64) as f32;
+        self.f1_odd = (2.0 * f1 / N as f64) as f32;
+        let (mut se, mut so) = (0f64, 0f64);
+        for i in 0..N {
+            let s = (2.0 * std::f64::consts::PI * (i as f64 + 0.5) / N as f64).sin() as f32;
+            let (he, ho) = (s.abs().powf(self.pe) - self.mean_e, (self.k_odd * s).tanh() - self.f1_odd * s);
+            se += (he * he) as f64;
+            so += (ho * ho) as f64;
+        }
+        // the harmonics of one term add up to an RMS of 0.35 (relative to a signal of amplitude 1: that is half its RMS)
+        self.ge = 0.35 / ((se / N as f64).sqrt() as f32).max(1e-6);
+        self.go = 0.35 / ((so / N as f64).sqrt() as f32).max(1e-6);
+    }
+
+    pub fn set(&mut self, p: &[f32], fs: f32) {
         self.even = p.first().copied().unwrap_or(30.0) * 0.01;
         self.odd = p.get(1).copied().unwrap_or(0.0) * 0.01;
-        self.out = db_to_lin(p.get(2).copied().unwrap_or(0.0));
+        let rich = p.get(2).copied().unwrap_or(50.0) * 0.01;
+        self.out = db_to_lin(p.get(3).copied().unwrap_or(0.0));
+        self.release = (-1.0 / (0.06 * fs.max(1000.0))).exp();
+        self.tune(rich.clamp(0.0, 1.0));
     }
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         for (c, ch) in [l, r].into_iter().enumerate() {
             for v in ch.iter_mut() {
                 let x = *v;
-                // x^2 of a sine is half its amplitude at twice the frequency (plus DC, which is removed); x^3 gives a quarter at three times
-                let e = self.dc.tick(x * x, c);
-                *v = (x + self.even * e * 2.0 + self.odd * x * x * x * 4.0 / 3.0) * self.out;
+                let a = x.abs();
+                // fast attack, slow release
+                self.env[c] = if a > self.env[c] { a } else { self.env[c] * self.release };
+                let env = self.env[c];
+                if env < 1e-5 {
+                    *v = x * self.out;
+                    continue;
+                }
+                let u = (x / env).clamp(-1.0, 1.0);
+                let mut h = 0.0;
+                if self.even > 0.0 {
+                    let e = u.abs().powf(self.pe) - self.mean_e;
+                    h += self.even * self.ge * self.dc.tick(e, c);
+                }
+                if self.odd > 0.0 {
+                    h += self.odd * self.go * ((self.k_odd * u).tanh() - self.f1_odd * u);
+                }
+                *v = (x + env * h) * self.out;
             }
         }
     }
 }
-
 #[derive(Clone, Copy, PartialEq)]
 pub enum DistShape {
     Soft,
@@ -860,27 +922,43 @@ mod tests {
     }
 
     #[test]
-    fn harmonics_node_makes_even_or_odd_harmonics() {
+    fn harmonics_node_makes_a_series_of_even_or_odd_harmonics() {
         let fs = 48000.0;
-        let run = |even: f32, odd: f32| {
+        let run = |even: f32, odd: f32, rich: f32, amp: f32| {
             let mut u = HarmUnit::default();
-            u.set(&[even, odd, 0.0]);
-            let mut l = sine(1000.0, fs, 48000, 0.8);
+            u.set(&[even, odd, rich, 0.0], fs);
+            let mut l = sine(1000.0, fs, 48000, amp);
             let mut r = l.clone();
             u.process(&mut l, &mut r);
-            l[8000..].to_vec()
+            l[12000..].to_vec()
         };
-        let e = run(100.0, 0.0);
-        assert!(tone_level(&e, 2000.0, fs) > 0.15, "2nd {}", tone_level(&e, 2000.0, fs));
-        assert!(tone_level(&e, 3000.0, fs) < 0.01, "3rd {}", tone_level(&e, 3000.0, fs));
-        let o = run(0.0, 100.0);
-        assert!(tone_level(&o, 3000.0, fs) > 0.1, "3rd {}", tone_level(&o, 3000.0, fs));
-        assert!(tone_level(&o, 2000.0, fs) < 0.01, "2nd {}", tone_level(&o, 2000.0, fs));
+        let a = 0.8;
+        // even: 2nd and 4th (and more), no odd ones
+        let e = run(100.0, 0.0, 50.0, a);
+        let (h2, h3, h4) = (tone_level(&e, 2000.0, fs), tone_level(&e, 3000.0, fs), tone_level(&e, 4000.0, fs));
+        assert!(h2 > 0.2 * a, "2nd {h2}");
+        assert!(h4 > 0.03 * a, "4th {h4}");
+        assert!(h3 < 0.01 * a, "3rd {h3}");
+        // odd: 3rd, 5th, 7th, no even ones
+        let o = run(0.0, 100.0, 50.0, a);
+        let (o2, o3, o5, o7) = (tone_level(&o, 2000.0, fs), tone_level(&o, 3000.0, fs), tone_level(&o, 5000.0, fs), tone_level(&o, 7000.0, fs));
+        assert!(o3 > 0.2 * a, "3rd {o3}");
+        assert!(o5 > 0.05 * a && o7 > 0.02 * a, "5th {o5} 7th {o7}");
+        assert!(o2 < 0.01 * a, "2nd {o2}");
+        // the fundamental stays what it was
+        assert!((tone_level(&o, 1000.0, fs) - a).abs() < 0.03, "fundamental {}", tone_level(&o, 1000.0, fs));
+        // richness reaches further up the series
+        let poor = run(0.0, 100.0, 0.0, a);
+        let rich = run(0.0, 100.0, 100.0, a);
+        assert!(tone_level(&rich, 9000.0, fs) > tone_level(&poor, 9000.0, fs) * 2.0);
+        // a quiet signal gets the same amount of harmonics relative to its level
+        let loud = tone_level(&run(0.0, 100.0, 50.0, 0.8), 3000.0, fs) / 0.8;
+        let quiet = tone_level(&run(0.0, 100.0, 50.0, 0.01), 3000.0, fs) / 0.01;
+        assert!((loud / quiet - 1.0).abs() < 0.2, "loud {loud} quiet {quiet}");
         // nothing added: the input comes back
-        let n = run(0.0, 0.0);
-        assert!((tone_level(&n, 1000.0, fs) - 0.8).abs() < 0.01);
+        let n = run(0.0, 0.0, 50.0, a);
+        assert!((tone_level(&n, 1000.0, fs) - a).abs() < 0.01);
     }
-
     #[test]
     fn distortions_stay_bounded_and_add_harmonics() {
         let fs = 48000.0;

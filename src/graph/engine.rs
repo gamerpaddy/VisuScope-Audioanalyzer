@@ -408,7 +408,7 @@ impl Run {
             Rt::Lim(u) => u.set(&pv, fs),
             Rt::Gate(u) => u.set(&pv, fs),
             Rt::Dly(u) => u.set(&pv, fs),
-            Rt::Harm(u) => u.set(&pv),
+            Rt::Harm(u) => u.set(&pv, fs),
             Rt::Dist(u) => u.set(&pv, fs),
             Rt::Fuzz(u) => u.set(&pv, fs),
             Rt::Crush(u) => u.set(&pv),

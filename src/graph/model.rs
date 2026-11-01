@@ -82,7 +82,7 @@ const P_COMP: &[ParamDef] = &[
 const P_LIMIT: &[ParamDef] = &[s("Ceiling", -24.0, 0.0, -1.0, " dB"), l("Release", 1.0, 500.0, 60.0, " ms")];
 const P_GATE: &[ParamDef] = &[s("Threshold", -90.0, 0.0, -50.0, " dB"), l("Attack", 0.1, 50.0, 2.0, " ms"), l("Release", 5.0, 1000.0, 120.0, " ms"), s("Range", -90.0, 0.0, -80.0, " dB")];
 const P_DELAY: &[ParamDef] = &[s("Time", 0.0, 2000.0, 250.0, " ms"), s("Feedback", 0.0, 95.0, 30.0, " %"), s("Mix", 0.0, 100.0, 50.0, " %")];
-const P_HARM: &[ParamDef] = &[s("Even", 0.0, 100.0, 30.0, " %"), s("Odd", 0.0, 100.0, 0.0, " %"), s("Output", -24.0, 12.0, 0.0, " dB")];
+const P_HARM: &[ParamDef] = &[s("Even", 0.0, 100.0, 40.0, " %"), s("Odd", 0.0, 100.0, 0.0, " %"), s("Richness", 0.0, 100.0, 50.0, " %"), s("Output", -24.0, 12.0, 0.0, " dB")];
 const P_DIST: &[ParamDef] = &[
     s("Drive", 0.0, 48.0, 12.0, " dB"),
     c("Shape", 0, &["Soft (tube-like)", "Hard clip", "Asymmetric (even)", "Fold-back"]),
