@@ -37,3 +37,32 @@ pub fn save(title: &'static str, name: &'static str, exts: &'static [&'static st
     let dir = super::docs_dir();
     spawn(move || rfd::FileDialog::new().set_title(title).set_directory(dir).set_file_name(file).add_filter(name, exts).save_file())
 }
+
+/// Several files at once.
+#[derive(Clone, Default)]
+pub struct PendingMany(Arc<Mutex<Option<Vec<PathBuf>>>>);
+
+impl PendingMany {
+    pub fn take(&self) -> Option<Vec<PathBuf>> {
+        self.0.try_lock().and_then(|mut g| g.take())
+    }
+}
+
+pub fn open_many(title: &'static str, name: &'static str, exts: &'static [&'static str]) -> PendingMany {
+    let dir = super::docs_dir();
+    let p = PendingMany::default();
+    let slot = p.0.clone();
+    std::thread::Builder::new()
+        .name("dialog".into())
+        .spawn(move || {
+            let r = rfd::FileDialog::new().set_title(title).set_directory(dir).add_filter(name, exts).pick_files().unwrap_or_default();
+            *slot.lock() = Some(r);
+        })
+        .ok();
+    p
+}
+
+pub fn pick_folder(title: &'static str) -> Pending {
+    let dir = super::docs_dir();
+    spawn(move || rfd::FileDialog::new().set_title(title).set_directory(dir).pick_folder())
+}

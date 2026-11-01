@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 pub mod decode;
 pub mod distortion;
+pub mod daw;
 pub mod dialogs;
 pub mod eqtool;
 pub mod impulse;
@@ -36,7 +37,7 @@ pub mod tap;
 pub mod transfer;
 pub mod wavio;
 
-pub const TOOL_COUNT: usize = 15;
+pub const TOOL_COUNT: usize = 16;
 
 pub struct ToolInfo {
     pub short: &'static str,
@@ -63,6 +64,7 @@ pub const INFO: [ToolInfo; TOOL_COUNT] = [
     ToolInfo { short: "Sequence", title: "Test sequence", weight: 1.6, tip: "Scripted tests: drive the generator, measure, sweep and check against limits (pass/fail)" },
     ToolInfo { short: "Report", title: "Report & export", weight: 1.2, tip: "Create an HTML / PDF measurement report and export responses (FRD, REW text, impulse WAV)" },
     ToolInfo { short: "EQ", title: "EQ design", weight: 2.0, tip: "Fit parametric filters to a measurement, preview, export Equalizer APO / biquads / FIR" },
+    ToolInfo { short: "Timeline", title: "Timeline (multitrack)", weight: 4.0, tip: "Multitrack recorder and editor: record several sources and channels at once, load, edit and analyse tracks" },
 ];
 
 /// How the Tools menu groups the tools (indices into `INFO`).
@@ -70,7 +72,7 @@ pub const GROUPS: [(&str, &[usize]); 4] = [
     ("Measure", &[2, 3, 11, 10, 5]),
     ("Analyse", &[1, 4, 6, 9, 8]),
     ("Test & design", &[12, 14]),
-    ("Record & report", &[0, 7, 13]),
+    ("Record & report", &[15, 0, 7, 13]),
 ];
 
 pub fn all() -> Vec<Box<dyn Tool>> {
@@ -90,6 +92,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(sequence::Sequence::new()),
         Box::new(reportui::ReportTool::new()),
         Box::new(eqtool::EqTool::new()),
+        Box::new(daw::Daw::new()),
     ];
     debug_assert_eq!(v.len(), TOOL_COUNT);
     v
@@ -135,6 +138,8 @@ pub struct Requests {
     pub start_gen: bool,
     pub audio: AudioReq,
     pub note: Option<String>,
+    /// audio files to open in the timeline (also opens its window)
+    pub send_to_daw: Vec<std::path::PathBuf>,
 }
 
 /// Read-only view of the app state plus the few things tools may change.

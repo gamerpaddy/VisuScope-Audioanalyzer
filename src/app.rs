@@ -99,6 +99,13 @@ pub struct App {
     pub snap_src: usize,
     pub wins: [WinState; WIN_COUNT],
     pub need_tile: bool,
+    /// window drag in progress, snap guides and the dock preview shown while dragging
+    pub win_drag: Option<crate::windows::WinDrag>,
+    pub snap_guides: Vec<(bool, f32)>,
+    pub dock_preview: Option<egui::Rect>,
+    pub snap_on: bool,
+    /// the window that was used last
+    pub focus: usize,
     /// re-tile automatically whenever a window is opened or closed
     pub auto_tile: bool,
     pub open_mask: u32,
@@ -165,6 +172,11 @@ pub struct App {
     pub presets: Vec<UserPreset>,
     pub preset_name: String,
     pub test_sweep_started: bool,
+    /// test hooks: VISUSCOPE_SHOT=file.png [VISUSCOPE_SHOT_AFTER=secs] saves a screenshot and exits,
+    /// VISUSCOPE_LAYOUT=n applies the n-th layout preset (0 based) once the layout is ready
+    pub shot_env: Option<(String, f32)>,
+    pub shot_state: Option<Instant>,
+    pub layout_env: Option<usize>,
     /// `--run script [--report file]` from the command line
     pub autorun: Option<(String, Option<String>)>,
 }
@@ -230,6 +242,16 @@ impl App {
         let cmap = Cmap::Inferno;
         let lut = cmap.lut();
         let ctx = &cc.egui_ctx;
+        // egui only learns the GL texture limit once the first frame starts, so its debug assertion in
+        // `load_texture` compared the big history textures with a placeholder (2048): debug builds panicked
+        // at startup. Tell it the real limit.
+        if let Some(gl) = &cc.gl {
+            use eframe::glow::HasContext;
+            let max = unsafe { gl.get_parameter_i32(eframe::glow::MAX_TEXTURE_SIZE) };
+            if max > 0 {
+                ctx.input_mut(|i| i.max_texture_side = max as usize);
+            }
+        }
         let sg_tex = ctx.load_texture("spectrogram", ColorImage::filled([SG_W, ROWS], lut[0]), TextureOptions::LINEAR);
         let wf_tex = ctx.load_texture("waterfall", ColorImage::filled([ROWS, WF_H], lut[0]), TextureOptions::LINEAR);
         let mut app = Self {
@@ -283,6 +305,11 @@ impl App {
             snap_src: 0,
             wins: std::array::from_fn(WinState::new),
             need_tile: false,
+            win_drag: None,
+            snap_guides: Vec::new(),
+            dock_preview: None,
+            snap_on: true,
+            focus: 0,
             auto_tile: true,
             open_mask: 0,
             settle: 0,
@@ -345,6 +372,9 @@ impl App {
             presets: Vec::new(),
             preset_name: String::new(),
             test_sweep_started: false,
+            shot_env: std::env::var("VISUSCOPE_SHOT").ok().map(|p| (p, std::env::var("VISUSCOPE_SHOT_AFTER").ok().and_then(|v| v.parse().ok()).unwrap_or(9.0))),
+            shot_state: None,
+            layout_env: std::env::var("VISUSCOPE_LAYOUT").ok().and_then(|v| v.parse().ok()),
             autorun: {
                 let a: Vec<String> = std::env::args().collect();
                 let val = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
@@ -407,6 +437,7 @@ impl App {
         kv("st_hold", &self.stereo.hold);
         kv("rotated", &self.rotated);
         kv("auto_tile", &self.auto_tile);
+        kv("win_snap", &self.snap_on);
         kv("meas_ch", &self.meas_ch);
         kv("readout_hz", &self.readout_hz);
         kv("fps_cap", &self.fps_cap);
@@ -444,6 +475,7 @@ impl App {
         kv("sc_r", &sc.show[1]);
         for (i, w) in self.wins.iter().enumerate() {
             kv(&format!("w{i}_open"), &w.open);
+            kv(&format!("w{i}_collapsed"), &w.collapsed);
             // stored relative to the central area so the layout can be rescaled to any window size
             if let (Some(r), Some(a)) = (w.rect, self.area) {
                 let rel = r.min - a.min;
@@ -538,6 +570,7 @@ impl App {
         set!(self.stereo.hold, "st_hold");
         set!(self.rotated, "rotated");
         set!(self.auto_tile, "auto_tile");
+        set!(self.snap_on, "win_snap");
         set!(self.snap_peak, "snap_peak");
         if let Some(v) = get::<usize>(&m, "smooth_oct") {
             self.smooth_oct = v.min(SMOOTH_OCT.len() - 1);
@@ -669,6 +702,9 @@ impl App {
         for i in 0..WIN_COUNT {
             if let Some(o) = get::<bool>(&m, &format!("w{i}_open")) {
                 self.wins[i].open = o;
+            }
+            if let Some(o) = get::<bool>(&m, &format!("w{i}_collapsed")) {
+                self.wins[i].collapsed = o;
             }
             if let Some(r) = m.get(format!("w{i}_rect").as_str()) {
                 let v: Vec<f32> = r.split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -1399,6 +1435,23 @@ impl eframe::App for App {
             }
         });
 
+        if self.layout_ready {
+            if let Some(n) = self.layout_env.take() {
+                self.apply_preset_index(n);
+            }
+        }
+        if let Some((path, after)) = self.shot_env.clone() {
+            if self.layout_ready && self.sh.t0.elapsed().as_secs_f32() > after {
+                match self.shot_state {
+                    None => {
+                        self.shot_state = Some(Instant::now());
+                        self.request_png_to(&ctx, path);
+                    }
+                    Some(t) if t.elapsed().as_secs_f32() > 2.0 => std::process::exit(0),
+                    _ => {}
+                }
+            }
+        }
         beat(self, 8);
         self.ms[WIN_COUNT] += 0.1 * (t_frame.elapsed().as_secs_f32() * 1000.0 - self.ms[WIN_COUNT]);
         if self.last_save_t.elapsed().as_secs_f32() > 2.0 {

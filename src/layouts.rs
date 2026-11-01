@@ -1,17 +1,74 @@
 //! Layout presets (built-in and user-saved), pop-out windows and keyboard shortcuts.
 
 use crate::app::App;
-use crate::windows::{win_short, BUILTIN, WIN_COUNT};
+use crate::windows::{win_short, BUILTIN, GAP, WIN_COUNT};
 use eframe::egui::{self, vec2, Rect, Ui};
 
-/// Built-in presets: name and the windows that are open (see `windows::win_short` for the indices).
-const PRESETS: [(&str, &[usize]); 6] = [
-    ("Overview", &[0, 1, 2, 3, 4, 5]),
-    ("Analysis", &[0, 1, 5, 9, 12]),
-    ("Scope & generator", &[4, 0, 6, 5]),
-    ("Mastering", &[0, 2, 9, 13]),
-    ("Acoustics lab", &[6, 10, 11, 0, 5]),
-    ("Monitoring", &[0, 5, 14, 15, 16]),
+const fn t(k: usize) -> usize {
+    BUILTIN + k
+}
+// tool windows (index into `tools::INFO`)
+const REC: usize = t(0);
+const OCT: usize = t(1);
+const RESP: usize = t(2);
+const IMP: usize = t(3);
+const PEAKS: usize = t(4);
+const LOUD: usize = t(5);
+const STATS: usize = t(6);
+const LOG: usize = t(7);
+const REFN: usize = t(8);
+const SPL: usize = t(10);
+const DIST: usize = t(11);
+const EQ: usize = t(14);
+const DAW: usize = t(15);
+// built-in windows
+const SPEC: usize = 0;
+const SPG: usize = 1;
+const STEREO: usize = 2;
+const D3: usize = 3;
+const SCOPE: usize = 4;
+const MEAS: usize = 5;
+const GEN: usize = 6;
+
+/// A built-in preset: the open windows and, optionally, where each goes (x, y, w, h as fractions of the
+/// area, same order as `wins`). Without rects the windows are tiled by importance.
+struct Preset {
+    group: &'static str,
+    name: &'static str,
+    wins: &'static [usize],
+    rects: &'static [[f32; 4]],
+}
+
+const fn p(group: &'static str, name: &'static str, wins: &'static [usize], rects: &'static [[f32; 4]]) -> Preset {
+    Preset { group, name, wins, rects }
+}
+
+/// Ctrl+1..9 pick the first nine.
+const PRESETS: [Preset; 24] = [
+    p("Classic", "Overview", &[0, 1, 2, 3, 4, 5], &[]),
+    p("Classic", "Analysis", &[SPEC, SPG, MEAS, OCT, PEAKS], &[]),
+    p("Classic", "Scope & generator", &[SCOPE, SPEC, GEN, MEAS], &[]),
+    p("Classic", "Mastering", &[SPEC, STEREO, OCT, LOUD], &[]),
+    p("Classic", "Acoustics lab", &[GEN, RESP, IMP, SPEC, MEAS], &[]),
+    p("Classic", "Monitoring", &[SPEC, MEAS, STATS, LOG, REFN], &[]),
+    p("Timeline", "Studio", &[DAW, SPEC, SPG, LOUD], &[[0.0, 0.46, 1.0, 0.54], [0.0, 0.0, 0.40, 0.46], [0.40, 0.0, 0.35, 0.46], [0.75, 0.0, 0.25, 0.46]]),
+    p("Timeline", "Record & monitor", &[DAW, SCOPE, SPEC, STEREO], &[[0.0, 0.0, 1.0, 0.60], [0.0, 0.60, 0.34, 0.40], [0.34, 0.60, 0.38, 0.40], [0.72, 0.60, 0.28, 0.40]]),
+    p("Timeline", "Mix & master", &[DAW, SPEC, OCT, LOUD, STEREO], &[[0.0, 0.52, 1.0, 0.48], [0.0, 0.0, 0.32, 0.52], [0.32, 0.0, 0.28, 0.52], [0.60, 0.0, 0.20, 0.52], [0.80, 0.0, 0.20, 0.52]]),
+    p("Timeline", "Edit & measure", &[DAW, SPEC, MEAS, STATS], &[[0.0, 0.0, 0.70, 1.0], [0.70, 0.0, 0.30, 0.40], [0.70, 0.40, 0.30, 0.30], [0.70, 0.70, 0.30, 0.30]]),
+    p("Timeline", "Timeline + spectrum", &[DAW, SPEC], &[[0.0, 0.0, 1.0, 0.68], [0.0, 0.68, 1.0, 0.32]]),
+    p("Timeline", "Timeline only", &[DAW], &[[0.0, 0.0, 1.0, 1.0]]),
+    p("Views", "Spectrum + spectrogram", &[SPEC, SPG], &[[0.0, 0.0, 1.0, 0.55], [0.0, 0.55, 1.0, 0.45]]),
+    p("Views", "Quad view", &[SPEC, SPG, SCOPE, STEREO], &[[0.0, 0.0, 0.5, 0.5], [0.5, 0.0, 0.5, 0.5], [0.0, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]]),
+    p("Views", "Waterfall 3D", &[SPEC, D3, SPG], &[[0.0, 0.0, 0.45, 1.0], [0.45, 0.0, 0.55, 0.60], [0.45, 0.60, 0.55, 0.40]]),
+    p("Views", "Spectrum only", &[SPEC], &[[0.0, 0.0, 1.0, 1.0]]),
+    p("Views", "Tuner", &[PEAKS, SPEC, SCOPE], &[[0.0, 0.0, 0.35, 1.0], [0.35, 0.0, 0.65, 0.55], [0.35, 0.55, 0.65, 0.45]]),
+    p("Views", "Loudness check", &[LOUD, STATS, SPL, STEREO], &[[0.0, 0.0, 0.5, 0.6], [0.5, 0.0, 0.5, 0.6], [0.0, 0.6, 0.5, 0.4], [0.5, 0.6, 0.5, 0.4]]),
+    p("Acoustics", "Speaker measurement", &[RESP, IMP, SPEC, GEN, MEAS], &[[0.0, 0.0, 0.62, 0.62], [0.62, 0.0, 0.38, 0.62], [0.0, 0.62, 0.40, 0.38], [0.40, 0.62, 0.30, 0.38], [0.70, 0.62, 0.30, 0.38]]),
+    p("Acoustics", "Room EQ", &[RESP, EQ, REFN, IMP], &[[0.0, 0.0, 0.55, 0.55], [0.55, 0.0, 0.45, 0.55], [0.0, 0.55, 0.40, 0.45], [0.40, 0.55, 0.60, 0.45]]),
+    p("Acoustics", "Distortion lab", &[DIST, SPEC, MEAS, GEN], &[[0.0, 0.0, 0.60, 1.0], [0.60, 0.0, 0.40, 0.50], [0.60, 0.50, 0.20, 0.50], [0.80, 0.50, 0.20, 0.50]]),
+    p("Acoustics", "Impulse & RT60", &[IMP, RESP, GEN], &[[0.0, 0.0, 0.6, 1.0], [0.6, 0.0, 0.4, 0.65], [0.6, 0.65, 0.4, 0.35]]),
+    p("More", "Recorder + spectrum", &[REC, SPEC, SPG], &[[0.0, 0.0, 0.34, 1.0], [0.34, 0.0, 0.66, 0.5], [0.34, 0.5, 0.66, 0.5]]),
+    p("More", "Everything", &[0, 1, 2, 3, 4, 5, OCT, LOUD, DAW], &[]),
 ];
 
 #[derive(Clone)]
@@ -65,11 +122,25 @@ impl App {
     }
 
     fn apply_builtin(&mut self, k: usize) {
+        let pr = &PRESETS[k];
         for i in 0..WIN_COUNT {
-            self.wins[i].open = PRESETS[k].1.contains(&i);
+            let slot = pr.wins.iter().position(|&w| w == i);
+            self.wins[i].open = slot.is_some();
             self.wins[i].prev = None;
+            self.wins[i].collapsed = false;
+            if let (Some(s), Some(area)) = (slot, self.area) {
+                let Some(f) = pr.rects.get(s) else { continue };
+                let r = Rect::from_min_size(area.min + vec2(f[0] * area.width(), f[1] * area.height()), vec2(f[2] * area.width(), f[3] * area.height()));
+                self.wins[i].rect = Some(r.shrink(GAP * 0.5));
+                self.popped[i] = false;
+            }
         }
-        self.need_tile = true;
+        if pr.rects.is_empty() || self.area.is_none() {
+            self.need_tile = true;
+        } else {
+            // the arrangement is the preset's: do not re-tile because the set of open windows changed
+            self.open_mask = self.current_mask();
+        }
     }
 
     fn apply_user(&mut self, k: usize) {
@@ -77,9 +148,9 @@ impl App {
         for i in 0..WIN_COUNT {
             self.wins[i].open = p.open[i];
             self.wins[i].prev = None;
+            self.wins[i].collapsed = false;
             if let (true, Some(r)) = (p.open[i], p.rects[i]) {
                 self.wins[i].rect = Some(Rect::from_min_size(area.min + vec2(r[0] * area.width(), r[1] * area.height()), vec2(r[2] * area.width(), r[3] * area.height())));
-                self.wins[i].epoch += 1;
             }
         }
         // the arrangement is the user's: do not re-tile because the set of open windows changed
@@ -118,7 +189,7 @@ impl App {
         }
     }
 
-    fn apply_preset_index(&mut self, n: usize) {
+    pub fn apply_preset_index(&mut self, n: usize) {
         if n < PRESETS.len() {
             self.apply_builtin(n);
         } else if n - PRESETS.len() < self.presets.len() {
@@ -128,14 +199,27 @@ impl App {
 
     pub fn layouts_menu(&mut self, ui: &mut Ui) {
         ui.menu_button("Layouts", |ui| {
-            for (k, (name, _)) in PRESETS.iter().enumerate() {
-                if ui.add(egui::Button::new(*name).shortcut_text(format!("Ctrl+{}", k + 1))).clicked() {
+            let mut group = "";
+            for (k, pr) in PRESETS.iter().enumerate() {
+                if pr.group != group {
+                    group = pr.group;
+                    if k > 0 {
+                        ui.separator();
+                    }
+                    ui.label(egui::RichText::new(group).small().weak());
+                }
+                let mut b = egui::Button::new(pr.name);
+                if k < 9 {
+                    b = b.shortcut_text(format!("Ctrl+{}", k + 1));
+                }
+                if ui.add(b).clicked() {
                     self.apply_builtin(k);
                     ui.close();
                 }
             }
             if !self.presets.is_empty() {
                 ui.separator();
+                ui.label(egui::RichText::new("Saved").small().weak());
             }
             let mut delete = None;
             for k in 0..self.presets.len() {
@@ -205,8 +289,20 @@ mod tests {
 
     #[test]
     fn presets_use_valid_windows() {
-        for (_, set) in PRESETS {
-            assert!(set.iter().all(|&i| i < WIN_COUNT));
+        for pr in PRESETS.iter() {
+            assert!(pr.wins.iter().all(|&i| i < WIN_COUNT), "{}", pr.name);
+            assert!(pr.rects.is_empty() || pr.rects.len() == pr.wins.len(), "{}", pr.name);
+            for r in pr.rects {
+                assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= 1.001 && r[1] + r[3] <= 1.001, "{}", pr.name);
+            }
+            // no two windows of a preset overlap
+            for (a, ra) in pr.rects.iter().enumerate() {
+                for rb in pr.rects.iter().skip(a + 1) {
+                    let ox = ra[0] < rb[0] + rb[2] - 1e-4 && rb[0] < ra[0] + ra[2] - 1e-4;
+                    let oy = ra[1] < rb[1] + rb[3] - 1e-4 && rb[1] < ra[1] + ra[3] - 1e-4;
+                    assert!(!(ox && oy), "{} overlaps", pr.name);
+                }
+            }
         }
     }
 }

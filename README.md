@@ -56,7 +56,16 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 **Interface**
 - Stored traces: name, recolour, overlay, show relative to one trace, average, save and load
 - Fractional-octave smoothing of the spectrum
-- Floating windows, auto tiling, saved layouts (Ctrl+1 to 9), pop-out windows
+- Desktop-style windows with thin title bars: they snap to each other and to the edges, dock to halves / quarters when released against an edge, and neighbours that touch follow when an edge is resized (Alt: resize one window only, Ctrl: move without snapping)
+- 24 layout presets (analysis, timeline / studio, acoustics ...), saved layouts (Ctrl+1 to 9), auto tiling, pop-out windows
+
+**Timeline (multitrack recorder and editor)**
+- Record several tracks at once from several devices: any channel, stereo pair or mono mix of any input (or loopback) per track, e.g. track 1 = device A left, track 2 = device A right, track 3 = device B mono mix
+- Load audio files (also multichannel, drag and drop) as tracks; sample rates are converted
+- Non-destructive editing: split, trim, move across tracks, fades, gain, normalize, reverse, duplicate, copy / paste, range delete, undo / redo, snapping
+- Playback feeds all analysers (spectrum, scope, loudness ...), either the master or the selected track
+- Analysis of the selection: levels, LUFS, true peak, clipping, spectrum and spectrogram; store the spectrum as a trace
+- Mixdown, stems and bounce; projects are saved as `.vsproj` and restored automatically
 - Settings are remembered between runs
 - PNG screenshots
 

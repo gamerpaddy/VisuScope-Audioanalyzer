@@ -14,17 +14,22 @@ use symphonia::core::probe::Hint;
 pub const EXTENSIONS: &[&str] = &["wav", "flac", "mp3", "ogg", "oga", "m4a", "mp4", "aac", "alac", "mkv", "mka", "webm", "caf", "w64"];
 
 pub fn read(path: &std::path::Path) -> Result<WavData, String> {
+    read_all(path).map(|(sr, ch)| WavData::from_channels(sr, ch))
+}
+
+/// Sample rate and every channel of the file.
+pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     if ext == "wav" {
         // fast path; falls back to the general decoder for ADPCM and other exotic WAVs
-        if let Ok(d) = wavio::read(path) {
+        if let Ok(d) = wavio::read_all(path) {
             return Ok(d);
         }
     }
     decode(path, &ext)
 }
 
-fn decode(path: &std::path::Path, ext: &str) -> Result<WavData, String> {
+fn decode(path: &std::path::Path, ext: &str) -> Result<(u32, Vec<Vec<f32>>), String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -37,7 +42,7 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<WavData, String> {
     let id = track.id;
     let mut dec = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).map_err(|e| format!("unsupported codec ({e})"))?;
     let (mut sr, mut chans) = (track.codec_params.sample_rate.unwrap_or(0), track.codec_params.channels.map(|c| c.count()).unwrap_or(0));
-    let (mut l, mut r): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
+    let mut out: Vec<Vec<f32>> = Vec::new();
     let mut buf: Option<SampleBuffer<f32>> = None;
     loop {
         let packet = match format.next_packet() {
@@ -45,7 +50,7 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<WavData, String> {
             Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(Error::ResetRequired) => break,
             Err(e) => {
-                if l.is_empty() {
+                if out.first().map_or(true, |c| c.is_empty()) {
                     return Err(format!("read error: {e}"));
                 }
                 break;
@@ -64,25 +69,35 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<WavData, String> {
                 }
                 let b = buf.as_mut().unwrap();
                 b.copy_interleaved_ref(audio);
+                if out.len() != chans {
+                    // a stream that changes its channel count mid-file: keep what we have, start over only if empty
+                    if out.first().map_or(true, |c| c.is_empty()) {
+                        out = vec![Vec::new(); chans];
+                    } else {
+                        continue;
+                    }
+                }
                 for fr in b.samples().chunks_exact(chans) {
-                    l.push(fr[0]);
-                    r.push(if chans > 1 { fr[1] } else { fr[0] });
+                    for (c, o) in out.iter_mut().enumerate() {
+                        o.push(fr[c]);
+                    }
                 }
             }
             // a corrupt packet: skip it
             Err(Error::DecodeError(_)) => continue,
             Err(e) => {
-                if l.is_empty() {
+                if out.first().map_or(true, |c| c.is_empty()) {
                     return Err(format!("decode error: {e}"));
                 }
                 break;
             }
         }
     }
-    if l.is_empty() || sr == 0 {
+    if out.first().map_or(true, |c| c.is_empty()) || sr == 0 {
         return Err("no audio decoded".into());
     }
-    Ok(WavData { sr, l, r, src_channels: chans as u16 })
+    let _ = chans;
+    Ok((sr, out))
 }
 
 #[cfg(test)]
@@ -109,7 +124,7 @@ mod tests {
         w.finish().unwrap();
         let fast = read(&path).unwrap();
         // force the Symphonia path
-        let slow = decode(&path, "wav").unwrap();
+        let slow = WavData::from_channels(32000, decode(&path, "wav").unwrap().1);
         assert_eq!((fast.sr, fast.l.len()), (32000, 4000));
         assert_eq!((slow.sr, slow.l.len()), (32000, 4000));
         for i in (0..4000).step_by(97) {

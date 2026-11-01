@@ -101,7 +101,18 @@ pub struct WavData {
     pub src_channels: u16,
 }
 
-pub fn read(path: &std::path::Path) -> Result<WavData, String> {
+impl WavData {
+    /// First two channels (a mono file is duplicated into both).
+    pub fn from_channels(sr: u32, mut ch: Vec<Vec<f32>>) -> Self {
+        let src_channels = ch.len() as u16;
+        ch.truncate(2);
+        let r = if ch.len() > 1 { ch.pop().unwrap() } else { ch[0].clone() };
+        Self { sr, l: ch.swap_remove(0), r, src_channels }
+    }
+}
+
+/// Every channel of the file as its own vector.
+pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hdr = [0u8; 12];
     file.read_exact(&mut hdr).map_err(|e| e.to_string())?;
@@ -145,7 +156,7 @@ pub fn read(path: &std::path::Path) -> Result<WavData, String> {
                 let size = size.min(avail);
                 let frame_bytes = bytes * ch as usize;
                 let frames = size as usize / frame_bytes;
-                let (mut l, mut r) = (Vec::with_capacity(frames), Vec::with_capacity(frames));
+                let mut out: Vec<Vec<f32>> = (0..ch).map(|_| Vec::with_capacity(frames)).collect();
                 let mut buf = vec![0u8; frame_bytes * 16384];
                 let mut left = frames;
                 let mut rd = std::io::BufReader::new(&mut file);
@@ -165,13 +176,16 @@ pub fn read(path: &std::path::Path) -> Result<WavData, String> {
                                 _ => f64::from_le_bytes([o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7]]) as f32,
                             }
                         };
-                        let a = s(0);
-                        l.push(a);
-                        r.push(if ch > 1 { s(1) } else { a });
+                        for (c, o) in out.iter_mut().enumerate() {
+                            o.push(s(c));
+                        }
                     }
                     left -= n;
                 }
-                return Ok(WavData { sr, l, r, src_channels: ch });
+                if out[0].is_empty() {
+                    return Err("empty data chunk".into());
+                }
+                return Ok((sr, out));
             }
             _ => {
                 file.seek(SeekFrom::Current((size + (size & 1)) as i64)).map_err(|e| e.to_string())?;
@@ -195,7 +209,7 @@ mod tests {
             w.write(&l[..400], &r[..400]).unwrap();
             w.write(&l[400..], &r[400..]).unwrap();
             w.finish().unwrap();
-            let d = read(&path).unwrap();
+            let d = WavData::from_channels(read_all(&path).unwrap().0, read_all(&path).unwrap().1);
             assert_eq!((d.sr, d.l.len()), (44100, 1000));
             let tol = match fmt {
                 Format::Pcm16 => 1e-4,

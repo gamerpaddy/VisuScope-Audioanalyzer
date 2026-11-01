@@ -37,6 +37,7 @@ struct PlayShared {
 
 struct Loaded {
     name: String,
+    path: std::path::PathBuf,
     data: Arc<WavData>,
     /// min / max per overview block
     overview: Vec<(f32, f32)>,
@@ -164,6 +165,12 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayShared>, file: Arc<Loaded>, mon: Ar
     let mut last = Instant::now();
     while !ctl.stop.load(Relaxed) {
         std::thread::sleep(Duration::from_millis(4));
+        // the timeline took over the analysers: step aside
+        if sh.ring_owner.load(Relaxed) != 1 {
+            ctl.playing.store(false, Relaxed);
+            ctl.stop.store(true, Relaxed);
+            break;
+        }
         let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f64().min(0.1);
         last = now;
@@ -278,7 +285,7 @@ impl Recorder {
             .spawn(move || {
                 let r = decode::read(&path).map(|d| {
                     let overview = d.l.chunks(OV_BLOCK).zip(d.r.chunks(OV_BLOCK)).map(|(a, b)| a.iter().chain(b).fold((0f32, 0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)))).collect();
-                    Loaded { name: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), data: Arc::new(d), overview }
+                    Loaded { name: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), path: path.clone(), data: Arc::new(d), overview }
                 });
                 *slot.lock() = Some(r);
             })
@@ -288,6 +295,7 @@ impl Recorder {
     fn start_play(&mut self, cx: &mut Ctx) {
         let Some(file) = self.file.clone() else { return };
         self.stop_play_thread();
+        cx.sh.ring_owner.store(1, Relaxed);
         let ctl = Arc::new(PlayShared { pos: AtomicU64::new(0), playing: AtomicBool::new(true), stop: AtomicBool::new(false), looping: AtomicBool::new(self.looping), seek: AtomicI64::new(-1), monitor: AtomicBool::new(self.mon_on) });
         let (sh, c2) = (cx.sh.clone(), ctl.clone());
         let q = self.mon_q.clone();
@@ -349,6 +357,9 @@ impl Recorder {
                 if ui.small_button("Show folder").clicked() {
                     let _ = std::process::Command::new("explorer").arg(docs_dir()).spawn();
                 }
+                if ui.small_button("Open in Timeline").on_hover_text("Edit and analyse this recording in the multitrack timeline").clicked() {
+                    cx.req.send_to_daw.push(p.clone());
+                }
             });
         }
         if !self.last_err.is_empty() {
@@ -367,7 +378,9 @@ impl Recorder {
             }
             if self.play.is_some() && ui.button("Back to live input").on_hover_text("Stop the file and restart the capture device").clicked() {
                 self.stop_play_thread();
-                cx.req.audio = AudioReq::Restart;
+                if cx.sh.ring_owner.compare_exchange(1, 0, Relaxed, Relaxed).is_ok() {
+                    cx.req.audio = AudioReq::Restart;
+                }
             }
         });
         if !self.play_err.is_empty() {
@@ -381,7 +394,12 @@ impl Recorder {
         let sr = file.data.sr as f32;
         let pos = self.play.as_ref().map(|p| p.pos.load(Relaxed) as usize).unwrap_or(0);
         let playing = self.play.as_ref().map(|p| p.playing.load(Relaxed)).unwrap_or(false);
-        ui.label(RichText::new(format!("{}  -  {} Hz, {} ch, {}", file.name, file.data.sr, file.data.src_channels, fmt_time(total as f32 / sr))).small());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{}  -  {} Hz, {} ch, {}", file.name, file.data.sr, file.data.src_channels, fmt_time(total as f32 / sr))).small());
+            if ui.small_button("Open in Timeline").on_hover_text("Edit and analyse this file in the multitrack timeline").clicked() {
+                cx.req.send_to_daw.push(file.path.clone());
+            }
+        });
         ui.horizontal(|ui| {
             let icon = if playing { "Pause" } else { "Play" };
             if ui.add(egui::Button::new(RichText::new(icon).strong()).min_size(vec2(84.0, 24.0))).clicked() {
@@ -549,6 +567,9 @@ impl Tool for Recorder {
                 self.test_stage = 2;
                 self.start_play(cx);
             }
+        }
+        if self.play.as_ref().is_some_and(|p| p.stop.load(Relaxed)) {
+            self.play = None;
         }
         self.manage_monitor(cx);
         if let Some(d) = &self.open_dlg {

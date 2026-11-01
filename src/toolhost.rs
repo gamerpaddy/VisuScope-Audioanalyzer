@@ -53,6 +53,14 @@ impl App {
             AudioReq::Restart => self.start_selected(),
             AudioReq::None => {}
         }
+        if !req.send_to_daw.is_empty() {
+            if let Some(k) = (0..tools::TOOL_COUNT).find(|&k| tools::INFO[k].short == "Timeline") {
+                self.wins[BUILTIN + k].open = true;
+                for p in req.send_to_daw {
+                    self.tools[k].command(&format!("import	{}", p.display()));
+                }
+            }
+        }
         if let Some(r) = req.report {
             self.note = self.make_report(r);
         }

@@ -217,6 +217,8 @@ pub struct Shared {
     /// per device channel: largest |sample| since the UI last looked (f32 bits, non-negative so bits order like values)
     pub ch_peak: [AtomicU32; MAX_CH],
     pub quit: AtomicBool,
+    /// who feeds the ring while a file / the timeline plays (0 = nobody, 1 = file player, 2 = timeline)
+    pub ring_owner: AtomicU32,
     pub xruns: AtomicU32,
     /// incremented every time an audio thread is started; streams of older generations go quiet
     pub audio_gen: AtomicU32,
@@ -252,6 +254,7 @@ impl Shared {
             ch_b: AtomicUsize::new(1),
             ch_peak: std::array::from_fn(|_| AtomicU32::new(0)),
             quit: AtomicBool::new(false),
+            ring_owner: AtomicU32::new(0),
             xruns: AtomicU32::new(0),
             audio_gen: AtomicU32::new(0),
             chans: AtomicU32::new(2),
