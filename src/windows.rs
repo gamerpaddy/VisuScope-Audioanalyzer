@@ -517,6 +517,18 @@ impl App {
             }
             self.apply_initial_layout(area);
         }
+        // the windows follow the area when it changes (side bar dragged, application window resized)
+        if let Some(old) = self.prev_area.filter(|o| *o != area && o.width() > 50.0 && o.height() > 50.0) {
+            if self.layout_ready && self.win_drag.is_none() {
+                let (sx, sy) = (area.width() / old.width(), area.height() / old.height());
+                let map = |r: Rect| Rect::from_min_size(area.min + vec2((r.min.x - old.min.x) * sx, (r.min.y - old.min.y) * sy), vec2(r.width() * sx, r.height() * sy));
+                for w in self.wins.iter_mut() {
+                    w.rect = w.rect.map(map);
+                    w.prev = w.prev.map(map);
+                }
+            }
+        }
+        self.prev_area = Some(area);
         let mask = self.current_mask();
         if self.auto_tile && mask != self.open_mask && self.open_mask != 0 {
             self.need_tile = true;
@@ -795,6 +807,12 @@ impl App {
                 if ui.button("PNG").on_hover_text("Save a screenshot").clicked() {
                     self.request_png(ui.ctx());
                 }
+                if ui.button("Options").on_hover_text("Frame rate, window behaviour, folders ...").clicked() {
+                    self.opts_open = !self.opts_open;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(format!("v{}", crate::VERSION)).small().weak()).on_hover_text(format!("VisuScope {}", crate::VERSION_FULL));
+                });
             });
         });
     }

@@ -23,11 +23,6 @@ impl App {
             section(ui, "Distortion measurement", false, |ui| self.thd_section(ui));
             section(ui, "Voltage calibration", false, |ui| self.calibration_ui(ui));
             section(ui, "Microphone calibration", false, |ui| self.mic_section(ui));
-            section(ui, "Performance", false, |ui| {
-                ui.add(egui::Slider::new(&mut self.fps_cap, 15.0..=241.0).text("UI fps cap").custom_formatter(|v, _| if v > 240.0 { "max".into() } else { format!("{v:.0}") }));
-                ui.add(egui::Slider::new(&mut self.readout_hz, 0.5..=10.0).text("Readout Hz"));
-                ui.checkbox(&mut self.readout_hold, "Hold readouts");
-            });
         });
     }
 

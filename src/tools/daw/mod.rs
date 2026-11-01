@@ -41,6 +41,8 @@ struct PlayCtl {
     /// do not stop at the end of the project (recording)
     keep: AtomicBool,
     sound: AtomicBool,
+    /// the mix goes into the analysers (replacing the live input); otherwise the live input stays untouched
+    feed: AtomicBool,
     /// track whose post-fader signal feeds the analysers (-1 = master mix)
     focus: AtomicI64,
     master: [AtomicU32; 2],
@@ -59,6 +61,7 @@ impl PlayCtl {
             loop_b: AtomicI64::new(0),
             keep: AtomicBool::new(false),
             sound: AtomicBool::new(true),
+            feed: AtomicBool::new(false),
             focus: AtomicI64::new(-1),
             master: [AtomicU32::new(0), AtomicU32::new(0)],
             tracks: (0..2 * MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
@@ -68,20 +71,23 @@ impl PlayCtl {
 }
 
 fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mon: Arc<Mutex<Queue>>) {
-    // make sure the live capture is gone before the timeline takes over the ring
-    sh.audio_gen.fetch_add(1, Relaxed);
-    std::thread::sleep(Duration::from_millis(150));
+    let feed = ctl.feed.load(Relaxed);
     let sr = proj.lock().sr;
-    {
-        let mut ring = sh.ring.lock();
-        ring.total = 0;
-        ring.l.fill(0.0);
-        ring.r.fill(0.0);
+    if feed {
+        // make sure the live capture is gone before the timeline takes over the ring
+        sh.audio_gen.fetch_add(1, Relaxed);
+        std::thread::sleep(Duration::from_millis(150));
+        {
+            let mut ring = sh.ring.lock();
+            ring.total = 0;
+            ring.l.fill(0.0);
+            ring.r.fill(0.0);
+        }
+        sh.sr.store(sr, Relaxed);
+        sh.chans.store(2, Relaxed);
+        sh.feeding_silence.store(false, Relaxed);
+        *sh.status.lock() = format!("Timeline ({sr} Hz)");
     }
-    sh.sr.store(sr, Relaxed);
-    sh.chans.store(2, Relaxed);
-    sh.feeding_silence.store(false, Relaxed);
-    *sh.status.lock() = format!("Timeline ({sr} Hz)");
     {
         let mut q = mon.lock();
         q.buf.clear();
@@ -95,7 +101,7 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
     while !ctl.stop.load(Relaxed) {
         std::thread::sleep(Duration::from_millis(4));
         // the file player took over the analysers: step aside
-        if sh.ring_owner.load(Relaxed) != 2 {
+        if feed && sh.ring_owner.load(Relaxed) != 2 {
             break;
         }
         let now = Instant::now();
@@ -137,7 +143,7 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
                 ctl.master[c].fetch_max(m.to_bits(), Relaxed);
             }
             let (al, ar) = if focus >= 0 { (&fl[..k], &fr[..k]) } else { (&l[..k], &r[..k]) };
-            {
+            if feed {
                 let mut ring = sh.ring.lock();
                 for i in 0..k {
                     ring.push(al[i], ar[i]);
@@ -146,8 +152,10 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
             if ctl.sound.load(Relaxed) {
                 mon.lock().push(&l[..k], &r[..k]);
             }
-            sh.last_data_ms.store(sh.t0.elapsed().as_millis() as u64, Relaxed);
-            sh.cv.notify_one();
+            if feed {
+                sh.last_data_ms.store(sh.t0.elapsed().as_millis() as u64, Relaxed);
+                sh.cv.notify_one();
+            }
             pos += k as i64;
             n -= k;
         }
@@ -162,7 +170,8 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
 // ---------------------------------------------------------------------- jobs
 
 enum Job {
-    Imported { name: String, res: Result<Vec<Arc<Source>>, String>, at: i64 },
+    /// `target`: put the audio on this track at `at` instead of on new tracks
+    Imported { name: String, res: Result<Vec<Arc<Source>>, String>, at: i64, target: Option<u32> },
     Recorded(Vec<(u32, Arc<Source>, i64)>, bool),
     Analysis(AnKey, Arc<AnalysisOut>),
     Saved(Result<PathBuf, String>, bool),
@@ -278,6 +287,20 @@ pub struct Daw {
     jobs: Arc<Mutex<Vec<Job>>>,
     busy: Arc<AtomicU32>,
     open_dlg: Option<PendingMany>,
+    /// an import already decided the rate of the (empty) project
+    rate_decided: Arc<AtomicBool>,
+    /// show the timeline in the analysers while playing (takes over the live input)
+    feed_analysers: bool,
+    /// one-shot override of `feed_analysers` (Loop & play)
+    feed_once: bool,
+    /// track and frame the file chosen in `open_dlg` goes to (right-click import)
+    import_target: Option<(u32, i64)>,
+    /// track whose channels should be split into two tracks after this frame
+    split_req: Option<u32>,
+    /// timeline frame under the last right-click
+    ctx_frame: i64,
+    /// slider that is being edited by typing a value
+    val_edit: Option<(eframe::egui::Id, String, bool)>,
     export_dlg: Option<(Pending, Export)>,
     proj_dlg: Option<(Pending, bool)>,
     // analysis
@@ -353,6 +376,13 @@ impl Daw {
             jobs: Arc::new(Mutex::new(Vec::new())),
             busy: Arc::new(AtomicU32::new(0)),
             open_dlg: None,
+            rate_decided: Arc::new(AtomicBool::new(false)),
+            feed_analysers: false,
+            feed_once: false,
+            import_target: None,
+            split_req: None,
+            ctx_frame: 0,
+            val_edit: None,
             export_dlg: None,
             proj_dlg: None,
             an_open: true,
@@ -459,26 +489,34 @@ impl Daw {
     // ------------------------------------------------------------------ import
 
     pub(super) fn import(&mut self, paths: Vec<PathBuf>) {
+        self.import_at(paths, None);
+    }
+
+    /// Import files; the first one goes onto the given track at the given frame, the others get new tracks.
+    pub(super) fn import_at(&mut self, paths: Vec<PathBuf>, target: Option<(u32, i64)>) {
         let mut at = self.cursor.max(0);
-        // the first file into an empty project decides the project rate
-        let sr = {
-            let mut p = self.proj.lock();
-            if p.is_empty() && p.tracks.is_empty() {
-                if let Some(s) = paths.first().and_then(|f| super::decode::read_all(f).ok()).map(|(s, _)| s) {
-                    p.sr = s;
-                }
-            }
-            p.sr
-        };
         if self.pos() == 0 {
             at = 0;
         }
-        for path in paths {
+        for (k, path) in paths.into_iter().enumerate() {
+            let (at, target) = match target {
+                Some((t, f)) if k == 0 => (f, Some(t)),
+                _ => (at, None),
+            };
             let ids = self.src_ids.clone();
+            let (proj, decided) = (self.proj.clone(), self.rate_decided.clone());
             let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "audio".into());
             let name2 = name.clone();
             self.spawn_job("daw-import", move |jobs| {
                 let res = super::decode::read_all(&path).map(|(fsr, chans)| {
+                    // the first file into an empty project decides the project rate (no conversion then)
+                    let sr = {
+                        let mut p = proj.lock();
+                        if p.is_empty() && p.tracks.is_empty() && !decided.swap(true, Relaxed) {
+                            p.sr = fsr;
+                        }
+                        p.sr
+                    };
                     let chans: Vec<Vec<f32>> = chans.iter().map(|c| resample(c, fsr, sr)).collect();
                     let mk = |n: String, c: Vec<Vec<f32>>| {
                         let s = Source::new(file::next_src_id(&ids), n, c);
@@ -491,7 +529,7 @@ impl Daw {
                     };
                     srcs
                 });
-                jobs.lock().push(Job::Imported { name, res, at });
+                jobs.lock().push(Job::Imported { name, res, at, target });
             });
         }
     }
@@ -504,11 +542,18 @@ impl Daw {
         }
         let ctl = Arc::new(PlayCtl::new(self.cursor));
         ctl.sound.store(self.sound, Relaxed);
-        cx.sh.ring_owner.store(2, Relaxed);
+        // by default the analysers keep showing the live input; only on request does the timeline replace it
+        let feed = self.feed_analysers || std::mem::take(&mut self.feed_once);
+        ctl.feed.store(feed, Relaxed);
+        if feed {
+            cx.sh.ring_owner.store(2, Relaxed);
+        }
         let (sh, c2, p2, q) = (cx.sh.clone(), ctl.clone(), self.proj.clone(), self.mon_q.clone());
         std::thread::Builder::new().name("timeline-player".into()).spawn(move || play_thread(sh, c2, p2, q)).ok();
         self.play = Some(ctl);
-        cx.req.audio = AudioReq::Stop;
+        if feed {
+            cx.req.audio = AudioReq::Stop;
+        }
     }
 
     fn play_stop(&mut self, cx: &mut Ctx) {
@@ -751,8 +796,9 @@ impl Daw {
         if let Some(d) = &self.open_dlg {
             if let Some(files) = d.take() {
                 self.open_dlg = None;
+                let target = self.import_target.take();
                 if !files.is_empty() {
-                    self.import(files);
+                    self.import_at(files, target);
                 }
             }
         }
@@ -778,20 +824,30 @@ impl Daw {
                 }
             }
         }
+        if self.busy.load(Relaxed) == 0 && self.jobs.lock().is_empty() && self.proj.lock().tracks.is_empty() {
+            self.rate_decided.store(false, Relaxed);
+        }
         let jobs: Vec<Job> = std::mem::take(&mut *self.jobs.lock());
         for j in jobs {
             match j {
-                Job::Imported { name, res, at } => match res {
+                Job::Imported { name, res, at, target } => match res {
                     Err(e) => self.note = format!("Cannot open {name}: {e}"),
                     Ok(srcs) => {
                         let n = srcs.len();
                         let mut first = None;
                         self.with_proj(|p| {
+                            let mut target = target.and_then(|t| p.track_index(t));
                             for s in srcs {
-                                if p.tracks.len() >= MAX_TRACKS {
-                                    break;
-                                }
-                                let ti = p.add_track(Some(s.name.clone()), Input { dev: String::new(), mode: Mode::Mix });
+                                // the first source of a targeted import lands on that track
+                                let ti = match target.take() {
+                                    Some(ti) => ti,
+                                    None => {
+                                        if p.tracks.len() >= MAX_TRACKS {
+                                            break;
+                                        }
+                                        p.add_track(Some(s.name.clone()), Input { dev: String::new(), mode: Mode::Mix })
+                                    }
+                                };
                                 let id = p.add_clip(ti, s, at);
                                 first.get_or_insert(id);
                             }

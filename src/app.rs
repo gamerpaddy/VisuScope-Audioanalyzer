@@ -112,6 +112,11 @@ pub struct App {
     pub settle: i32,
     pub saved_area: Option<egui::Vec2>,
     pub area: Option<egui::Rect>,
+    /// area of the previous frame: the windows follow when it changes (side bar resized)
+    pub prev_area: Option<egui::Rect>,
+    /// undo / redo of window arrangement changes
+    pub lay: crate::layouts::LayHist,
+    pub opts_open: bool,
     pub layout_ready: bool,
     pub max_req: Option<usize>,
     pub sized: bool,
@@ -315,6 +320,9 @@ impl App {
             settle: 0,
             saved_area: None,
             area: None,
+            prev_area: None,
+            lay: Default::default(),
+            opts_open: false,
             layout_ready: false,
             max_req: None,
             sized: false,
@@ -1435,6 +1443,11 @@ impl eframe::App for App {
             }
         });
 
+        if self.layout_ready && std::env::var_os("VISUSCOPE_OPTIONS").is_some() {
+            self.opts_open = true;
+        }
+        self.options_ui(&ctx);
+        self.track_layout();
         if self.layout_ready {
             if let Some(n) = self.layout_env.take() {
                 self.apply_preset_index(n);

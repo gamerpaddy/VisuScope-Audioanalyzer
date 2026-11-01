@@ -48,6 +48,7 @@ impl Tool for Daw {
         o.put("analysis", self.an_open);
         o.put("an_track", self.an_src == AnSrc::Track);
         o.put("sound", self.sound);
+        o.put("feed_an", self.feed_analysers);
         o.put("mon_dev", &self.mon_dev);
         o.put("mon_vol", self.mon_vol);
         o.put("rec_off", self.rec_off_ms);
@@ -60,6 +61,7 @@ impl Tool for Daw {
         i.set("loop", &mut self.loop_on);
         i.set("analysis", &mut self.an_open);
         i.set("sound", &mut self.sound);
+        i.set("feed_an", &mut self.feed_analysers);
         i.set("mon_vol", &mut self.mon_vol);
         self.mon_vol = self.mon_vol.clamp(0.0, 1.0);
         if let Some(t) = i.get::<bool>("an_track") {

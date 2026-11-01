@@ -10,6 +10,7 @@ mod gen_ui;
 mod layouts;
 mod report;
 mod log;
+mod options;
 mod scope;
 mod shared;
 mod sidebar;
@@ -21,6 +22,11 @@ mod tools;
 mod view3d;
 mod views;
 mod windows;
+
+/// "1.1.0 (abc1234)"; a trailing + on the commit marks uncommitted changes.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VS_GIT"), ")");
+/// Version plus the time this binary was compiled.
+pub const VERSION_FULL: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VS_GIT"), "), built ", env!("VS_BUILD"));
 
 /// Set when the window was created at its final size, so the app need not resize it later.
 pub static PRESIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -50,7 +56,7 @@ fn main() -> eframe::Result {
         log::log(&format!("PANIC: {msg}"));
         let _ = std::fs::write(log::path().with_file_name("visuscope_panic.log"), msg);
     }));
-    let mut viewport = eframe::egui::ViewportBuilder::default().with_min_inner_size([800.0, 500.0]).with_title("VisuScope - audio analyzer");
+    let mut viewport = eframe::egui::ViewportBuilder::default().with_min_inner_size([800.0, 500.0]).with_title(format!("VisuScope {VERSION} - audio analyzer"));
     viewport = match primary_screen_size() {
         Some((sw, sh)) => {
             // 75% of the screen, centred, created that way from the start (no resize flash)

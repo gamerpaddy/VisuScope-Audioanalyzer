@@ -1,8 +1,34 @@
 //! Layout presets (built-in and user-saved), pop-out windows and keyboard shortcuts.
 
 use crate::app::App;
-use crate::windows::{win_short, BUILTIN, GAP, WIN_COUNT};
+use crate::windows::{win_short, WinState, BUILTIN, GAP, WIN_COUNT};
 use eframe::egui::{self, vec2, Rect, Ui};
+
+/// The arrangement of all windows at one moment.
+#[derive(Clone, Copy)]
+pub struct LaySnap {
+    wins: [WinState; WIN_COUNT],
+    popped: [bool; WIN_COUNT],
+}
+
+impl LaySnap {
+    /// Equal up to a pixel, closed windows ignored.
+    fn same(&self, o: &LaySnap) -> bool {
+        let q = |r: Option<Rect>| r.map(|r| [r.min.x.round() as i32, r.min.y.round() as i32, r.max.x.round() as i32, r.max.y.round() as i32]);
+        (0..WIN_COUNT).all(|i| {
+            let (a, b) = (&self.wins[i], &o.wins[i]);
+            a.open == b.open && (!a.open || (a.collapsed == b.collapsed && self.popped[i] == o.popped[i] && q(a.rect) == q(b.rect)))
+        })
+    }
+}
+
+#[derive(Default)]
+pub struct LayHist {
+    cur: Option<LaySnap>,
+    undo: Vec<LaySnap>,
+    redo: Vec<LaySnap>,
+    size: Option<egui::Vec2>,
+}
 
 const fn t(k: usize) -> usize {
     BUILTIN + k
@@ -183,7 +209,14 @@ impl App {
     pub fn handle_hotkeys(&mut self, ctx: &egui::Context) {
         use egui::Key::*;
         const KEYS: [egui::Key; 9] = [Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9];
-        let hit = ctx.input(|i| i.modifiers.command && !i.modifiers.shift).then(|| ctx.input(|i| KEYS.iter().position(|k| i.key_pressed(*k)))).flatten();
+        let ctrl_alt = egui::Modifiers::COMMAND | egui::Modifiers::ALT;
+        if ctx.input_mut(|i| i.consume_key(ctrl_alt, Z)) {
+            self.layout_undo();
+        }
+        if ctx.input_mut(|i| i.consume_key(ctrl_alt, Y)) {
+            self.layout_redo();
+        }
+        let hit = ctx.input(|i| i.modifiers.command && !i.modifiers.shift && !i.modifiers.alt).then(|| ctx.input(|i| KEYS.iter().position(|k| i.key_pressed(*k)))).flatten();
         if let Some(n) = hit {
             self.apply_preset_index(n);
         }
@@ -197,8 +230,84 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------------ undo / redo of the arrangement
+
+    fn lay_snap(&self) -> LaySnap {
+        LaySnap { wins: self.wins, popped: self.popped }
+    }
+
+    pub fn lay_can_undo(&self) -> bool {
+        !self.lay.undo.is_empty()
+    }
+
+    pub fn lay_can_redo(&self) -> bool {
+        !self.lay.redo.is_empty()
+    }
+
+    /// Called every frame: a finished change of the arrangement becomes one undo step.
+    pub fn track_layout(&mut self) {
+        if !self.layout_ready || self.settle > 0 || self.win_drag.is_some() || self.need_tile {
+            return;
+        }
+        let now = self.lay_snap();
+        let size = self.area.map(|a| a.size());
+        // the application window or the side bar was resized: not a layout change of the user's
+        if self.lay.size != size {
+            self.lay.size = size;
+            self.lay.cur = Some(now);
+            return;
+        }
+        match self.lay.cur {
+            Some(c) if !c.same(&now) => {
+                self.lay.undo.push(c);
+                if self.lay.undo.len() > 60 {
+                    self.lay.undo.remove(0);
+                }
+                self.lay.redo.clear();
+                self.lay.cur = Some(now);
+            }
+            None => self.lay.cur = Some(now),
+            _ => {}
+        }
+    }
+
+    fn lay_restore(&mut self, s: LaySnap) {
+        self.wins = s.wins;
+        self.popped = s.popped;
+        self.open_mask = self.current_mask();
+        self.need_tile = false;
+        self.lay.cur = Some(s);
+    }
+
+    pub fn layout_undo(&mut self) {
+        if let Some(prev) = self.lay.undo.pop() {
+            if let Some(c) = self.lay.cur {
+                self.lay.redo.push(c);
+            }
+            self.lay_restore(prev);
+        }
+    }
+
+    pub fn layout_redo(&mut self) {
+        if let Some(next) = self.lay.redo.pop() {
+            if let Some(c) = self.lay.cur {
+                self.lay.undo.push(c);
+            }
+            self.lay_restore(next);
+        }
+    }
+
     pub fn layouts_menu(&mut self, ui: &mut Ui) {
         ui.menu_button("Layouts", |ui| {
+            if ui.add_enabled(self.lay_can_undo(), egui::Button::new("Undo layout change").shortcut_text("Ctrl+Alt+Z")).clicked() {
+                self.layout_undo();
+                ui.close();
+            }
+            if ui.add_enabled(self.lay_can_redo(), egui::Button::new("Redo layout change").shortcut_text("Ctrl+Alt+Y")).clicked() {
+                self.layout_redo();
+                ui.close();
+            }
+            ui.separator();
             let mut group = "";
             for (k, pr) in PRESETS.iter().enumerate() {
                 if pr.group != group {

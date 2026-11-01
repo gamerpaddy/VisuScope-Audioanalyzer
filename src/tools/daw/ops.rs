@@ -192,7 +192,8 @@ impl Daw {
             self.an_want = Some(key);
             self.an_want_t = Instant::now();
         }
-        if self.an_done == Some(key) || self.an_running || self.an_want_t.elapsed() < Duration::from_millis(250) {
+        // not while files are being loaded or recordings are written: that work comes first
+        if self.an_done == Some(key) || self.an_running || self.busy.load(Relaxed) > 0 || self.an_want_t.elapsed() < Duration::from_millis(250) {
             return;
         }
         if b <= a {
@@ -392,6 +393,8 @@ impl Daw {
                 let ti = p.add_track(Some(name.clone()), Input { dev: String::new(), mode: Mode::Mix });
                 p.add_clip(ti, Arc::new(Source::new(id, name, chans)), 0);
             }
+            // the first stereo track shows its channels as sub-tracks
+            p.tracks[0].h = 2;
             p.tracks[1].pan = -0.4;
             p.tracks[2].vol_db = -8.0;
             p.tracks[3].pan = 0.3;

@@ -471,9 +471,6 @@ impl Recorder {
                 self.view = ((anchor - t * span).clamp(0.0, 1.0 - span), span);
             }
         }
-        if resp.double_clicked() {
-            self.view = (0.0, 1.0);
-        }
         let zoomed = self.view.1 < 0.999;
         let drag_seek = !zoomed || ui.input(|i| i.modifiers.shift);
         if resp.dragged() && zoomed && !drag_seek {

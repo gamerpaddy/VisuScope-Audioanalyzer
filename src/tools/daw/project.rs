@@ -223,9 +223,35 @@ pub struct Input {
     pub mode: Mode,
 }
 
+/// Which channels of the clips a track plays.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Chan {
+    #[default]
+    Stereo,
+    /// only the left channel of the source, as a mono signal (then placed by the pan control)
+    Left,
+    Right,
+    /// both channels mixed down to one mono signal
+    Mono,
+}
+
+impl Chan {
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+    pub fn from_index(i: u8) -> Self {
+        [Chan::Stereo, Chan::Left, Chan::Right, Chan::Mono][(i as usize).min(3)]
+    }
+}
+
 #[derive(Clone)]
 pub struct Track {
     pub id: u32,
+    /// channel routing of stereo clips
+    pub chan: Chan,
+    /// gain and mute of the left / right channel of stereo clips (sub-tracks)
+    pub ch_db: [f32; 2],
+    pub ch_mute: [bool; 2],
     pub name: String,
     pub color: usize,
     pub clips: Vec<Clip>,
@@ -293,8 +319,35 @@ impl Project {
     pub fn add_track(&mut self, name: Option<String>, input: Input) -> usize {
         let id = self.next();
         let n = self.tracks.len();
-        self.tracks.push(Track { id, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, input, h: 1 });
+        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, input, h: 1 });
         n
+    }
+
+    /// Turn a stereo track into two mono tracks (left panned hard left, right hard right). The new right
+    /// track is inserted below; returns its index.
+    pub fn split_channels(&mut self, ti: usize) -> Option<usize> {
+        if self.tracks.len() >= MAX_TRACKS || !self.tracks[ti].clips.iter().any(|c| c.src.stereo()) {
+            return None;
+        }
+        let mut r = self.tracks[ti].clone();
+        r.id = self.next();
+        for c in r.clips.iter_mut() {
+            c.id = self.next();
+        }
+        r.arm = false;
+        let l = &mut self.tracks[ti];
+        let base = l.name.clone();
+        l.name = format!("{base} L");
+        r.name = format!("{base} R");
+        for (t, chan, pan) in [(&mut *l, Chan::Left, -1.0), (&mut r, Chan::Right, 1.0)] {
+            t.chan = chan;
+            t.pan = pan;
+            t.ch_db = [0.0; 2];
+            t.ch_mute = [false; 2];
+            t.h = t.h.min(1);
+        }
+        self.tracks.insert(ti + 1, r);
+        Some(ti + 1)
     }
 
     pub fn track_index(&self, id: u32) -> Option<usize> {
@@ -345,13 +398,29 @@ impl Project {
                 }
                 any = true;
                 let g = db_to_lin(c.gain_db);
-                let (pl, pr) = pan_gains(t.pan, c.src.stereo());
+                let two = c.src.stereo();
+                let (pl, pr) = pan_gains(t.pan, two && t.chan == Chan::Stereo);
                 let plain = c.fade_in == 0 && c.fade_out == 0;
+                let cg = [if t.ch_mute[0] { 0.0 } else { db_to_lin(t.ch_db[0]) }, if t.ch_mute[1] { 0.0 } else { db_to_lin(t.ch_db[1]) }];
                 for f in a..b {
                     let rel = (f - c.start) as usize;
                     let si = c.src_index(rel);
                     let e = if plain { g } else { c.env(rel, g) };
-                    let (sl, sr) = (c.src.at(0, si), c.src.at(1, si));
+                    let (mut sl, mut sr) = (c.src.at(0, si), c.src.at(1, si));
+                    if two {
+                        sl *= cg[0];
+                        sr *= cg[1];
+                        match t.chan {
+                            Chan::Stereo => {}
+                            Chan::Left => sr = sl,
+                            Chan::Right => sl = sr,
+                            Chan::Mono => {
+                                let m = 0.5 * (sl + sr);
+                                sl = m;
+                                sr = m;
+                            }
+                        }
+                    }
                     let o = (f - start) as usize;
                     tl[o] += sl * e * pl;
                     tr[o] += sr * e * pr;
@@ -585,6 +654,33 @@ mod tests {
         assert!(r[600].abs() < 1e-6);
         assert!(pk[0][0] > 0.4);
         assert_eq!(l[1150], 0.0);
+    }
+
+    #[test]
+    fn channel_routing_and_split() {
+        let mut p = Project::new(48000);
+        let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        let s = Arc::new(Source::new(2, "st".into(), vec![vec![0.5; 200], vec![0.25; 200]]));
+        p.add_clip(ti, s, 0);
+        let at = |p: &Project| {
+            let (l, r) = p.render(10, 20, None);
+            (l[0], r[0])
+        };
+        assert_eq!(at(&p), (0.5, 0.25));
+        p.tracks[0].ch_mute[1] = true;
+        assert_eq!(at(&p), (0.5, 0.0));
+        p.tracks[0].ch_mute[1] = false;
+        p.tracks[0].chan = Chan::Mono;
+        let (l, r) = at(&p);
+        assert!((l - r).abs() < 1e-6 && l > 0.2);
+        p.tracks[0].chan = Chan::Stereo;
+        let (a, b) = (p.tracks[0].id, p.split_channels(0).unwrap());
+        assert_eq!(p.tracks.len(), 2);
+        assert_eq!((p.tracks[0].chan, p.tracks[b].chan), (Chan::Left, Chan::Right));
+        assert_ne!(a, p.tracks[b].id);
+        // left stays hard left at full level, right hard right
+        let (l, r) = at(&p);
+        assert!((l - 0.5).abs() < 1e-5 && (r - 0.25).abs() < 1e-5, "{l} {r}");
     }
 
     #[test]

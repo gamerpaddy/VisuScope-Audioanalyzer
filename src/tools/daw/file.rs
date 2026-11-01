@@ -69,7 +69,25 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
         let _ = writeln!(out, "src {}|{}/{}|{}", c.src.id, media_name, file, esc(&c.src.name));
     }
     for t in &proj.tracks {
-        let _ = writeln!(out, "track {}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.id, esc(&t.name), t.color, t.vol_db, t.pan, t.mute as u8, t.solo as u8, t.h, esc(&t.input.dev), mode_str(t.input.mode));
+        let _ = writeln!(
+            out,
+            "track {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            t.id,
+            esc(&t.name),
+            t.color,
+            t.vol_db,
+            t.pan,
+            t.mute as u8,
+            t.solo as u8,
+            t.h,
+            esc(&t.input.dev),
+            mode_str(t.input.mode),
+            t.chan.index(),
+            t.ch_db[0],
+            t.ch_db[1],
+            t.ch_mute[0] as u8,
+            t.ch_mute[1] as u8
+        );
         for c in &t.clips {
             let _ = writeln!(out, "clip {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.id, c.id, c.src.id, c.start, c.off, c.len, c.gain_db, c.fade_in, c.fade_out, c.reverse as u8, c.muted as u8, esc(&c.name));
         }
@@ -126,6 +144,9 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
             }
             proj.tracks.push(Track {
                 id,
+                chan: Chan::from_index(f.get(10).and_then(|v| v.trim().parse().ok()).unwrap_or(0)),
+                ch_db: [num(f.get(11)).clamp(-90.0, 24.0), num(f.get(12)).clamp(-90.0, 24.0)],
+                ch_mute: [f.get(13) == Some(&"1"), f.get(14) == Some(&"1")],
                 name: unesc(f[1]),
                 color: f[2].parse::<usize>().unwrap_or(0) % COLOR_COUNT,
                 clips: Vec::new(),
