@@ -252,6 +252,10 @@ pub struct Track {
     /// gain and mute of the left / right channel of stereo clips (sub-tracks)
     pub ch_db: [f32; 2],
     pub ch_mute: [bool; 2],
+    /// recording trim: gain of this input in dB and how much earlier (ms, may be negative) the take is placed,
+    /// so that inputs of different interfaces line up
+    pub in_db: f32,
+    pub in_ms: f32,
     pub name: String,
     pub color: usize,
     pub clips: Vec<Clip>,
@@ -319,7 +323,7 @@ impl Project {
     pub fn add_track(&mut self, name: Option<String>, input: Input) -> usize {
         let id = self.next();
         let n = self.tracks.len();
-        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, input, h: 1 });
+        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, input, h: 1 });
         n
     }
 

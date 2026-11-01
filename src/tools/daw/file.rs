@@ -71,7 +71,7 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
     for t in &proj.tracks {
         let _ = writeln!(
             out,
-            "track {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "track {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             t.id,
             esc(&t.name),
             t.color,
@@ -86,7 +86,9 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
             t.ch_db[0],
             t.ch_db[1],
             t.ch_mute[0] as u8,
-            t.ch_mute[1] as u8
+            t.ch_mute[1] as u8,
+            t.in_db,
+            t.in_ms
         );
         for c in &t.clips {
             let _ = writeln!(out, "clip {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.id, c.id, c.src.id, c.start, c.off, c.len, c.gain_db, c.fade_in, c.fade_out, c.reverse as u8, c.muted as u8, esc(&c.name));
@@ -147,6 +149,8 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 chan: Chan::from_index(f.get(10).and_then(|v| v.trim().parse().ok()).unwrap_or(0)),
                 ch_db: [num(f.get(11)).clamp(-90.0, 24.0), num(f.get(12)).clamp(-90.0, 24.0)],
                 ch_mute: [f.get(13) == Some(&"1"), f.get(14) == Some(&"1")],
+                in_db: num(f.get(15)).clamp(-60.0, 40.0),
+                in_ms: num(f.get(16)).clamp(-1000.0, 1000.0),
                 name: unesc(f[1]),
                 color: f[2].parse::<usize>().unwrap_or(0) % COLOR_COUNT,
                 clips: Vec::new(),
@@ -234,6 +238,9 @@ mod tests {
             c.reverse = true;
             c.set_start(1534);
         }
+        p.tracks[0].in_db = -3.5;
+        p.tracks[0].in_ms = 12.5;
+        p.tracks[0].chan = Chan::Right;
         p.tracks[0].vol_db = -4.5;
         p.tracks[0].pan = 0.25;
         p.tracks[0].solo = true;
@@ -245,6 +252,7 @@ mod tests {
         assert_eq!((q.sr, q.master_db), (44100, -1.0));
         let t = &q.tracks[0];
         assert_eq!((t.name.as_str(), t.input.dev.as_str(), t.input.mode), ("Gtr | left", "dev|1", Mode::Pair(1)));
+        assert!((t.in_db + 3.5).abs() < 1e-6 && (t.in_ms - 12.5).abs() < 1e-6 && t.chan == Chan::Right);
         assert!(t.solo && (t.vol_db + 4.5).abs() < 1e-6 && (t.pan - 0.25).abs() < 1e-6);
         let (a, b) = (&p.tracks[0].clips[0], &t.clips[0]);
         assert_eq!((a.start, a.off, a.len, a.fade_in, a.reverse), (b.start, b.off, b.len, b.fade_in, b.reverse));

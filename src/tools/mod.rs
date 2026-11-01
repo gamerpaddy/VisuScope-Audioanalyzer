@@ -22,6 +22,7 @@ pub mod logger;
 pub mod monitor;
 pub mod octave;
 pub mod peaks;
+pub mod profiler;
 pub mod plot;
 pub mod recorder;
 pub mod reportui;
@@ -37,7 +38,9 @@ pub mod tap;
 pub mod transfer;
 pub mod wavio;
 
-pub const TOOL_COUNT: usize = 16;
+pub const TOOL_COUNT: usize = 18;
+/// Index of the routing graph's window in `INFO` (it only exists while the graph is switched on).
+pub const ROUTING: usize = 16;
 
 pub struct ToolInfo {
     pub short: &'static str,
@@ -65,14 +68,16 @@ pub const INFO: [ToolInfo; TOOL_COUNT] = [
     ToolInfo { short: "Report", title: "Report & export", weight: 1.2, tip: "Create an HTML / PDF measurement report and export responses (FRD, REW text, impulse WAV)" },
     ToolInfo { short: "EQ", title: "EQ design", weight: 2.0, tip: "Fit parametric filters to a measurement, preview, export Equalizer APO / biquads / FIR" },
     ToolInfo { short: "Timeline", title: "Timeline (multitrack)", weight: 4.0, tip: "Multitrack recorder and editor: record several sources and channels at once, load, edit and analyse tracks" },
+    ToolInfo { short: "Routing", title: "Routing (node editor)", weight: 8.0, tip: "Connect every input and output like a patch bay: split signals to the analysers, the timeline or output devices, with effects in between" },
+    ToolInfo { short: "Profiler", title: "Profiler (latency & interrupts)", weight: 1.5, tip: "System latency, kernel DPC / interrupt time and audio callback timing; shows what caused a crackle" },
 ];
 
 /// How the Tools menu groups the tools (indices into `INFO`).
 pub const GROUPS: [(&str, &[usize]); 4] = [
     ("Measure", &[2, 3, 11, 10, 5]),
-    ("Analyse", &[1, 4, 6, 9, 8]),
+    ("Analyse", &[1, 4, 6, 9, 8, 17]),
     ("Test & design", &[12, 14]),
-    ("Record & report", &[15, 0, 7, 13]),
+    ("Record & report", &[15, 16, 0, 7, 13]),
 ];
 
 pub fn all() -> Vec<Box<dyn Tool>> {
@@ -93,6 +98,8 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(reportui::ReportTool::new()),
         Box::new(eqtool::EqTool::new()),
         Box::new(daw::Daw::new()),
+        Box::new(crate::graph::editor::Routing::new()),
+        Box::new(profiler::Profiler::new()),
     ];
     debug_assert_eq!(v.len(), TOOL_COUNT);
     v
@@ -156,6 +163,12 @@ pub struct Ctx<'a> {
     pub tg: &'a crate::tonegen::GenParams,
     /// output devices (default first), for tools that play sound
     pub out_devs: &'a [crate::audio::DevInfo],
+    /// the routing graph (node editor) is on: inputs and outputs are set there
+    pub graph_on: bool,
+    /// all generators (tab 1 is the one the measurement tools use)
+    pub gens: &'a Arc<parking_lot::Mutex<Vec<crate::tonegen::GenParams>>>,
+    /// id of the input device chosen for the fixed input path (the graph starts from it)
+    pub default_in: String,
     pub sweep: &'a mut sweep::Sweep,
     pub lib: &'a mut traces::Library,
     pub req: &'a mut Requests,

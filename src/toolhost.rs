@@ -13,7 +13,7 @@ macro_rules! make_ctx {
         let unit_off = [$s.unit_off(0), $s.unit_off(1)];
         let unit_name = $s.unit_name();
         let sr = $s.sr();
-        Ctx { sh: &$s.sh, an: &$s.an, sr, meas_ch: $s.meas_ch, unit_off, unit_name, snaps: &$s.snaps, gen_running: $s.gen_handle.is_some(), tg: &$s.tg, out_devs: &$s.gen_devs, sweep: &mut $s.sweep, lib: &mut $s.lib, req: $req }
+        Ctx { sh: &$s.sh, an: &$s.an, sr, meas_ch: $s.meas_ch, unit_off, unit_name, snaps: &$s.snaps, gen_running: $s.gen_handle.is_some(), tg: &$s.tg, out_devs: &$s.gen_devs, graph_on: $s.graph_on, gens: &$s.gens_shared, default_in: $s.devices.get($s.sel_dev).map(|d| d.id.clone()).unwrap_or_default(), sweep: &mut $s.sweep, lib: &mut $s.lib, req: $req }
     }};
 }
 

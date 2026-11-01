@@ -282,21 +282,26 @@ pub struct GenState {
 
 impl GenState {
     pub fn new(sr: f64) -> Self {
-        // normalise every noise colour to unit RMS
-        let mut norm = [1.0f32; 6];
-        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        for k in NoiseKind::ALL {
-            let mut st = NoiseState::default();
-            let mut sum = 0.0f64;
-            let n = 300_000;
-            for i in 0..n {
-                let v = raw_noise(k, &mut st, &mut rng) as f64;
-                if i > 20_000 {
-                    sum += v * v;
+        // normalise every noise colour to unit RMS (measured once: it takes tens of milliseconds, and
+        // generators are created on audio threads)
+        static NORM: std::sync::OnceLock<[f32; 6]> = std::sync::OnceLock::new();
+        let norm = *NORM.get_or_init(|| {
+            let mut norm = [1.0f32; 6];
+            let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+            for k in NoiseKind::ALL {
+                let mut st = NoiseState::default();
+                let mut sum = 0.0f64;
+                let n = 300_000;
+                for i in 0..n {
+                    let v = raw_noise(k, &mut st, &mut rng) as f64;
+                    if i > 20_000 {
+                        sum += v * v;
+                    }
                 }
+                norm[k.index()] = (1.0 / (sum / (n - 20_001) as f64).sqrt()) as f32;
             }
-            norm[k.index()] = (1.0 / (sum / (n - 20_001) as f64).sqrt()) as f32;
-        }
+            norm
+        });
         Self {
             sr,
             n: 0,

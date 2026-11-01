@@ -4,7 +4,7 @@
 //! loudness ...) works on the timeline too.
 
 mod analysis;
-mod capture;
+pub mod capture;
 mod file;
 mod ops;
 mod project;
@@ -126,10 +126,22 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
                 k = k.min((lb - pos).max(1) as usize);
             }
             let focus = ctl.focus.load(Relaxed);
+            let to_graph = graph_on();
             {
                 let p = proj.lock();
                 p.mix(pos, &mut l[..k], &mut r[..k], None, &mut pk);
-                if focus >= 0 {
+                if to_graph {
+                    // the routing graph reads the master and the tracks its nodes ask for
+                    let b = crate::graph::bus();
+                    b.tl_push(sr, None, &l[..k], &r[..k]);
+                    let want = b.want_tracks.lock().clone();
+                    let mut scratch = vec![[0f32; 2]; MAX_TRACKS];
+                    for tid in want {
+                        p.mix(pos, &mut fl[..k], &mut fr[..k], Some(tid), &mut scratch);
+                        b.tl_push(sr, Some(tid), &fl[..k], &fr[..k]);
+                    }
+                }
+                if focus >= 0 && !to_graph {
                     let mut scratch = vec![[0f32; 2]; MAX_TRACKS];
                     p.mix(pos, &mut fl[..k], &mut fr[..k], Some(focus as u32), &mut scratch);
                 }
@@ -149,7 +161,7 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
                     ring.push(al[i], ar[i]);
                 }
             }
-            if ctl.sound.load(Relaxed) {
+            if ctl.sound.load(Relaxed) && !to_graph {
                 mon.lock().push(&l[..k], &r[..k]);
             }
             if feed {
@@ -200,6 +212,9 @@ struct RecPlan {
     dev: String,
     lanes: Vec<usize>,
     name: String,
+    /// input trim of the track at the start of the take
+    gain_db: f32,
+    shift_ms: f32,
 }
 
 struct RecState {
@@ -272,7 +287,7 @@ pub struct Daw {
     // recording
     devs: Arc<Mutex<Option<Vec<DevEx>>>>,
     devs_v: Vec<DevEx>,
-    capt: HashMap<String, Capture>,
+    capt: HashMap<String, Arc<Capture>>,
     rec: Option<RecState>,
     in_level: HashMap<u32, [f32; 2]>,
     out_level: Vec<[f32; 2]>,
@@ -295,6 +310,7 @@ pub struct Daw {
     feed_once: bool,
     /// track and frame the file chosen in `open_dlg` goes to (right-click import)
     import_target: Option<(u32, i64)>,
+    bus_t: Instant,
     /// track whose channels should be split into two tracks after this frame
     split_req: Option<u32>,
     /// timeline frame under the last right-click
@@ -318,6 +334,16 @@ pub struct Daw {
     last_autosave: Instant,
     note: String,
     startup: u8,
+}
+
+/// The routing graph is running: tracks record from graph nodes and playback goes to the graph.
+fn graph_on() -> bool {
+    crate::graph::bus().on.load(Relaxed)
+}
+
+/// Input of a track that records what its "Timeline record" node in the routing graph receives (stereo).
+fn graph_input(track: u32) -> Input {
+    Input { dev: format!("graph:{track}"), mode: Mode::Pair(0) }
 }
 
 fn autosave_path() -> PathBuf {
@@ -380,6 +406,7 @@ impl Daw {
             feed_analysers: false,
             feed_once: false,
             import_target: None,
+            bus_t: Instant::now(),
             split_req: None,
             ctx_frame: 0,
             val_edit: None,
@@ -543,7 +570,7 @@ impl Daw {
         let ctl = Arc::new(PlayCtl::new(self.cursor));
         ctl.sound.store(self.sound, Relaxed);
         // by default the analysers keep showing the live input; only on request does the timeline replace it
-        let feed = self.feed_analysers || std::mem::take(&mut self.feed_once);
+        let feed = (self.feed_analysers || std::mem::take(&mut self.feed_once)) && !graph_on();
         ctl.feed.store(feed, Relaxed);
         if feed {
             cx.sh.ring_owner.store(2, Relaxed);
@@ -557,6 +584,9 @@ impl Daw {
     }
 
     fn play_stop(&mut self, cx: &mut Ctx) {
+        if self.play.is_some() && graph_on() {
+            crate::graph::bus().tl_clear();
+        }
         if let Some(p) = self.play.take() {
             p.stop.store(true, Relaxed);
             self.cursor = p.pos.load(Relaxed).max(0);
@@ -586,6 +616,12 @@ impl Daw {
                 self.play_stop(cx);
             }
             return;
+        }
+        if graph_on() {
+            // the timeline sends its mix to the routing graph; a seek must not replay old audio
+            if p.seek.load(Relaxed) != NO_SEEK {
+                crate::graph::bus().tl_clear();
+            }
         }
         let (a, b) = self.range.unwrap_or((0, self.proj.lock().end_frame()));
         p.loop_on.store(self.loop_on, Relaxed);
@@ -617,7 +653,8 @@ impl Daw {
         {
             let mut p = self.proj.lock();
             if !p.tracks.iter().any(|t| t.arm) {
-                let Some(mut input) = self.default_input(&p) else {
+                let graph = graph_on();
+                let Some(mut input) = (if graph { Some(Input { dev: String::new(), mode: Mode::Pair(0) }) } else { self.default_input(&p) }) else {
                     self.note = "Timeline: no input device found".into();
                     return;
                 };
@@ -630,6 +667,11 @@ impl Daw {
                     Some(ti) => ti,
                     None => p.add_track(None, input.clone()),
                 };
+                if graph {
+                    // with the routing graph a track records what its "Timeline record" node receives
+                    input = graph_input(p.tracks[ti].id);
+                    crate::graph::bus().request_rec_node(p.tracks[ti].id, &p.tracks[ti].name);
+                }
                 p.tracks[ti].input = input;
                 p.tracks[ti].arm = true;
                 self.sel_track = Some(p.tracks[ti].id);
@@ -639,12 +681,18 @@ impl Daw {
         let p = self.proj.lock().clone();
         let mut plan: Vec<RecPlan> = Vec::new();
         for t in p.tracks.iter().filter(|t| t.arm) {
-            let Some(cap) = self.capt.get(&t.input.dev) else { continue };
+            let Some(cap) = self.capt.get(&t.input.dev) else {
+                if t.input.dev.starts_with("graph:") {
+                    crate::graph::bus().request_rec_node(t.id, &t.name);
+                    self.note = format!("Timeline: connect something to the record node of {} in the Routing window", t.name);
+                }
+                continue;
+            };
             let Some((_, ch)) = cap.format() else {
                 self.note = format!("Timeline: input of {} is not ready ({})", t.name, cap.status.lock());
                 return;
             };
-            plan.push(RecPlan { track_id: t.id, dev: t.input.dev.clone(), lanes: t.input.mode.lanes(ch), name: t.name.clone() });
+            plan.push(RecPlan { track_id: t.id, dev: t.input.dev.clone(), lanes: t.input.mode.lanes(ch), name: t.name.clone(), gain_db: t.in_db, shift_ms: t.in_ms });
         }
         if plan.is_empty() {
             self.note = "Timeline: arm a track with the R button first".into();
@@ -689,7 +737,19 @@ impl Daw {
             for r in &plan {
                 let Some(t) = takes.get(&r.dev) else { continue };
                 gap |= t.gap;
-                let chans: Vec<Vec<f32>> = r.lanes.iter().filter_map(|&l| t.lanes.get(l)).map(|c| resample(c, t.sr, sr)).collect();
+                let g = db_to_lin(r.gain_db);
+                let chans: Vec<Vec<f32>> = r
+                    .lanes
+                    .iter()
+                    .filter_map(|&l| t.lanes.get(l))
+                    .map(|c| {
+                        let mut v = resample(c, t.sr, sr);
+                        if (g - 1.0).abs() > 1e-6 {
+                            v.iter_mut().for_each(|x| *x *= g);
+                        }
+                        v
+                    })
+                    .collect();
                 if chans.is_empty() || chans[0].is_empty() {
                     continue;
                 }
@@ -698,7 +758,9 @@ impl Daw {
                 if file::write_wav(&path, &s, sr).is_ok() {
                     *s.saved.lock() = Some(path);
                 }
-                out.push((r.track_id, Arc::new(s), start - off));
+                // an input that arrives late is placed earlier (its own trim on top of the global compensation)
+                let own = (r.shift_ms * sr as f32 / 1000.0) as i64;
+                out.push((r.track_id, Arc::new(s), start - off - own));
             }
             jobs.lock().push(Job::Recorded(out, gap));
         });
@@ -712,7 +774,16 @@ impl Daw {
         let want: BTreeSet<String> = self.proj.lock().tracks.iter().filter(|t| t.arm && !t.input.dev.is_empty()).map(|t| t.input.dev.clone()).collect();
         self.capt.retain(|k, _| want.contains(k));
         for d in want {
-            self.capt.entry(d.clone()).or_insert_with(|| Capture::start(d));
+            if d.starts_with("graph:") {
+                // the routing graph feeds this one; it may be replaced when the graph is rebuilt
+                if let Some(c) = crate::graph::bus().virt.lock().get(&d).cloned() {
+                    if self.capt.get(&d).map_or(true, |old| !Arc::ptr_eq(old, &c)) {
+                        self.capt.insert(d, c);
+                    }
+                }
+            } else {
+                self.capt.entry(d.clone()).or_insert_with(|| Arc::new(Capture::start(d)));
+            }
         }
     }
 
@@ -773,7 +844,7 @@ impl Daw {
     /// Keep the sound output stream in line with the player state and the chosen device.
     fn manage_monitor(&mut self, cx: &Ctx) {
         let dev = if self.mon_dev.is_empty() || !cx.out_devs.iter().any(|d| d.id == self.mon_dev) { cx.out_devs.first().map(|d| d.id.clone()).unwrap_or_default() } else { self.mon_dev.clone() };
-        let want = self.sound && self.play.is_some();
+        let want = self.sound && self.play.is_some() && !graph_on();
         match (&self.mon, want) {
             (Some((_, d)), true) if *d == dev => {}
             (_, true) => {

@@ -301,6 +301,19 @@ impl Daw {
                     ui.close();
                 }
                 ui.separator();
+                if graph_on() {
+                    if ui.button("Track that records from the Routing window").on_hover_text("An armed track plus a Timeline record node to connect").clicked() {
+                        self.checkpoint(p);
+                        let n = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+                        let id = p.tracks[n].id;
+                        p.tracks[n].input = graph_input(id);
+                        p.tracks[n].arm = true;
+                        crate::graph::bus().request_rec_node(id, &p.tracks[n].name);
+                        self.sel_track = Some(id);
+                        ui.close();
+                    }
+                    return;
+                }
                 ui.label(RichText::new("Record from an input (armed)").small().weak());
                 if self.devs_v.is_empty() {
                     ui.label(RichText::new("scanning inputs...").small().weak());
@@ -391,6 +404,12 @@ impl Daw {
             });
             ui.toggle_value(&mut self.an_open, "Analysis").on_hover_text("Statistics, spectrum and spectrogram of the selection");
             ui.menu_button("Output", |ui| {
+                if graph_on() {
+                    ui.label("The timeline plays into the Routing window:\nconnect its Timeline out node to an output or the analyser.");
+                    ui.add(egui::DragValue::new(&mut self.rec_off_ms).range(-500.0..=500.0).speed(0.5).suffix(" ms")).on_hover_text("Shift new recordings earlier by this much to make up for the interface latency");
+                    ui.label(RichText::new("recording latency compensation").small().weak());
+                    return;
+                }
                 ui.checkbox(&mut self.sound, "Play through a sound device");
                 ui.add_enabled_ui(self.sound, |ui| {
                     let cur = cx.out_devs.iter().find(|d| d.id == self.mon_dev).or(cx.out_devs.first()).map(|d| d.label.clone()).unwrap_or_else(|| "no output".into());
@@ -890,7 +909,9 @@ impl Daw {
                         self.open_dlg = Some(dialogs::open_many("Add audio to the track", "Audio files", decode::EXTENSIONS));
                         ui.close();
                     }
-                    ui.menu_button("Record input of this track", |ui| self.input_menu(ui, p, ti));
+                    if !graph_on() {
+                        ui.menu_button("Record input of this track", |ui| self.input_menu(ui, p, ti));
+                    }
                     ui.separator();
                 }
                 if ui.button("Split everything here (S)").clicked() {
@@ -1316,7 +1337,17 @@ impl Daw {
                 self.open_dlg = Some(dialogs::open_many("Add audio to the track", "Audio files", decode::EXTENSIONS));
                 ui.close();
             }
-            ui.menu_button("Record input", |ui| self.input_menu(ui, p, ti));
+            if graph_on() {
+                if ui.button("Record from the Routing window").on_hover_text("Arms the track and adds a Timeline record node you can connect to anything").clicked() {
+                    self.checkpoint(p);
+                    p.tracks[ti].input = graph_input(id);
+                    p.tracks[ti].arm = true;
+                    crate::graph::bus().request_rec_node(id, &p.tracks[ti].name);
+                    ui.close();
+                }
+            } else {
+                ui.menu_button("Record input", |ui| self.input_menu(ui, p, ti));
+            }
             if p.tracks[ti].arm && ui.button("Disarm").clicked() {
                 p.tracks[ti].arm = false;
                 self.touch();
@@ -1349,6 +1380,23 @@ impl Daw {
                     ui.close();
                 }
             }
+            ui.menu_button("Input trim (gain / delay)", |ui| {
+                ui.label(RichText::new("For recording from several interfaces at once:").small().weak());
+                let t = &mut p.tracks[ti];
+                let mut ch = false;
+                ui.horizontal(|ui| {
+                    ui.label("Gain");
+                    ch |= ui.add(egui::DragValue::new(&mut t.in_db).range(-60.0..=40.0).speed(0.1).suffix(" dB")).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Place earlier by");
+                    ch |= ui.add(egui::DragValue::new(&mut t.in_ms).range(-1000.0..=1000.0).speed(0.2).suffix(" ms")).changed();
+                });
+                ui.label(RichText::new("Use the delay for an interface whose audio arrives late (its latency),\nor a negative value to push a take later. Applied to the next recording.").small().weak());
+                if ch {
+                    self.touch();
+                }
+            });
             ui.separator();
             ui.menu_button("Colour", |ui| {
                 for (k, &(r, g, b)) in TRACK_COLORS.iter().enumerate() {
@@ -1434,7 +1482,11 @@ impl Daw {
                 }
                 if mini_toggle(ui, "R", t.arm, Color32::from_rgb(235, 80, 80), "Arm for recording") {
                     t.arm = !t.arm;
-                    if t.arm && t.input.dev.is_empty() {
+                    if t.arm && graph_on() {
+                        // the track records what its record node in the routing graph receives
+                        p.tracks[ti].input = graph_input(id);
+                        crate::graph::bus().request_rec_node(id, &p.tracks[ti].name);
+                    } else if t.arm && t.input.dev.is_empty() {
                         if let Some(inp) = self.default_input_for(p, ti) {
                             p.tracks[ti].input = inp;
                         }
@@ -1470,7 +1522,11 @@ impl Daw {
             }
             // input selection of armed tracks
             if p.tracks[ti].arm && hr.height() >= 62.0 {
-                self.input_row(ui, p, ti);
+                if graph_on() {
+                    ui.label(RichText::new("records from the Routing window").small().weak());
+                } else {
+                    self.input_row(ui, p, ti);
+                }
             }
         });
         // level meters

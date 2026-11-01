@@ -69,8 +69,70 @@ const fn p(group: &'static str, name: &'static str, wins: &'static [usize], rect
     Preset { group, name, wins, rects }
 }
 
+const ROUTING_WIN: usize = t(16);
+
+/// A preset as rectangles in 0..1 space: its own arrangement, or what auto tiling would make of it.
+fn preview_builtin(pr: &Preset) -> Vec<(usize, Rect)> {
+    if !pr.rects.is_empty() {
+        return pr.wins.iter().zip(pr.rects.iter()).map(|(&w, f)| (w, Rect::from_min_size(egui::pos2(f[0], f[1]), vec2(f[2], f[3])))).collect();
+    }
+    let items: Vec<(usize, f32)> = pr.wins.iter().map(|&w| (w, crate::windows::win_weight(w).max(0.3))).collect();
+    tiled_unit(&items)
+}
+
+fn preview_user(p: &UserPreset) -> Vec<(usize, Rect)> {
+    (0..WIN_COUNT)
+        .filter(|&i| p.open.get(i).copied().unwrap_or(false))
+        .filter_map(|i| p.rects.get(i).copied().flatten().map(|f| (i, Rect::from_min_size(egui::pos2(f[0], f[1]), vec2(f[2], f[3])))))
+        .collect()
+}
+
+/// Auto tiling on a virtual 160 x 90 area, normalised to 0..1.
+fn tiled_unit(items: &[(usize, f32)]) -> Vec<(usize, Rect)> {
+    let (w, h) = (160.0, 90.0);
+    crate::windows::tile_rects(items, Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(w, h)), 2.5)
+        .into_iter()
+        .map(|(i, r)| (i, Rect::from_min_max(egui::pos2(r.min.x / w, r.min.y / h), egui::pos2(r.max.x / w, r.max.y / h))))
+        .collect()
+}
+
+fn win_color(i: usize) -> egui::Color32 {
+    const C: [(u8, u8, u8); 8] = [(70, 130, 200), (200, 110, 70), (90, 170, 120), (170, 100, 190), (200, 170, 70), (80, 170, 180), (190, 90, 120), (120, 130, 160)];
+    if i == t(15) {
+        return egui::Color32::from_rgb(70, 160, 110);
+    }
+    if i == ROUTING_WIN {
+        return egui::Color32::from_rgb(210, 150, 60);
+    }
+    let (r, g, b) = C[i % C.len()];
+    egui::Color32::from_rgb(r, g, b)
+}
+
+/// One clickable thumbnail: the windows drawn as coloured boxes with their names, and the preset's name below.
+fn preset_card(ui: &mut Ui, rects: &[(usize, Rect)], name: &str, hint: &str) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(128.0, 90.0), egui::Sense::click());
+    let p = ui.painter();
+    let th = Rect::from_min_size(r.min + vec2(2.0, 2.0), vec2(124.0, 68.0));
+    p.rect_filled(r, 4.0, if resp.hovered() { egui::Color32::from_rgb(44, 56, 78) } else { egui::Color32::from_rgb(26, 31, 41) });
+    p.rect_filled(th, 3.0, egui::Color32::from_rgb(12, 15, 20));
+    for (i, u) in rects {
+        let rr = Rect::from_min_size(th.min + vec2(u.min.x * th.width(), u.min.y * th.height()), vec2(u.width() * th.width(), u.height() * th.height())).shrink(0.8);
+        p.rect_filled(rr, 2.0, win_color(*i).gamma_multiply(0.55));
+        p.rect_stroke(rr, 2.0, egui::Stroke::new(1.0, win_color(*i)), egui::StrokeKind::Inside);
+        if rr.width() > 30.0 && rr.height() > 11.0 {
+            p.with_clip_rect(rr).text(rr.min + vec2(3.0, 2.0), egui::Align2::LEFT_TOP, win_short(*i), egui::FontId::proportional(8.0), egui::Color32::from_gray(225));
+        }
+    }
+    p.text(pos_below(r), egui::Align2::CENTER_CENTER, if hint.is_empty() { name.to_string() } else { format!("{name}  ·  {hint}") }, egui::FontId::proportional(10.0), egui::Color32::from_gray(205));
+    resp
+}
+
+fn pos_below(r: Rect) -> egui::Pos2 {
+    egui::pos2(r.center().x, r.bottom() - 9.0)
+}
+
 /// Ctrl+1..9 pick the first nine.
-const PRESETS: [Preset; 24] = [
+const PRESETS: [Preset; 27] = [
     p("Classic", "Overview", &[0, 1, 2, 3, 4, 5], &[]),
     p("Classic", "Analysis", &[SPEC, SPG, MEAS, OCT, PEAKS], &[]),
     p("Classic", "Scope & generator", &[SCOPE, SPEC, GEN, MEAS], &[]),
@@ -95,6 +157,9 @@ const PRESETS: [Preset; 24] = [
     p("Acoustics", "Impulse & RT60", &[IMP, RESP, GEN], &[[0.0, 0.0, 0.6, 1.0], [0.6, 0.0, 0.4, 0.65], [0.6, 0.65, 0.4, 0.35]]),
     p("More", "Recorder + spectrum", &[REC, SPEC, SPG], &[[0.0, 0.0, 0.34, 1.0], [0.34, 0.0, 0.66, 0.5], [0.34, 0.5, 0.66, 0.5]]),
     p("More", "Everything", &[0, 1, 2, 3, 4, 5, OCT, LOUD, DAW], &[]),
+    p("Routing", "Patchbay", &[ROUTING_WIN], &[[0.0, 0.0, 1.0, 1.0]]),
+    p("Routing", "Patchbay + analysers", &[ROUTING_WIN, SPEC, SPG, LOUD], &[[0.0, 0.0, 0.62, 1.0], [0.62, 0.0, 0.38, 0.40], [0.62, 0.40, 0.38, 0.32], [0.62, 0.72, 0.38, 0.28]]),
+    p("Routing", "Patchbay + timeline", &[ROUTING_WIN, SPEC, DAW], &[[0.0, 0.0, 0.62, 0.60], [0.62, 0.0, 0.38, 0.60], [0.0, 0.60, 1.0, 0.40]]),
 ];
 
 #[derive(Clone)]
@@ -297,6 +362,37 @@ impl App {
         }
     }
 
+    /// The built-in presets as picture cards, grouped; returns the one that was clicked.
+    pub fn builtin_grid(&mut self, ui: &mut Ui) -> Option<usize> {
+        let mut picked = None;
+        let mut groups: Vec<&str> = Vec::new();
+        for pr in PRESETS.iter() {
+            if !groups.contains(&pr.group) {
+                groups.push(pr.group);
+            }
+        }
+        for g in groups {
+            let members: Vec<usize> = (0..PRESETS.len()).filter(|&k| PRESETS[k].group == g && (self.graph_on || !PRESETS[k].wins.contains(&ROUTING_WIN))).collect();
+            if members.is_empty() {
+                continue;
+            }
+            ui.label(egui::RichText::new(g).small().weak());
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                for k in members {
+                    let pr = &PRESETS[k];
+                    let hint = if k < 9 { format!("Ctrl+{}", k + 1) } else { String::new() };
+                    let r = preset_card(ui, &preview_builtin(pr), pr.name, &hint);
+                    let names: Vec<&str> = pr.wins.iter().map(|&w| win_short(w)).collect();
+                    if r.on_hover_text(names.join(", ")).clicked() {
+                        picked = Some(k);
+                    }
+                }
+            });
+        }
+        picked
+    }
+
     pub fn layouts_menu(&mut self, ui: &mut Ui) {
         ui.menu_button("Layouts", |ui| {
             if ui.add_enabled(self.lay_can_undo(), egui::Button::new("Undo layout change").shortcut_text("Ctrl+Alt+Z")).clicked() {
@@ -308,45 +404,39 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            let mut group = "";
-            for (k, pr) in PRESETS.iter().enumerate() {
-                if pr.group != group {
-                    group = pr.group;
-                    if k > 0 {
-                        ui.separator();
-                    }
-                    ui.label(egui::RichText::new(group).small().weak());
-                }
-                let mut b = egui::Button::new(pr.name);
-                if k < 9 {
-                    b = b.shortcut_text(format!("Ctrl+{}", k + 1));
-                }
-                if ui.add(b).clicked() {
-                    self.apply_builtin(k);
-                    ui.close();
-                }
+            // every preset as a small picture of its arrangement
+            ui.set_max_width(570.0);
+            // a long list must not run off small screens
+            let max_h = (ui.ctx().content_rect().height() * 0.7).max(240.0);
+            let picked = egui::ScrollArea::vertical().max_height(max_h).auto_shrink([true, true]).show(ui, |ui| self.builtin_grid(ui)).inner;
+            if let Some(k) = picked {
+                self.apply_builtin(k);
+                ui.close();
             }
             if !self.presets.is_empty() {
                 ui.separator();
                 ui.label(egui::RichText::new("Saved").small().weak());
             }
             let mut delete = None;
-            for k in 0..self.presets.len() {
-                let n = PRESETS.len() + k;
-                ui.horizontal(|ui| {
-                    let mut b = egui::Button::new(&self.presets[k].name);
-                    if n < 9 {
-                        b = b.shortcut_text(format!("Ctrl+{}", n + 1));
-                    }
-                    if ui.add(b).clicked() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                for k in 0..self.presets.len() {
+                    let n = PRESETS.len() + k;
+                    let hint = if n < 9 { format!("Ctrl+{}", n + 1) } else { String::new() };
+                    let r = preset_card(ui, &preview_user(&self.presets[k]), &self.presets[k].name, &hint);
+                    let clicked = r.clicked();
+                    r.context_menu(|ui| {
+                        if ui.button("Delete this layout").clicked() {
+                            delete = Some(k);
+                            ui.close();
+                        }
+                    });
+                    if clicked {
                         self.apply_user(k);
                         ui.close();
                     }
-                    if ui.small_button("x").on_hover_text("Delete this layout").clicked() {
-                        delete = Some(k);
-                    }
-                });
-            }
+                }
+            });
             if let Some(k) = delete {
                 self.presets.remove(k);
             }

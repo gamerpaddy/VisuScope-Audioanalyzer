@@ -1,4 +1,4 @@
-﻿//! Audio capture through cpal. Output devices are opened as inputs, which gives WASAPI loopback on Windows.
+//! Audio capture through cpal. Output devices are opened as inputs, which gives WASAPI loopback on Windows.
 //!
 //! The stream lives on its own thread. If the device is invalidated (sample rate / bit depth changed in
 //! the driver or Windows sound settings, device unplugged) the stream is rebuilt automatically with the
@@ -234,9 +234,11 @@ where
     let (mut ml, mut mr): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
     let sh_err = sh.clone();
     let dead_cb = dead.clone();
+    let mut timer = crate::prof::CbTimer::new();
     dev.build_input_stream(
         cfg,
         move |data: &[T], _: &_| {
+            timer.begin();
             // a stream that has been replaced or abandoned must not feed the ring any more
             if sh.audio_gen.load(Relaxed) != gid || dead_cb.load(Relaxed) {
                 return;
@@ -277,10 +279,12 @@ where
             }
             sh.last_data_ms.store(sh.t0.elapsed().as_millis() as u64, Relaxed);
             sh.cv.notify_one();
+            timer.done(data.len() / ch.max(1), in_sr);
         },
         move |e| match e.kind() {
             cpal::ErrorKind::Xrun => {
                 sh_err.xruns.fetch_add(1, Relaxed);
+                crate::prof::C.xruns.fetch_add(1, Relaxed);
             }
             // harmless: stream is still running
             cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}

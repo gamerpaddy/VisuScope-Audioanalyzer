@@ -15,6 +15,12 @@ impl Tool for Daw {
             }
         }
         self.poll(cx);
+        // the node editor lists the tracks (names change rarely: twice a second is plenty)
+        if self.bus_t.elapsed() > Duration::from_millis(500) {
+            self.bus_t = Instant::now();
+            let list: Vec<(u32, String)> = self.proj.lock().tracks.iter().map(|t| (t.id, t.name.clone())).collect();
+            *crate::graph::bus().tracks.lock() = list;
+        }
         self.manage_capture();
         self.sync_play(cx);
         self.manage_monitor(cx);

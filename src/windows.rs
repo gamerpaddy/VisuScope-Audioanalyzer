@@ -132,6 +132,32 @@ fn split_rects(items: &[(usize, f32)], r: Rect, gap: f32, out: &mut Vec<(usize, 
     }
 }
 
+/// Windows that are laid out as a wide strip when tiling (the timeline reads left to right).
+pub fn wants_wide(i: usize) -> bool {
+    i >= BUILTIN && tools::INFO[i - BUILTIN].short == "Timeline"
+}
+
+/// The arrangement auto tiling produces. Wide windows (the timeline) get a full-width strip at the bottom,
+/// wider than tall whenever the area allows it; the rest is a weighted treemap, so the heaviest window
+/// (the routing graph) gets the most room. Gaps of `gap` between windows.
+pub fn tile_rects(items: &[(usize, f32)], area: Rect, gap: f32) -> Vec<(usize, Rect)> {
+    let mut out = Vec::new();
+    let inner = area.shrink(gap);
+    let (wide, rest): (Vec<(usize, f32)>, Vec<(usize, f32)>) = items.iter().copied().partition(|(i, _)| wants_wide(*i));
+    if wide.is_empty() || rest.is_empty() {
+        split_rects(items, inner, gap, &mut out);
+        return out;
+    }
+    let (ww, wr): (f32, f32) = (wide.iter().map(|w| w.1).sum(), rest.iter().map(|w| w.1).sum());
+    // the strip takes its share of the height but stays between 28 % and 55 %, and never taller than wide
+    let h = (inner.height() * ww / (ww + wr)).clamp(inner.height() * 0.28, inner.height() * 0.55).min(inner.width() / 1.6).max(40.0_f32.min(inner.height() * 0.5));
+    let strip = Rect::from_min_max(pos2(inner.min.x, inner.max.y - h), inner.max);
+    let upper = Rect::from_min_max(inner.min, pos2(inner.max.x, inner.max.y - h - gap));
+    split_rects(&rest, upper, gap, &mut out);
+    split_rects(&wide, strip, gap, &mut out);
+    out
+}
+
 impl App {
     pub fn win_title(&self, i: usize) -> &'static str {
         match i {
@@ -160,9 +186,7 @@ impl App {
         if items.is_empty() {
             return;
         }
-        let mut out: Vec<(usize, Rect)> = Vec::new();
-        split_rects(&items, area.shrink(GAP), GAP, &mut out);
-        for (i, r) in out {
+        for (i, r) in tile_rects(&items, area, GAP) {
             if self.prof {
                 eprintln!("tile {i} {}: {:?}", self.win_title(i), r);
             }
@@ -767,6 +791,13 @@ impl App {
                         self.wins[i].open = o;
                     }
                 }
+                if self.graph_on {
+                    let i = BUILTIN + tools::ROUTING;
+                    let mut o = self.wins[i].open;
+                    if ui.toggle_value(&mut o, egui::RichText::new("Routing").strong()).on_hover_text(tools::INFO[tools::ROUTING].tip).changed() {
+                        self.wins[i].open = o;
+                    }
+                }
                 let open_tools = (BUILTIN..WIN_COUNT).filter(|&i| self.wins[i].open).count();
                 let label = if open_tools > 0 { format!("Tools ({open_tools})") } else { "Tools".to_string() };
                 ui.menu_button(label, |ui| {
@@ -776,6 +807,10 @@ impl App {
                         }
                         ui.label(egui::RichText::new(*name).small().weak());
                         for &k in members.iter() {
+                            if k == tools::ROUTING {
+                                // listed in the top bar while the graph is on
+                                continue;
+                            }
                             let i = BUILTIN + k;
                             let info = &tools::INFO[k];
                             let mut o = self.wins[i].open;
@@ -911,6 +946,27 @@ mod tests {
         assert!(tiny.width() >= MIN_W && tiny.height() >= MIN_H);
         // an area smaller than the minimum size must not panic
         let _ = App::clamp_rect(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 200.0)), Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 60.0)));
+    }
+
+    #[test]
+    fn timeline_is_a_wide_strip_and_the_routing_window_gets_the_most_room() {
+        let (tl, rt) = (BUILTIN + 15, BUILTIN + 16);
+        assert!(wants_wide(tl) && !wants_wide(rt));
+        for a in [Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 900.0)), Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 1000.0)), Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 900.0))] {
+            let items: Vec<(usize, f32)> = vec![(tl, win_weight(tl)), (rt, win_weight(rt)), (0, win_weight(0)), (4, win_weight(4)), (5, win_weight(5))];
+            let out = tile_rects(&items, a, GAP);
+            assert_eq!(out.len(), 5);
+            let get = |i: usize| out.iter().find(|o| o.0 == i).unwrap().1;
+            assert!(get(tl).width() > get(tl).height(), "timeline {:?} in {:?}", get(tl), a);
+            let area_of = |r: Rect| r.width() * r.height();
+            assert!(out.iter().filter(|o| o.0 != rt && o.0 != tl).all(|o| area_of(o.1) < area_of(get(rt)) * 1.01), "routing is the largest of the rest");
+            for (n, (_, ra)) in out.iter().enumerate() {
+                assert!(a.contains_rect(*ra));
+                for (_, rb) in out.iter().skip(n + 1) {
+                    assert!(!ra.intersects(*rb));
+                }
+            }
+        }
     }
 
     #[test]

@@ -117,6 +117,16 @@ pub struct App {
     /// undo / redo of window arrangement changes
     pub lay: crate::layouts::LayHist,
     pub opts_open: bool,
+    /// optional node editor that replaces the separate input / output pickers
+    pub graph_on: bool,
+    pub graph_applied: bool,
+    pub graph_hook: bool,
+    pub open_hook: bool,
+    /// all generators for the routing graph (the first is `tg`) and what was last handed to it
+    pub gens_shared: Arc<parking_lot::Mutex<Vec<GenParams>>>,
+    pub gen_extra: Vec<GenParams>,
+    pub gen_tab: usize,
+    pub gens_sent: Vec<GenParams>,
     pub layout_ready: bool,
     pub max_req: Option<usize>,
     pub sized: bool,
@@ -323,6 +333,14 @@ impl App {
             prev_area: None,
             lay: Default::default(),
             opts_open: false,
+            graph_on: false,
+            graph_applied: false,
+            graph_hook: false,
+            open_hook: false,
+            gens_shared: Arc::new(parking_lot::Mutex::new(vec![GenParams::default()])),
+            gen_extra: Vec::new(),
+            gen_tab: 0,
+            gens_sent: Vec::new(),
             layout_ready: false,
             max_req: None,
             sized: false,
@@ -446,6 +464,7 @@ impl App {
         kv("rotated", &self.rotated);
         kv("auto_tile", &self.auto_tile);
         kv("win_snap", &self.snap_on);
+        kv("graph_on", &self.graph_on);
         kv("meas_ch", &self.meas_ch);
         kv("readout_hz", &self.readout_hz);
         kv("fps_cap", &self.fps_cap);
@@ -579,6 +598,7 @@ impl App {
         set!(self.rotated, "rotated");
         set!(self.auto_tile, "auto_tile");
         set!(self.snap_on, "win_snap");
+        set!(self.graph_on, "graph_on");
         set!(self.snap_peak, "snap_peak");
         if let Some(v) = get::<usize>(&m, "smooth_oct") {
             self.smooth_oct = v.min(SMOOTH_OCT.len() - 1);
@@ -741,6 +761,10 @@ impl App {
         if !self.layout_ready {
             return;
         }
+        // screenshot and test runs must not change the user's settings
+        if self.shot_env.is_some() || std::env::var_os("VISUSCOPE_GRAPH").is_some() || std::env::var_os("VISUSCOPE_LAYOUT").is_some() {
+            return;
+        }
         let s = self.settings_string();
         if !force && s == self.last_saved {
             return;
@@ -789,6 +813,10 @@ impl App {
     pub fn start_selected(&mut self) {
         crate::log::log("ui: (re)start capture requested");
         self.audio = None;
+        // the routing graph opens the devices itself
+        if self.graph_on {
+            return;
+        }
         if let Some(d) = self.devices.get(self.sel_dev) {
             self.sh.ch_a.store(self.ch_a, std::sync::atomic::Ordering::Relaxed);
             self.sh.ch_b.store(self.ch_b, std::sync::atomic::Ordering::Relaxed);
@@ -1425,6 +1453,7 @@ impl eframe::App for App {
             self.sm_st = [s.corr_f, s.corr_s, s.bal_db, s.mid_db, s.side_db];
         }
         self.handle_screenshot();
+        self.sync_graph_mode();
         self.poll_scan();
         self.poll_mic_dialog();
         self.manage_monitor();

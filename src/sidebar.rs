@@ -15,7 +15,15 @@ impl App {
     pub fn controls_ui(&mut self, ui: &mut Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 5.0;
-            section(ui, "Input", true, |ui| self.input_section(ui));
+            if self.graph_on {
+                section(ui, "Input", true, |ui| {
+                    ui.label(RichText::new("The routing graph is on: devices, channels, the monitor and the outputs are set in the Routing window.").small().weak());
+                    let s = self.sh.status.lock().clone();
+                    ui.label(RichText::new(s).small());
+                });
+            } else {
+                section(ui, "Input", true, |ui| self.input_section(ui));
+            }
             section(ui, "Analysis", true, |ui| self.analysis_section(ui));
             section(ui, "Spectrum traces", false, |ui| self.trace_section(ui));
             section(ui, "Spectrogram / waterfall", false, |ui| self.spectro_section(ui));
@@ -76,7 +84,7 @@ impl App {
     pub fn manage_monitor(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
         self.mon_gain.store(10f32.powf(self.mon_gain_db / 20.0).to_bits(), Relaxed);
-        let want = self.mon_on && !self.mon_feedback();
+        let want = self.mon_on && !self.mon_feedback() && !self.graph_on;
         let dev = self.mon_output_id().unwrap_or_default();
         if let Some((_, d)) = &self.mon_handle {
             if !want || *d != dev {

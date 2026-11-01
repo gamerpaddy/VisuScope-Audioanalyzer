@@ -1,4 +1,4 @@
-﻿//! Signal generator window.
+//! Signal generator window.
 
 use crate::app::*;
 use crate::tonegen::{self, Dither, NoiseKind, Wave};
@@ -11,6 +11,10 @@ fn sub(ui: &mut Ui, title: &str, open: bool, add: impl FnOnce(&mut Ui)) {
 impl App {
     pub fn start_gen(&mut self) {
         self.gen_handle = None;
+        // with the routing graph the generator is a node, not a device stream of its own
+        if self.graph_on {
+            return;
+        }
         if let Some(d) = self.gen_devs.get(self.gen_sel) {
             *self.gen_shared.lock() = self.tg.clone();
             self.gen_handle = Some(tonegen::start(self.gen_shared.clone(), d.id.clone(), self.gen_status.clone()));
@@ -19,7 +23,46 @@ impl App {
         }
     }
 
+    /// Tabs for several generators (only with the routing graph, where each generator is a node).
+    fn gen_tabs_ui(&mut self, ui: &mut Ui) {
+        self.gen_tab = self.gen_tab.min(self.gen_extra.len());
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let n = 1 + self.gen_extra.len();
+            for k in 0..n {
+                let p = if k == 0 { &self.tg } else { &self.gen_extra[k - 1] };
+                let label = format!("{} {}{}", k + 1, p.wave.name(), if p.on { "  \u{25CF}" } else { "" });
+                if ui.selectable_label(self.gen_tab == k, label).on_hover_text("Each generator is a node in the Routing window").clicked() {
+                    self.gen_tab = k;
+                }
+            }
+            if n < 8 && ui.small_button("+").on_hover_text("Add another generator").clicked() {
+                self.gen_extra.push(tonegen::GenParams { wave: Wave::Square, freq: 440.0, level_db: [-20.0, -20.0], ..tonegen::GenParams::default() });
+                self.gen_tab = self.gen_extra.len();
+            }
+            if self.gen_tab > 0 && ui.small_button("x").on_hover_text("Remove this generator").clicked() {
+                self.gen_extra.remove(self.gen_tab - 1);
+                self.gen_tab -= 1;
+            }
+        });
+    }
+
     pub fn generator_ui(&mut self, ui: &mut Ui) {
+        if self.graph_on {
+            self.gen_tabs_ui(ui);
+        }
+        // the tab's generator is edited through `tg`, so the panel below needs no changes
+        let swapped = self.graph_on && self.gen_tab > 0 && self.gen_tab <= self.gen_extra.len();
+        if swapped {
+            std::mem::swap(&mut self.tg, &mut self.gen_extra[self.gen_tab - 1]);
+        }
+        self.generator_panel(ui);
+        if swapped {
+            std::mem::swap(&mut self.tg, &mut self.gen_extra[self.gen_tab - 1]);
+        }
+    }
+
+    fn generator_panel(&mut self, ui: &mut Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 5.0;
             // output on/off + device
@@ -30,14 +73,20 @@ impl App {
                     .min_size(vec2(120.0, 26.0));
                 if ui.add(btn).clicked() {
                     self.tg.on = !self.tg.on;
-                    if self.tg.on && self.gen_handle.is_none() {
+                    if self.tg.on && self.gen_handle.is_none() && !self.graph_on {
                         self.start_gen();
                     }
                 }
-                ui.label(RichText::new(self.gen_status.lock().clone()).small().weak());
+                if !self.graph_on {
+                    ui.label(RichText::new(self.gen_status.lock().clone()).small().weak());
+                }
             });
+            if self.graph_on {
+                ui.label(RichText::new("Where this generator goes is set in the Routing window (connect its node to an output or an analyser).").small().weak());
+            }
             let cur = self.gen_devs.get(self.gen_sel).map(|d| d.label.clone()).unwrap_or_else(|| "-".into());
             let mut restart = false;
+            if !self.graph_on {
             ui.horizontal(|ui| {
                 ui.label("Output");
                 egui::ComboBox::from_id_salt("gendev").width(ui.available_width() - 70.0).selected_text(cur).show_ui(ui, |ui| {
@@ -55,6 +104,7 @@ impl App {
                 self.start_gen();
             }
             ui.label(RichText::new("Plays to the chosen device. To measure it, pick its [Loopback] entry as the input. Keep levels low near speakers or a live mic.").small().weak());
+            }
 
             // levels
             sub(ui, "Level", true, |ui| {

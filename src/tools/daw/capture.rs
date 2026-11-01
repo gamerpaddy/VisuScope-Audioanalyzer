@@ -54,7 +54,16 @@ struct Buf {
     frames: AtomicU64,
     /// set when the stream was rebuilt while recording
     gap: AtomicBool,
+    /// lanes the routing graph reads (it takes them with `tap_drain`)
+    tap_need: Vec<AtomicBool>,
+    tap_any: AtomicBool,
+    tap: Mutex<Vec<Vec<f32>>>,
+    /// frames delivered by the device since the stream started (always counted)
+    total: AtomicU64,
 }
+
+/// Longest backlog kept for the graph tap (seconds of audio per lane).
+const TAP_SECS: usize = 2;
 
 /// One open capture device.
 pub struct Capture {
@@ -78,16 +87,78 @@ pub struct Take {
     pub gap: bool,
 }
 
+fn new_buf() -> Arc<Buf> {
+    Arc::new(Buf {
+        rec: AtomicBool::new(false),
+        need: (0..=MAX_LANES).map(|_| AtomicBool::new(false)).collect(),
+        data: Mutex::new(Vec::new()),
+        peak: (0..=MAX_LANES).map(|_| AtomicU32::new(0)).collect(),
+        frames: AtomicU64::new(0),
+        gap: AtomicBool::new(false),
+        tap_need: (0..=MAX_LANES).map(|_| AtomicBool::new(false)).collect(),
+        tap_any: AtomicBool::new(false),
+        tap: Mutex::new(Vec::new()),
+        total: AtomicU64::new(0),
+    })
+}
+
 impl Capture {
+    /// A capture without a device: the routing graph feeds it with `feed` (timeline tracks that record from the graph).
+    pub fn virtual_input(id: String, sr: u32) -> Self {
+        let info = Arc::new(Mutex::new(Some((sr, 2))));
+        Self { id, buf: new_buf(), stop: Arc::new(AtomicBool::new(true)), info, status: Arc::new(Mutex::new(String::from("routing graph"))) }
+    }
+
+    /// Store / meter one block of a stereo signal (lanes 0 = left, 1 = right, 2 = mono mix).
+    pub fn feed(&self, l: &[f32], r: &[f32]) {
+        let b = &self.buf;
+        let mut pk = [0f32; 3];
+        let rec = b.rec.load(Relaxed);
+        let mut g = if rec { Some(b.data.lock()) } else { None };
+        let (n0, n1, n2) = (b.need[0].load(Relaxed), b.need[1].load(Relaxed), b.need[2].load(Relaxed));
+        for (&x, &y) in l.iter().zip(r.iter()) {
+            let m = 0.5 * (x + y);
+            pk[0] = pk[0].max(x.abs());
+            pk[1] = pk[1].max(y.abs());
+            pk[2] = pk[2].max(m.abs());
+            if let Some(g) = g.as_mut() {
+                for (k, (on, v)) in [(n0, x), (n1, y), (n2, m)].into_iter().enumerate() {
+                    if on {
+                        if let Some(lane) = g.get_mut(k) {
+                            lane.push(v);
+                        }
+                    }
+                }
+            }
+        }
+        if rec {
+            b.frames.fetch_add(l.len() as u64, Relaxed);
+        }
+        drop(g);
+        for (i, p) in pk.iter().enumerate() {
+            b.peak[i].fetch_max(p.to_bits(), Relaxed);
+        }
+    }
+
+    /// Choose the lanes the routing graph wants to read (`tap_drain` returns them).
+    pub fn set_tap(&self, lanes: &[usize]) {
+        for (i, n) in self.buf.tap_need.iter().enumerate() {
+            n.store(lanes.contains(&i), Relaxed);
+        }
+        self.buf.tap_any.store(!lanes.is_empty(), Relaxed);
+        if lanes.is_empty() {
+            self.buf.tap.lock().clear();
+        }
+    }
+
+    /// Everything captured since the last call, per lane (empty for lanes that are not tapped).
+    pub fn tap_drain(&self) -> Vec<Vec<f32>> {
+        let mut t = self.buf.tap.lock();
+        t.iter_mut().map(std::mem::take).collect()
+    }
+
     pub fn start(id: String) -> Self {
-        let buf = Arc::new(Buf {
-            rec: AtomicBool::new(false),
-            need: (0..=MAX_LANES).map(|_| AtomicBool::new(false)).collect(),
-            data: Mutex::new(Vec::new()),
-            peak: (0..=MAX_LANES).map(|_| AtomicU32::new(0)).collect(),
-            frames: AtomicU64::new(0),
-            gap: AtomicBool::new(false),
-        });
+        let buf = new_buf();
         let stop = Arc::new(AtomicBool::new(false));
         let info = Arc::new(Mutex::new(None));
         let status = Arc::new(Mutex::new(String::from("opening...")));
@@ -104,6 +175,11 @@ impl Capture {
     /// Largest level per lane since the last call (linear), `ch` channels plus the mix.
     pub fn take_peaks(&self, ch: usize) -> Vec<f32> {
         (0..=ch.min(MAX_LANES)).map(|i| f32::from_bits(self.buf.peak[i].swap(0, Relaxed))).collect()
+    }
+
+    /// Frames delivered by the device so far.
+    pub fn total_frames(&self) -> u64 {
+        self.buf.total.load(Relaxed)
     }
 
     pub fn frames(&self) -> u64 {
@@ -231,12 +307,17 @@ where
     let dead_cb = dead.clone();
     let mut peak = vec![0f32; lanes + 1];
     let mut need: Vec<usize> = Vec::new();
+    let mut tneed: Vec<bool> = Vec::new();
+    let tap_cap = cfg.sample_rate as usize * TAP_SECS;
+    let in_sr = cfg.sample_rate;
+    let mut timer = crate::prof::CbTimer::new();
     dev.build_input_stream(
         cfg,
         move |data: &[T], _: &_| {
             if dead_cb.load(Relaxed) {
                 return;
             }
+            timer.begin();
             peak.iter_mut().for_each(|p| *p = 0.0);
             let rec = buf.rec.load(Relaxed);
             if rec {
@@ -244,6 +325,14 @@ where
                 need.extend((0..=lanes).filter(|&l| buf.need[l].load(Relaxed)));
             }
             let mut guard = if rec { Some(buf.data.lock()) } else { None };
+            let mut tguard = if buf.tap_any.load(Relaxed) { Some(buf.tap.lock()) } else { None };
+            if let Some(t) = tguard.as_mut() {
+                if t.len() < lanes + 1 {
+                    t.resize(lanes + 1, Vec::new());
+                }
+                tneed.clear();
+                tneed.extend((0..=lanes).map(|l| buf.tap_need[l].load(Relaxed)));
+            }
             let mut n = 0u64;
             for frame in data.chunks_exact(ch) {
                 let mut mix = 0f32;
@@ -258,6 +347,11 @@ where
                             }
                         }
                     }
+                    if let Some(t) = tguard.as_mut() {
+                        if tneed[c] {
+                            t[c].push(v);
+                        }
+                    }
                 }
                 let mix = mix / lanes as f32;
                 peak[lanes] = peak[lanes].max(mix.abs());
@@ -268,8 +362,22 @@ where
                         }
                     }
                 }
+                if let Some(t) = tguard.as_mut() {
+                    if tneed[lanes] {
+                        t[lanes].push(mix);
+                    }
+                }
                 n += 1;
             }
+            // nobody reads the tap (graph stalled): do not grow without bound
+            if let Some(t) = tguard.as_mut() {
+                for lane in t.iter_mut().filter(|l| l.len() > tap_cap) {
+                    let d = lane.len() - tap_cap / 2;
+                    lane.drain(..d);
+                }
+            }
+            drop(tguard);
+            buf.total.fetch_add(n, Relaxed);
             if rec {
                 buf.frames.fetch_add(n, Relaxed);
             }
@@ -277,9 +385,13 @@ where
             for (i, p) in peak.iter().enumerate() {
                 buf.peak[i].fetch_max(p.to_bits(), Relaxed);
             }
+            timer.done(data.len() / ch, in_sr);
         },
         move |e| match e.kind() {
-            cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
+            cpal::ErrorKind::Xrun => {
+                crate::prof::C.xruns.fetch_add(1, Relaxed);
+            }
+            cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
             _ => {
                 crate::log::log(&format!("daw capture: stream error {:?}: {e}", e.kind()));
                 dead.store(true, Relaxed)

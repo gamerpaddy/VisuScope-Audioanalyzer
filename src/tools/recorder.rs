@@ -127,28 +127,36 @@ fn rec_thread(sh: Arc<Shared>, job: Arc<RecShared>, path: std::path::PathBuf, fm
 }
 
 fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayShared>, file: Arc<Loaded>, mon: Arc<Mutex<Queue>>) {
-    // make sure the live capture is gone before the file takes over the ring
-    sh.audio_gen.fetch_add(1, Relaxed);
-    std::thread::sleep(Duration::from_millis(150));
+    // with the routing graph the file is a node: the audio goes to the graph's bus, the ring is not touched
+    let graph = crate::graph::bus().on.load(Relaxed);
     let d = &file.data;
     let total = d.l.len();
-    {
-        let mut ring = sh.ring.lock();
-        ring.total = 0;
-        ring.l.fill(0.0);
-        ring.r.fill(0.0);
-    }
-    sh.sr.store(d.sr, Relaxed);
-    sh.chans.store(2, Relaxed);
-    sh.feeding_silence.store(false, Relaxed);
-    *sh.status.lock() = format!("File: {} ({} Hz)", file.name, d.sr);
-    {
+    if !graph {
+        // make sure the live capture is gone before the file takes over the ring
+        sh.audio_gen.fetch_add(1, Relaxed);
+        std::thread::sleep(Duration::from_millis(150));
+        {
+            let mut ring = sh.ring.lock();
+            ring.total = 0;
+            ring.l.fill(0.0);
+            ring.r.fill(0.0);
+        }
+        sh.sr.store(d.sr, Relaxed);
+        sh.chans.store(2, Relaxed);
+        sh.feeding_silence.store(false, Relaxed);
+        *sh.status.lock() = format!("File: {} ({} Hz)", file.name, d.sr);
         let mut q = mon.lock();
         q.buf.clear();
         q.src_sr = d.sr;
     }
     // `audible`: also feed the sound output (not for the silent preview after a seek)
     let push = |a: usize, b: usize, audible: bool| {
+        if graph {
+            if audible && b > a {
+                crate::graph::bus().file_push(d.sr, &d.l[a..b.min(total)], &d.r[a..b.min(total)]);
+            }
+            return;
+        }
         let mut ring = sh.ring.lock();
         for i in a..b.min(total) {
             ring.push(d.l[i], d.r[i]);
@@ -166,7 +174,7 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayShared>, file: Arc<Loaded>, mon: Ar
     while !ctl.stop.load(Relaxed) {
         std::thread::sleep(Duration::from_millis(4));
         // the timeline took over the analysers: step aside
-        if sh.ring_owner.load(Relaxed) != 1 {
+        if !graph && sh.ring_owner.load(Relaxed) != 1 {
             ctl.playing.store(false, Relaxed);
             ctl.stop.store(true, Relaxed);
             break;
@@ -255,7 +263,7 @@ impl Recorder {
     /// Keep the sound output stream in line with the player state and the chosen device.
     fn manage_monitor(&mut self, cx: &Ctx) {
         let dev = if self.mon_dev.is_empty() || !cx.out_devs.iter().any(|d| d.id == self.mon_dev) { cx.out_devs.first().map(|d| d.id.clone()).unwrap_or_default() } else { self.mon_dev.clone() };
-        let want = self.mon_on && self.play.as_ref().map(|p| !p.stop.load(Relaxed)).unwrap_or(false);
+        let want = self.mon_on && self.play.as_ref().map(|p| !p.stop.load(Relaxed)).unwrap_or(false) && !crate::graph::bus().on.load(Relaxed);
         if let Some(p) = &self.play {
             p.monitor.store(self.mon_on, Relaxed);
         }
@@ -295,13 +303,18 @@ impl Recorder {
     fn start_play(&mut self, cx: &mut Ctx) {
         let Some(file) = self.file.clone() else { return };
         self.stop_play_thread();
-        cx.sh.ring_owner.store(1, Relaxed);
+        let graph = crate::graph::bus().on.load(Relaxed);
+        if !graph {
+            cx.sh.ring_owner.store(1, Relaxed);
+        }
         let ctl = Arc::new(PlayShared { pos: AtomicU64::new(0), playing: AtomicBool::new(true), stop: AtomicBool::new(false), looping: AtomicBool::new(self.looping), seek: AtomicI64::new(-1), monitor: AtomicBool::new(self.mon_on) });
         let (sh, c2) = (cx.sh.clone(), ctl.clone());
         let q = self.mon_q.clone();
         std::thread::Builder::new().name("file-player".into()).spawn(move || play_thread(sh, c2, file, q)).ok();
         self.play = Some(ctl);
-        cx.req.audio = AudioReq::Stop;
+        if !graph {
+            cx.req.audio = AudioReq::Stop;
+        }
     }
 
     fn stop_play_thread(&mut self) {
@@ -427,6 +440,9 @@ impl Recorder {
             ui.label(RichText::new(format!("{} / {}", fmt_time(pos as f32 / sr), fmt_time(total as f32 / sr))).monospace());
         });
         // sound output
+        if crate::graph::bus().on.load(Relaxed) {
+            ui.label(RichText::new("Routing graph on: use the File player node to send this file to the analysers or an output.").small().weak());
+        } else {
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.mon_on, "Sound").on_hover_text("Play the file through an output device while it is analysed");
             ui.add_enabled_ui(self.mon_on, |ui| {
@@ -443,6 +459,7 @@ impl Recorder {
                 ui.label(RichText::new(st).small().weak());
             }
         });
+        }
         self.mon_gain.store(self.mon_vol.powi(2).to_bits(), Relaxed);
         // waveform with zoom (wheel), pan (drag when zoomed) and seek (click)
         ui.horizontal(|ui| {

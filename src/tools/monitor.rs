@@ -141,7 +141,9 @@ where
                     match q.buf.pop_front() {
                         Some(s) => next = s,
                         None => {
+                            // the source did not deliver in time: a gap in the sound
                             primed = false;
+                            crate::prof::C.out_underruns.fetch_add(1, Relaxed);
                             return;
                         }
                     }
