@@ -15,6 +15,30 @@ impl Tool for Daw {
             }
         }
         self.poll(cx);
+        // commands from the input mappings
+        for c in std::mem::take(&mut self.cmds) {
+            let mut it = c.splitn(2, '\t');
+            match (it.next(), it.next()) {
+                (Some("play"), _) => self.toggle_play(cx),
+                (Some("record"), _) => {
+                    if self.rec.is_some() {
+                        self.stop_record(cx);
+                    } else {
+                        self.start_record(cx);
+                    }
+                }
+                (Some("loop"), _) => self.loop_on = !self.loop_on,
+                (Some("master"), Some(v)) => {
+                    if let Some(db) = v.parse::<f32>().ok().filter(|v| v.is_finite()) {
+                        self.proj.lock().master_db = db.clamp(-60.0, 12.0);
+                        self.rev += 1;
+                    }
+                }
+                // edits need the window (they act on what it shows); with it closed they are dropped, not stored for later
+                (Some(x @ ("marker" | "split" | "undo" | "redo")), _) if visible => self.edit_cmds.push(x.to_string()),
+                _ => {}
+            }
+        }
         // the node editor lists the tracks (names change rarely: twice a second is plenty)
         if self.bus_t.elapsed() > Duration::from_millis(500) {
             self.bus_t = Instant::now();
@@ -93,6 +117,9 @@ impl Tool for Daw {
         match (it.next(), it.next()) {
             (Some("import"), Some(path)) => self.import(vec![PathBuf::from(path)]),
             (Some("demo"), _) => self.demo(),
+            // from the input mappings: handled by the next update (or the next drawing for the edits)
+            (Some(x @ ("play" | "record" | "loop" | "marker" | "split" | "undo" | "redo")), _) => self.cmds.push(x.to_string()),
+            (Some("master"), Some(v)) => self.cmds.push(format!("master\t{v}")),
             _ => {}
         }
     }

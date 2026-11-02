@@ -239,6 +239,19 @@ impl Daw {
         self.an_hidden = self.an_open && an_h == 0.0 && an_w == 0.0;
         let body = Rect::from_min_max(avail.min, pos2(avail.max.x - an_w, avail.max.y - an_h));
         self.keys(ui, cx, &mut p, whole);
+        for c in std::mem::take(&mut self.edit_cmds) {
+            match c.as_str() {
+                "marker" => {
+                    self.checkpoint(&p);
+                    p.add_mark(self.pos(), 0, None);
+                    self.touch();
+                }
+                "split" => self.act_split(&mut p),
+                "undo" => self.undo(&mut p),
+                "redo" => self.redo(&mut p),
+                _ => {}
+            }
+        }
         self.body(ui, cx, &mut p, body);
         if an_h > 0.0 {
             let an = Rect::from_min_max(pos2(avail.min.x, avail.max.y - an_h + 4.0), avail.max);

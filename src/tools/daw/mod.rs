@@ -326,6 +326,9 @@ pub struct Daw {
     split_req: Option<u32>,
     /// timeline frame under the last right-click
     ctx_frame: i64,
+    /// commands from the input mappings (see `Tool::command`), and the edits among them that wait for the next drawing
+    cmds: Vec<String>,
+    edit_cmds: Vec<String>,
     /// frame and marker under the last right-click on the ruler
     ruler_ctx: (i64, Option<u32>),
     /// track whose volume automation is being edited, the point being dragged (track index, point), and the point under the last right-click
@@ -441,6 +444,8 @@ impl Daw {
             split_req: None,
             ctx_frame: 0,
             ruler_ctx: (0, None),
+            cmds: Vec::new(),
+            edit_cmds: Vec::new(),
             auto_edit: None,
             auto_drag: None,
             auto_ctx: None,

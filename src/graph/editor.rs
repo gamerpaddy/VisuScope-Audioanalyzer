@@ -268,6 +268,8 @@ pub struct Routing {
     ab: Option<(usize, [Graph; 2])>,
     hist: History,
     search_hook: bool,
+    /// commands from the input mappings (probe, A / B, undo, redo), taken when the window is drawn
+    cmds: Vec<String>,
     /// listening probe: on, its volume (dB), whether the normal outputs go quiet, what it hovers over now and whether that is the body of a node
     probe_on: bool,
     probe_db: f32,
@@ -366,7 +368,7 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, probe_on: false, probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     fn push(&mut self) {
@@ -1223,6 +1225,13 @@ impl Routing {
         }
         ui.spacing_mut().item_spacing.x = 6.0;
         if let Some(k) = go {
+            self.ab_go(k);
+        }
+    }
+
+    /// Switch to version `k` of the patch (A = 0, B = 1); the first switch makes B a copy of the patch as it is.
+    fn ab_go(&mut self, k: usize) {
+        {
             let cur_g = self.g.clone();
             let (from, slots) = match self.ab.take() {
                 Some((c, mut s)) => {
@@ -1854,7 +1863,17 @@ impl Routing {
 }
 
 impl Tool for Routing {
+    fn command(&mut self, c: &str) {
+        if matches!(c, "probe" | "ab" | "undo" | "redo") && self.cmds.len() < 16 {
+            self.cmds.push(c.to_string());
+        }
+    }
+
     fn update(&mut self, cx: &mut Ctx, _visible: bool) {
+        // commands wait for the window to be drawn; with the graph off there is nothing for them to act on
+        if !cx.graph_on {
+            self.cmds.clear();
+        }
         if cx.graph_on && self.eng.is_none() {
             self.make_engine(cx);
         }
@@ -1932,6 +1951,18 @@ impl Tool for Routing {
         if !cx.graph_on {
             ui.label("The routing graph is off. Turn it on in Options.");
             return;
+        }
+        for c in std::mem::take(&mut self.cmds) {
+            match c.as_str() {
+                "probe" => self.probe_on = !self.probe_on,
+                "ab" => {
+                    let next = self.ab.as_ref().map_or(1, |a| 1 - a.0);
+                    self.ab_go(next);
+                }
+                "undo" => self.undo_graph(),
+                "redo" => self.redo_graph(),
+                _ => {}
+            }
         }
         // test hook: VISUSCOPE_SEARCH=1 opens the add-node menu once (screenshots)
         if std::env::var_os("VISUSCOPE_SEARCH").is_some() && !self.search_hook {

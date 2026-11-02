@@ -115,6 +115,14 @@ impl App {
             ui.add(egui::Slider::new(&mut self.readout_hz, 0.5..=10.0).text("Readout update rate (Hz)"));
             ui.checkbox(&mut self.readout_hold, "Hold the numeric readouts");
             ui.separator();
+            ui.label(RichText::new("Input mappings").strong());
+            ui.horizontal(|ui| {
+                if ui.button("Keys, MIDI and controllers...").on_hover_text("Bind keys, MIDI notes and controllers, game controller and joystick buttons and axes to actions and sliders").clicked() {
+                    self.map.open = true;
+                }
+                ui.label(RichText::new(format!("{} bound", self.map.bindings.len())).small().weak());
+            });
+            ui.separator();
             ui.label(RichText::new("Files").strong());
             ui.checkbox(&mut self.import_at_start, "Import audio into the timeline at its start, not at the cursor").on_hover_text("Files added to the timeline (the Import button, drag and drop, the track menus) begin at the leftmost position, so several imports line up. Off: they are placed at the cursor.");
             ui.horizontal(|ui| {

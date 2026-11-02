@@ -158,6 +158,9 @@ pub struct App {
     pub fps_cap: f32,
     /// size of the whole interface (text and widgets): 1.0 = normal, for high-resolution screens
     pub ui_scale: f32,
+    /// input mappings (keys, MIDI, controllers) and the list of what can be bound
+    pub map: crate::mapping::Mapper,
+    pub map_defs: Vec<crate::mapping::ActionDef>,
     /// Options: imported audio goes to the start of the timeline, not to the cursor
     pub import_at_start: bool,
     ui_scale_applied: f32,
@@ -392,6 +395,8 @@ impl App {
             ui_fps: 0.0,
             fps_cap: 60.0,
             ui_scale: 1.0,
+            map: crate::mapping::Mapper::load(),
+            map_defs: crate::mapping::actions(),
             import_at_start: false,
             ui_scale_applied: 1.0,
             rotated: false,
@@ -1536,6 +1541,7 @@ impl eframe::App for App {
         self.manage_monitor();
         self.tools_update();
         self.handle_hotkeys(&ctx);
+        self.inputs_frame(&ctx);
 
         beat(self, 6);
         self.top_bar_ui(ui);
