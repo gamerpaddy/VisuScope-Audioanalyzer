@@ -157,6 +157,8 @@ pub struct App {
     pub fps_cap: f32,
     /// size of the whole interface (text and widgets): 1.0 = normal, for high-resolution screens
     pub ui_scale: f32,
+    /// Options: imported audio goes to the start of the timeline, not to the cursor
+    pub import_at_start: bool,
     ui_scale_applied: f32,
     pub rotated: bool,
     pub sm_metrics: [Metrics; 2],
@@ -388,6 +390,7 @@ impl App {
             ui_fps: 0.0,
             fps_cap: 60.0,
             ui_scale: 1.0,
+            import_at_start: false,
             ui_scale_applied: 1.0,
             rotated: false,
             sm_metrics: Default::default(),
@@ -500,6 +503,7 @@ impl App {
         kv("readout_hz", &self.readout_hz);
         kv("fps_cap", &self.fps_cap);
         kv("ui_scale", &self.ui_scale);
+        kv("import_at_start", &self.import_at_start);
         kv("snap_peak", &self.snap_peak);
         kv("snap_src", &self.snap_src);
         kv("cal_on", &self.cal.on);
@@ -684,6 +688,7 @@ impl App {
         if let Some(v) = get::<f32>(&m, "readout_hz") {
             self.readout_hz = v.clamp(0.5, 10.0);
         }
+        set!(self.import_at_start, "import_at_start");
         if let Some(v) = get::<f32>(&m, "ui_scale") {
             self.ui_scale = v.clamp(0.7, 3.0);
         }
@@ -1533,7 +1538,6 @@ impl eframe::App for App {
         beat(self, 6);
         self.top_bar_ui(ui);
         self.status_bar_ui(ui);
-        egui::Panel::left("controls").resizable(true).default_size(290.0).min_size(220.0).show(ui, |ui| self.controls_ui(ui));
         beat(self, 7);
         egui::CentralPanel::default().show(ui, |ui| {
             let area = ui.available_rect_before_wrap();

@@ -72,6 +72,12 @@ struct WinEv {
     drag: Option<DragKind>,
 }
 
+/// A menu that stays open while you work in it (a text field, a slider): it closes when you click outside it or when something inside
+/// calls `ui.close()`. The ordinary menu closes on every click inside it, which makes it impossible to type a name into it.
+pub fn sticky_menu<R>(ui: &mut Ui, title: impl Into<egui::WidgetText>, add: impl FnOnce(&mut Ui) -> R) {
+    egui::containers::menu::MenuButton::new(title).config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)).ui(ui, add);
+}
+
 pub fn win_short(i: usize) -> &'static str {
     if i < BUILTIN { SHORT[i] } else { tools::INFO[i - BUILTIN].short }
 }
@@ -243,8 +249,12 @@ impl App {
     /// Contents of window `i` (shared by the floating window and the pop-out viewport).
     fn window_content(&mut self, ui: &mut Ui, i: usize) {
         match i {
-            0 => self.panel_spectrum(ui),
+            0 => {
+                self.window_settings(ui, 0);
+                self.panel_spectrum(ui)
+            }
             1 => {
+                self.window_settings(ui, 1);
                 if self.rotated {
                     self.panel_waterfall(ui)
                 } else {
@@ -252,10 +262,16 @@ impl App {
                 }
             }
             2 => self.no_grow(ui, |app, ui| app.panel_stereo(ui)),
-            3 => self.panel_3d(ui),
+            3 => {
+                self.window_settings(ui, 3);
+                self.panel_3d(ui)
+            }
             4 => self.panel_scope(ui),
             5 => self.no_grow(ui, |app, ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| app.measurements_ui(ui));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    app.window_settings(ui, 5);
+                    app.measurements_ui(ui)
+                });
             }),
             6 => self.no_grow(ui, |app, ui| app.generator_ui(ui)),
             7 => self.no_grow(ui, |app, ui| {
@@ -782,6 +798,11 @@ impl App {
                 egui::ScrollArea::horizontal().id_salt("topbar_scroll").max_width(left_w).auto_shrink([true, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| {
                 ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                // the input comes first (with the routing graph on, its nodes take over)
+                if !self.graph_on {
+                    self.input_menu(ui);
+                    ui.separator();
+                }
                 ui.label(egui::RichText::new("Windows").weak());
                 for i in 0..BUILTIN {
                     let mut o = self.wins[i].open;

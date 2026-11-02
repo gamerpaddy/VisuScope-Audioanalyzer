@@ -86,7 +86,7 @@ pub fn delete(name: &str) {
 impl App {
     /// The "Snapshots" menu of the top bar.
     pub fn snapshots_menu(&mut self, ui: &mut Ui) {
-        ui.menu_button("Snapshots", |ui| {
+        crate::windows::sticky_menu(ui, "Snapshots", |ui| {
             ui.set_min_width(260.0);
             ui.label(RichText::new("Whole session: windows, tool settings, generators, routing").small().weak());
             let names = list();

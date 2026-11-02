@@ -400,7 +400,7 @@ impl App {
     }
 
     pub fn layouts_menu(&mut self, ui: &mut Ui) {
-        ui.menu_button("Layouts", |ui| {
+        crate::windows::sticky_menu(ui, "Layouts", |ui| {
             if ui.add_enabled(self.lay_can_undo(), egui::Button::new("Undo layout change").shortcut_text("Ctrl+Alt+Z")).clicked() {
                 self.layout_undo();
                 ui.close();

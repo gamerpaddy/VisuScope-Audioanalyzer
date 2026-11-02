@@ -70,6 +70,9 @@ impl PlayCtl {
     }
 }
 
+/// Options: imported audio is placed at the start of the timeline instead of at the cursor.
+pub static IMPORT_AT_START: AtomicBool = AtomicBool::new(false);
+
 fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mon: Arc<Mutex<Queue>>) {
     let feed = ctl.feed.load(Relaxed);
     let sr = proj.lock().sr;
@@ -557,7 +560,8 @@ impl Daw {
     /// Import files; the first one goes onto the given track at the given frame, the others get new tracks.
     pub(super) fn import_at(&mut self, paths: Vec<PathBuf>, target: Option<(u32, i64)>) {
         let mut at = self.cursor.max(0);
-        if self.pos() == 0 {
+        // Options: new audio goes to the start of the timeline, whatever the cursor says
+        if self.pos() == 0 || IMPORT_AT_START.load(Relaxed) {
             at = 0;
         }
         for (k, path) in paths.into_iter().enumerate() {
@@ -905,6 +909,24 @@ impl Daw {
     // ------------------------------------------------------------------ results of background work
 
     fn poll(&mut self, cx: &mut Ctx) {
+        // record nodes of the routing graph that want a track of their own
+        let reqs = std::mem::take(&mut *crate::graph::bus().track_requests.lock());
+        for (node, name) in reqs {
+            let made = self.with_proj(|p| {
+                if p.tracks.len() >= MAX_TRACKS {
+                    return None;
+                }
+                let ti = p.add_track(Some(name), Input { dev: String::new(), mode: Mode::Mix });
+                let id = p.tracks[ti].id;
+                p.tracks[ti].input = graph_input(id);
+                p.tracks[ti].arm = true;
+                Some(id)
+            });
+            match made {
+                Some(id) => crate::graph::bus().node_tracks.lock().push((node, id)),
+                None => self.note = "The timeline has the most tracks it can hold".into(),
+            }
+        }
         if let Some(v) = self.devs.try_lock().and_then(|mut g| g.take()) {
             self.devs_v = v;
         }

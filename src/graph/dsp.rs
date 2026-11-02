@@ -748,13 +748,14 @@ pub struct JitterUnit {
 
 impl JitterUnit {
     pub fn new(fs: f32) -> Self {
-        let n = ((fs * 0.006) as usize + 64).next_power_of_two();
+        // room for the delay at the deepest setting: 50 ms either way of the centre
+        let n = ((fs * 0.104) as usize + 64).next_power_of_two();
         Self { buf: [vec![0.0; n], vec![0.0; n]], pos: 0, fs, depth: 0.0, rate: 8.0, sine: false, mix: 1.0, phase: 0.0, rng: 0x1234_5678, from: 0.0, to: 0.0 }
     }
 
     pub fn set(&mut self, p: &[f32]) {
         // depth in microseconds (the delay swings by +- this much)
-        self.depth = p.first().copied().unwrap_or(100.0).clamp(0.0, 2000.0) * 1e-6 * self.fs;
+        self.depth = p.first().copied().unwrap_or(100.0).clamp(0.0, 50000.0) * 1e-6 * self.fs;
         self.rate = p.get(1).copied().unwrap_or(8.0).max(0.05);
         self.sine = p.get(2).copied().unwrap_or(0.0) >= 0.5;
         self.mix = p.get(3).copied().unwrap_or(100.0) * 0.01;
@@ -1063,6 +1064,17 @@ mod tests {
         let mut r = l.clone();
         c2.process(&mut l, &mut r);
         assert!(l.windows(2).filter(|w| w[0] != w[1]).count() <= 4800 / 8 + 1);
+        // the deepest setting (50 ms) works and stays finite: a wow of a tape machine
+        let mut deep = JitterUnit::new(fs);
+        deep.set(&[50000.0, 0.7, 1.0, 100.0]);
+        let mut l = sine(1000.0, fs, 48000, 0.5);
+        let mut r = l.clone();
+        for (a, b) in l.chunks_mut(480).zip(r.chunks_mut(480)) {
+            deep.process(a, b);
+        }
+        assert!(l.iter().all(|v| v.is_finite() && v.abs() <= 0.51));
+        // a 50 ms swing at 0.7 Hz bends the pitch by more than 20 %: the tone is smeared, but the sound is all there
+        assert!(rms(&l[24000..]) > 0.25, "the sound survives a 50 ms wow: {}", rms(&l[24000..]));
         // jitter with no depth is a plain short delay; with depth it still carries the signal
         let mut j = JitterUnit::new(fs);
         j.set(&[0.0, 8.0, 0.0, 100.0]);

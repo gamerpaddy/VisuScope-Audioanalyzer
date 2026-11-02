@@ -51,7 +51,7 @@ fn in_pos(n: &Node, port: usize) -> Pos2 {
 }
 
 fn out_pos(n: &Node, port: usize) -> Pos2 {
-    if n.kind == Kind::Split {
+    if matches!(n.kind, Kind::Split | Kind::Dual) {
         pos2(n.x + node_w(n.kind), n.y + HDR + 11.0 + port as f32 * ROW + ROW * 0.5)
     } else {
         pos2(n.x + node_w(n.kind), n.y + HDR * 0.5)
@@ -187,6 +187,54 @@ struct Entry {
     p0: Option<f32>,
 }
 
+/// Undo / redo of the patch: every settled change (no mouse button down) of the graph becomes one step, so a drag of a node or of a
+/// slider is one step, not hundreds.
+#[derive(Default)]
+struct History {
+    undo: Vec<Graph>,
+    redo: Vec<Graph>,
+    cur: Option<(String, Graph)>,
+}
+
+impl History {
+    const MAX: usize = 200;
+
+    /// Called every frame with the graph as it is now; `settled` = no drag in progress.
+    fn track(&mut self, g: &Graph, settled: bool) {
+        match &self.cur {
+            None => self.cur = Some((g.encode(), g.clone())),
+            Some((text, prev)) if settled => {
+                let now = g.encode();
+                if now != *text {
+                    self.undo.push(prev.clone());
+                    if self.undo.len() > Self::MAX {
+                        self.undo.remove(0);
+                    }
+                    self.redo.clear();
+                    self.cur = Some((now, g.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The graph before the last step (the current one becomes redo-able).
+    fn back(&mut self, g: &Graph) -> Option<Graph> {
+        let prev = self.undo.pop()?;
+        // a change that is not settled yet belongs to the step that is undone
+        self.redo.push(self.cur.as_ref().map_or_else(|| g.clone(), |c| c.1.clone()));
+        self.cur = Some((prev.encode(), prev.clone()));
+        Some(prev)
+    }
+
+    fn forward(&mut self, g: &Graph) -> Option<Graph> {
+        let next = self.redo.pop()?;
+        self.undo.push(self.cur.as_ref().map_or_else(|| g.clone(), |c| c.1.clone()));
+        self.cur = Some((next.encode(), next.clone()));
+        Some(next)
+    }
+}
+
 pub struct Routing {
     eng: Option<Arc<Engine>>,
     g: Graph,
@@ -218,6 +266,8 @@ pub struct Routing {
     ir_dlg: Option<(NodeId, crate::tools::dialogs::Pending)>,
     /// A/B: the active slot and both versions of the patch
     ab: Option<(usize, [Graph; 2])>,
+    hist: History,
+    search_hook: bool,
     /// listening probe: on, its volume (dB), whether the normal outputs go quiet, what it hovers over now and whether that is the body of a node
     probe_on: bool,
     probe_db: f32,
@@ -316,7 +366,7 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, probe_on: false, probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, probe_on: false, probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     fn push(&mut self) {
@@ -523,12 +573,11 @@ impl Routing {
         }
         let mut chosen: Option<Entry> = None;
         let screen = canvas.min + self.pan + s.at.to_vec2() * self.zoom;
-        let pos = pos2(screen.x.clamp(canvas.left() + 4.0, (canvas.right() - 300.0).max(canvas.left() + 4.0)), screen.y.clamp(canvas.top() + 4.0, (canvas.bottom() - 260.0).max(canvas.top() + 4.0)));
+        let pos = pos2(screen.x.clamp(canvas.left() + 4.0, (canvas.right() - 520.0).max(canvas.left() + 4.0)), screen.y.clamp(canvas.top() + 4.0, (canvas.bottom() - 260.0).max(canvas.top() + 4.0)));
         let mut close = esc;
         let area = egui::Area::new(egui::Id::new("routing_search")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_width(290.0);
-                let te = ui.add(egui::TextEdit::singleline(&mut s.text).hint_text("Search nodes: eq, input, compressor ...").desired_width(f32::INFINITY));
+                let te = ui.add(egui::TextEdit::singleline(&mut s.text).hint_text("Search nodes: eq, input, compressor ...").desired_width(210.0));
                 if !s.focused {
                     te.request_focus();
                     s.focused = true;
@@ -536,19 +585,42 @@ impl Routing {
                 if te.changed() {
                     s.sel = 0;
                 }
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    let mut group = "";
-                    for (k, (_, e)) in hits.iter().enumerate().take(60) {
-                        if e.group != group && s.text.trim().is_empty() {
-                            group = e.group;
-                            ui.label(RichText::new(group).small().weak());
+                let browse = s.text.trim().is_empty();
+                egui::ScrollArea::vertical().max_height(300.0).auto_shrink([true, true]).show(ui, |ui| {
+                    if browse {
+                        // nothing typed: the groups side by side, each with its nodes one below the other
+                        let mut groups: Vec<&str> = Vec::new();
+                        for (_, e) in hits.iter() {
+                            if !groups.contains(&e.group) {
+                                groups.push(e.group);
+                            }
                         }
-                        let r = ui.selectable_label(k == s.sel, &e.label);
-                        if k == s.sel && (down || up) {
-                            r.scroll_to_me(None);
-                        }
-                        if r.clicked() {
-                            chosen = Some((*e).clone());
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 14.0;
+                            for g in &groups {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(*g).strong().color(Color32::from_rgb(150, 170, 200)));
+                                    for (k, (_, e)) in hits.iter().enumerate().filter(|(_, (_, e))| e.group == *g) {
+                                        let r = ui.selectable_label(k == s.sel, &e.label);
+                                        if k == s.sel && (down || up) {
+                                            r.scroll_to_me(None);
+                                        }
+                                        if r.clicked() {
+                                            chosen = Some((*e).clone());
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    } else {
+                        for (k, (_, e)) in hits.iter().enumerate().take(60) {
+                            let r = ui.selectable_label(k == s.sel, &e.label);
+                            if k == s.sel && (down || up) {
+                                r.scroll_to_me(None);
+                            }
+                            if r.clicked() {
+                                chosen = Some((*e).clone());
+                            }
                         }
                     }
                     if hits.is_empty() {
@@ -626,9 +698,22 @@ impl Routing {
             } else {
                 ui.spacing_mut().slider_width = (ui.available_width() - 62.0 * z).max(40.0 * z);
                 let int = d.unit.is_empty() && d.max - d.min >= 1.0 && d.min.fract() == 0.0 && d.def.fract() == 0.0;
-                let mut s = egui::Slider::new(&mut n.p[i], d.min..=d.max).suffix(d.unit).logarithmic(d.log).clamping(egui::SliderClamping::Always);
+                let mut s = egui::Slider::new(&mut n.p[i], d.min..=d.max).logarithmic(d.log).clamping(egui::SliderClamping::Always);
+                if d.unit != " us" {
+                    s = s.suffix(d.unit);
+                }
                 if int {
                     s = s.step_by(1.0).max_decimals(0);
+                } else if d.unit == " us" {
+                    // microseconds up to milliseconds: "120 us", "5.0 ms"; typing "5 ms" or "120us" works
+                    s = s.custom_formatter(|v, _| if v >= 1000.0 { format!("{:.1} ms", v / 1000.0) } else { format!("{v:.0} us") }).custom_parser(|t| {
+                        let t = t.trim().to_lowercase();
+                        let ms = t.ends_with("ms");
+                        t.trim_end_matches(|c: char| c.is_alphabetic() || c.is_whitespace()).parse::<f64>().ok().map(|v| if ms { v * 1000.0 } else { v })
+                    });
+                } else if d.unit == " Hz" && d.log && d.min < 1.0 {
+                    // slow rates (wow, flutter, tremolo): steps of 0.1 Hz
+                    s = s.step_by(0.1).max_decimals(1);
                 } else if d.unit == " Hz" || d.unit == " ms" {
                     s = s.max_decimals(if d.log { 0 } else { 1 });
                 } else {
@@ -727,8 +812,25 @@ impl Routing {
                             ch = true;
                         }
                     }
+                    if !master_ok {
+                        ui.separator();
+                        if ui.button("+ New track for this node").on_hover_text("Adds an armed track to the timeline that records what this node receives").clicked() {
+                            bus().track_requests.lock().push((n.id, format!("Node {}", n.id)));
+                            ui.close();
+                        }
+                    }
                 });
                 ui.label(RichText::new(if master_ok { "play the timeline to hear / see it" } else { "arm this track to record it" }).small().weak());
+            }
+            Kind::Dual => {
+                // the rows line up with the two output dots
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add_space(6.0 * z);
+                for k in 0..2 {
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW * z), Sense::hover());
+                    ui.painter().text(pos2(row.right() - 8.0, row.center().y), Align2::RIGHT_CENTER, format!("Line {} out", k + 1), FontId::proportional(11.0 * z), Color32::from_rgb(210, 190, 140));
+                }
+                ui.label(RichText::new("both lines carry the whole stereo signal").small().weak());
             }
             Kind::Split | Kind::Merge => {
                 // the rows line up with the dots: the left channel on top, the right one below
@@ -1033,6 +1135,28 @@ impl Routing {
         ch
     }
 
+    fn undo_graph(&mut self) {
+        let g = self.g.clone();
+        if let Some(prev) = self.hist.back(&g) {
+            self.restore(prev);
+        }
+    }
+
+    fn redo_graph(&mut self) {
+        let g = self.g.clone();
+        if let Some(next) = self.hist.forward(&g) {
+            self.restore(next);
+        }
+    }
+
+    fn restore(&mut self, g: Graph) {
+        self.g = g;
+        self.sel.clear();
+        self.sel_wire = None;
+        self.wire = None;
+        self.push();
+    }
+
     /// The signal under the pointer for the listening probe: an input or output dot, else the body of a node (its output, or its input when it has none).
     fn probe_target(&self, p: Pos2, sp: &impl Fn(Pos2) -> Pos2, z: f32) -> Option<(Probe, bool)> {
         let mut best: Option<(f32, Probe)> = None;
@@ -1120,7 +1244,7 @@ impl Routing {
     /// Save, load and delete named routings.
     fn routings_menu(&mut self, ui: &mut Ui, cx: &Ctx) {
         let title = if self.cur_name.is_empty() { "Routings".to_string() } else { format!("Routings: {}", self.cur_name) };
-        ui.menu_button(title, |ui| {
+        crate::windows::sticky_menu(ui, title, |ui| {
             ui.set_min_width(250.0);
             ui.label(RichText::new("Saved routings").small().weak());
             let names = list_routings();
@@ -1322,7 +1446,20 @@ impl Routing {
                     self.search = Some(Search { at, text: String::new(), sel: 0, link: Link::Insert(to, port), focused: false });
                     ui.close();
                 }
-                if ui.button("Split here into left and right channels").on_hover_text("A split node in this line: the left channel goes on to the same place, the right output is free to connect anywhere").clicked() {
+                // a line that carries one channel already (after a split node, for instance) has nothing to split
+                let mono = self.g.edge_into(to, port).is_some_and(|e| self.g.carries_mono(e.from, 0));
+                if ui.button("Split here into two stereo lines").on_hover_text("A node with two outputs, both the whole stereo signal: the first goes on to the same place, the second is free to connect anywhere").clicked() {
+                    let place = self.free_place(at, Kind::Dual);
+                    if let Some(s) = self.g.split_wire_as(Kind::Dual, to, port, place.x, place.y) {
+                        self.sel.clear();
+                        self.sel.insert(s);
+                        self.sel_wire = None;
+                        changed_graph = true;
+                        self.note = "Two lines: the first goes on to the old target, connect the second where you want it".into();
+                    }
+                    ui.close();
+                }
+                if !mono && ui.button("Split here into left and right channels").on_hover_text("A split node in this line: the left channel goes on to the same place, the right output is free to connect anywhere").clicked() {
                     let place = self.free_place(at, Kind::Split);
                     if let Some(s) = self.g.split_wire(to, port, place.x, place.y) {
                         self.sel.clear();
@@ -1501,7 +1638,20 @@ impl Routing {
                 if r.drag_started() {
                     port_drag = Some((WireDrag::FromOut(id, op as u8), false));
                 }
+                let mono = self.g.carries_mono(id, 0);
                 r.context_menu(|ui| {
+                    if ui.button("Split here into two stereo lines").on_hover_text("A node with two outputs that both carry the whole stereo signal").clicked() {
+                        let at = self.free_place(pos2(n.x + node_w(n.kind) + 40.0, n.y + 60.0), Kind::Dual);
+                        if let Some(s) = self.g.split_output_as(Kind::Dual, id, op as u8, at.x, at.y) {
+                            self.sel.clear();
+                            self.sel.insert(s);
+                            changed_graph = true;
+                        }
+                        ui.close();
+                    }
+                    if mono {
+                        return;
+                    }
                     if ui.button("Split here into left and right channels").on_hover_text("A split node on this output: its two outputs carry the left and the right channel, to route them one by one").clicked() {
                         let at = self.free_place(pos2(n.x + node_w(n.kind) + 40.0, n.y + 60.0), Kind::Split);
                         if let Some(s) = self.g.split_output(id, op as u8, at.x, at.y) {
@@ -1656,6 +1806,11 @@ impl Routing {
                     changed_graph = true;
                 }
             }
+            if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y)) {
+                self.redo_graph();
+            } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
+                self.undo_graph();
+            }
             if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F)) {
                 self.fit_next = true;
             }
@@ -1732,6 +1887,19 @@ impl Tool for Routing {
             self.set_probe(None);
         }
         *bus().first_out.lock() = self.g.nodes.iter().find(|n| n.kind == Kind::Output).map(|n| n.s.clone()).unwrap_or_default();
+        // tracks the timeline made for record nodes that asked for one
+        let made = std::mem::take(&mut *bus().node_tracks.lock());
+        let mut tracked = false;
+        for (node, tid) in made {
+            if let Some(n) = self.g.node_mut(node) {
+                n.s = tid.to_string();
+                tracked = true;
+            }
+        }
+        if tracked {
+            self.note = "A new track was added to the timeline for this node: it is armed".into();
+            self.push();
+        }
         let restore = bus().graph_restore.lock().take();
         if let Some(g) = restore.and_then(|t| Graph::decode(&t)).filter(|g| !g.nodes.is_empty()) {
             self.g = g;
@@ -1765,6 +1933,14 @@ impl Tool for Routing {
             ui.label("The routing graph is off. Turn it on in Options.");
             return;
         }
+        // test hook: VISUSCOPE_SEARCH=1 opens the add-node menu once (screenshots)
+        if std::env::var_os("VISUSCOPE_SEARCH").is_some() && !self.search_hook {
+            self.search_hook = true;
+            self.search = Some(Search { at: pos2(120.0, 40.0), text: String::new(), sel: 0, link: Link::None, focused: false });
+        }
+        // every settled change of the patch is one undo step
+        let settled = !ui.input(|i| i.pointer.any_down());
+        self.hist.track(&self.g, settled);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             if ui.button("+ Node").on_hover_text("Search all nodes (Space)").clicked() {
@@ -1777,6 +1953,12 @@ impl Tool for Routing {
                 self.tidy_pending = true;
             }
             self.routings_menu(ui, cx);
+            if ui.add_enabled(!self.hist.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last change of the patch (Ctrl+Z)").clicked() {
+                self.undo_graph();
+            }
+            if ui.add_enabled(!self.hist.redo.is_empty(), egui::Button::new("Redo").small()).on_hover_text("Redo (Ctrl+Y or Ctrl+Shift+Z)").clicked() {
+                self.redo_graph();
+            }
             self.ab_buttons(ui);
             ui.toggle_value(&mut self.probe_on, "Probe").on_hover_text("Listening probe (P): hover over a node, or over one of its input or output dots, to hear the signal there");
             if self.probe_on {
@@ -1936,6 +2118,55 @@ mod tests {
         // a degenerate wire does not divide by zero
         let flat = wire_pts(pos2(5.0, 5.0), pos2(5.0, 5.0));
         assert!(wire_distance(&flat, pos2(5.0, 5.0)).is_finite());
+    }
+
+    #[test]
+    fn every_settled_change_is_one_undo_step_and_a_drag_is_only_one() {
+        let mut g = Graph::default();
+        let a = g.add(Kind::Generator, 0.0, 0.0);
+        let mut h = History::default();
+        h.track(&g, true);
+        assert!(h.undo.is_empty());
+        // a drag: many changes while the button is down, then released
+        let f = g.add(Kind::Gain, 10.0, 10.0);
+        g.connect(a, f, 0).unwrap();
+        h.track(&g, true);
+        assert_eq!(h.undo.len(), 1);
+        for k in 0..50 {
+            g.node_mut(f).unwrap().x = k as f32;
+            h.track(&g, false);
+        }
+        assert_eq!(h.undo.len(), 1, "nothing is recorded while the button is down");
+        h.track(&g, true);
+        assert_eq!(h.undo.len(), 2);
+        // delete the gain node (joined back up or not), undo brings it and its line back, redo removes it again
+        let before = g.clone();
+        g.remove_bridged(f);
+        h.track(&g, true);
+        assert!(g.node(f).is_none());
+        let back = h.back(&g).unwrap();
+        assert!(back.node(f).is_some() && back.edges.len() == before.edges.len());
+        assert_eq!(back.node(f).unwrap().x, 49.0);
+        let again = h.forward(&back).unwrap();
+        assert!(again.node(f).is_none());
+        // a new change after an undo ends the redo line
+        let back = h.back(&again).unwrap();
+        let mut g2 = back.clone();
+        g2.add(Kind::Eq, 0.0, 0.0);
+        h.track(&g2, true);
+        assert!(h.redo.is_empty());
+        // nothing to undo at the start
+        let mut h2 = History::default();
+        assert!(h2.back(&g).is_none() && h2.forward(&g).is_none());
+        // the number of steps is limited
+        let mut h3 = History::default();
+        let mut gg = Graph::default();
+        h3.track(&gg, true);
+        for _ in 0..History::MAX + 30 {
+            gg.add(Kind::Gain, 0.0, 0.0);
+            h3.track(&gg, true);
+        }
+        assert_eq!(h3.undo.len(), History::MAX);
     }
 
     #[test]

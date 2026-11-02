@@ -12,26 +12,48 @@ fn section(ui: &mut Ui, title: &str, open: bool, add: impl FnOnce(&mut Ui)) {
 }
 
 impl App {
-    pub fn controls_ui(&mut self, ui: &mut Ui) {
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 5.0;
-            if self.graph_on {
-                section(ui, "Input", true, |ui| {
-                    ui.label(RichText::new("The routing graph is on: devices, channels, the monitor and the outputs are set in the Routing window.").small().weak());
-                    let s = self.sh.status.lock().clone();
-                    ui.label(RichText::new(s).small());
-                });
-            } else {
-                section(ui, "Input", true, |ui| self.input_section(ui));
-            }
-            section(ui, "Analysis", true, |ui| self.analysis_section(ui));
-            section(ui, "Spectrum traces", false, |ui| self.trace_section(ui));
-            section(ui, "Spectrogram / waterfall", false, |ui| self.spectro_section(ui));
-            section(ui, "3D view", false, |ui| self.view3d_section(ui));
-            section(ui, "Distortion measurement", false, |ui| self.thd_section(ui));
-            section(ui, "Voltage calibration", false, |ui| self.calibration_ui(ui));
-            section(ui, "Microphone calibration", false, |ui| self.mic_section(ui));
+    /// The "Settings" drop-down at the top of the windows the old side bar's sections belong to (closed until opened).
+    pub fn window_settings(&mut self, ui: &mut Ui, win: usize) {
+        let parts: &[&str] = match win {
+            0 => &["Analysis", "Spectrum traces", "Microphone calibration"],
+            1 => &["Analysis", "Spectrogram / waterfall"],
+            3 => &["3D view"],
+            5 => &["Distortion measurement", "Voltage calibration"],
+            _ => return,
+        };
+        egui::CollapsingHeader::new(RichText::new("Settings").strong()).id_salt(("win_settings", win)).default_open(false).show(ui, |ui| {
+            // a long list scrolls inside the window instead of pushing everything away
+            let max_h = (ui.ctx().content_rect().height() * 0.5).max(160.0);
+            egui::ScrollArea::vertical().max_height(max_h).auto_shrink([true, true]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 5.0;
+                for (k, part) in parts.iter().enumerate() {
+                    section(ui, part, k == 0, |ui| match *part {
+                        "Analysis" => self.analysis_section(ui),
+                        "Spectrum traces" => self.trace_section(ui),
+                        "Microphone calibration" => self.mic_section(ui),
+                        "Spectrogram / waterfall" => self.spectro_section(ui),
+                        "3D view" => self.view3d_section(ui),
+                        "Distortion measurement" => self.thd_section(ui),
+                        _ => self.calibration_ui(ui),
+                    });
+                }
+            });
         });
+    }
+
+    /// The input device, its channels, the monitor: a menu in the top bar (the routing graph, when on, sets all of it in its nodes).
+    pub fn input_menu(&mut self, ui: &mut Ui) {
+        let label = self.devices.get(self.sel_dev).map(|d| d.label.clone()).unwrap_or_else(|| "no device".into());
+        let short: String = if label.chars().count() > 28 { label.chars().take(27).collect::<String>() + "..." } else { label };
+        let on = self.mon_on;
+        let menu = egui::containers::menu::MenuButton::new(RichText::new(format!("Input: {short}")).strong()).config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside));
+        menu.ui(ui, |ui| {
+            ui.set_min_width(300.0);
+            ui.spacing_mut().item_spacing.y = 5.0;
+            self.input_section(ui);
+        })
+        .0
+        .on_hover_text(if on { "Input device, channels and monitor (the monitor is on)" } else { "Input device, channels and monitor" });
     }
 
     fn input_section(&mut self, ui: &mut Ui) {

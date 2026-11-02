@@ -45,6 +45,9 @@ pub struct Bus {
     pub virt: Mutex<HashMap<String, Arc<Capture>>>,
     /// tracks that asked for a record node
     pub rec_requests: Mutex<Vec<(u32, String)>>,
+    /// record nodes that want a new track of their own (node id, name) and the tracks that were made for them (node id, track id)
+    pub track_requests: Mutex<Vec<(u32, String)>>,
+    pub node_tracks: Mutex<Vec<(u32, u32)>>,
     /// record nodes (capture ids) that receive audio from a timeline output: a loopback inside the program
     pub virt_loop: Mutex<std::collections::HashSet<String>>,
     /// device of the first output node (tools that play sound use it while the graph is on; empty = default output)
@@ -88,7 +91,7 @@ impl Bus {
         t.tracks.clear();
     }
 
-    /// Ask the node editor for a "Timeline record" node of this track.
+    /// Ask the node editor for a "Timeline track" node of this track.
     pub fn request_rec_node(&self, track: u32, name: &str) {
         let mut v = self.rec_requests.lock();
         if !v.iter().any(|r| r.0 == track) {
@@ -226,6 +229,7 @@ enum Rt {
     Mix { gain: [f32; MIX_MAX], mute: [bool; MIX_MAX], master: f32 },
     Split,
     Merge,
+    Dual,
     Out { dev: String, q: Arc<Mutex<Queue>>, status: Arc<Mutex<String>>, _h: Option<monitor::Handle>, gain: f32, mute: bool, band: BandFilter, buf: [Vec<f32>; 2] },
     Rec { id: String },
 }
@@ -408,6 +412,7 @@ impl Run {
             Kind::Tremolo => Rt::Trem(TremUnit::default()),
             Kind::Mixer => Rt::Mix { gain: [1.0; MIX_MAX], mute: [false; MIX_MAX], master: 1.0 },
             Kind::Split => Rt::Split,
+            Kind::Dual => Rt::Dual,
             Kind::Merge => Rt::Merge,
             Kind::Output => {
                 let q = Arc::new(Mutex::new(Queue { buf: VecDeque::new(), src_sr: self.rate, ..Default::default() }));
@@ -420,7 +425,7 @@ impl Run {
             Kind::Utility => Rt::Util(0),
             Kind::Analyzer => Rt::None,
         };
-        let out2 = if n.kind == Kind::Split { blank() } else { [Vec::new(), Vec::new()] };
+        let out2 = if matches!(n.kind, Kind::Split | Kind::Dual) { blank() } else { [Vec::new(), Vec::new()] };
         RtNode { id: n.id, kind: n.kind, bypass: false, src: Vec::new(), out: blank(), out2, peak: [0.0; 2], extra: 0.0, rt }
     }
 
@@ -513,7 +518,7 @@ impl Run {
                 *mute = n.param(1) >= 0.5;
             }
             Rt::Rec { id } => *id = n.s.parse::<u32>().map(|t| format!("graph:{t}")).unwrap_or_default(),
-            Rt::Split | Rt::Merge | Rt::None => {}
+            Rt::Split | Rt::Merge | Rt::Dual | Rt::None => {}
         }
     }
 
@@ -897,6 +902,23 @@ impl Run {
                             o0[..n].copy_from_slice(&b[0][..n]);
                             o1[..n].copy_from_slice(&b[0][..n]);
                             node.out2[0][..n].copy_from_slice(&b[1][..n]);
+                            node.out2[1][..n].copy_from_slice(&b[1][..n]);
+                        }
+                        None => {
+                            o0[..n].fill(0.0);
+                            o1[..n].fill(0.0);
+                            node.out2[0][..n].fill(0.0);
+                            node.out2[1][..n].fill(0.0);
+                        }
+                    }
+                }
+                Rt::Dual => {
+                    // two stereo lines, both a copy of the input
+                    match inp {
+                        Some(b) => {
+                            o0[..n].copy_from_slice(&b[0][..n]);
+                            o1[..n].copy_from_slice(&b[1][..n]);
+                            node.out2[0][..n].copy_from_slice(&b[0][..n]);
                             node.out2[1][..n].copy_from_slice(&b[1][..n]);
                         }
                         None => {
@@ -1372,6 +1394,28 @@ mod tests {
     }
 
     #[test]
+    fn a_two_line_split_delivers_the_whole_stereo_signal_on_both_lines() {
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let d = g.add(Kind::Dual, 0.0, 0.0);
+        let mx = g.add(Kind::Mixer, 0.0, 0.0);
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.connect(gn, d, 0).unwrap();
+        g.connect_from(d, 0, mx, 0).unwrap();
+        g.connect_from(d, 1, mx, 1).unwrap();
+        g.connect(mx, an, 0).unwrap();
+        let p = GenParams { on: true, level_db: [-12.0, -12.0], ..GenParams::default() };
+        let (mut run, sh) = engine_with(g, vec![p]);
+        for _ in 0..40 {
+            run.tick(Some(1024));
+        }
+        let (l, r) = ring_tail(&sh, 4096);
+        let pk = |x: &[f32]| x.iter().fold(0f32, |m, v| m.max(v.abs()));
+        // -12 dB is 0.25 of full scale; both lines summed in the mixer: 0.5 on each side
+        assert!((pk(&l) - 0.5).abs() < 0.03 && (pk(&r) - 0.5).abs() < 0.03, "{} {}", pk(&l), pk(&r));
+    }
+
+    #[test]
     fn two_generators_mixed_and_bypass() {
         let mut g = Graph::default();
         let (a, b) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Generator, 0.0, 0.0));
@@ -1409,7 +1453,7 @@ mod tests {
         let gn = g.add(Kind::Generator, 0.0, 0.0);
         let mut prev = gn;
         // every effect in a chain, every parameter at its extremes, alternating low and high
-        for (k, kind) in Kind::ALL.into_iter().filter(|k| !k.is_source() && !k.is_sink() && !matches!(k, Kind::Mixer | Kind::Split | Kind::Merge)).enumerate() {
+        for (k, kind) in Kind::ALL.into_iter().filter(|k| !k.is_source() && !k.is_sink() && !matches!(k, Kind::Mixer | Kind::Split | Kind::Merge | Kind::Dual)).enumerate() {
             let id = g.add(kind, 0.0, 0.0);
             let defs = kind.info().params;
             let n = g.node_mut(id).unwrap();

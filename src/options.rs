@@ -32,6 +32,7 @@ impl App {
             }
         }
         crate::prof::set_safety_ms(self.safety_ms);
+        crate::tools::daw::IMPORT_AT_START.store(self.import_at_start, std::sync::atomic::Ordering::Relaxed);
         let mut all = vec![self.tg.clone()];
         all.extend(self.gen_extra.iter().cloned());
         if all != self.gens_sent {
@@ -115,6 +116,7 @@ impl App {
             ui.checkbox(&mut self.readout_hold, "Hold the numeric readouts");
             ui.separator();
             ui.label(RichText::new("Files").strong());
+            ui.checkbox(&mut self.import_at_start, "Import audio into the timeline at its start, not at the cursor").on_hover_text("Files added to the timeline (the Import button, drag and drop, the track menus) begin at the leftmost position, so several imports line up. Off: they are placed at the cursor.");
             ui.horizontal(|ui| {
                 let dir = crate::tools::dialogs::last_dir().map(|d| d.display().to_string()).unwrap_or_else(|| "none yet (Documents)".into());
                 ui.label(RichText::new(format!("Open / save dialogs start in: {dir}")).small());

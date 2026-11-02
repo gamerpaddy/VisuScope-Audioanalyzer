@@ -421,7 +421,7 @@ impl Daw {
                 }
             });
             ui.toggle_value(&mut self.an_open, "Analysis").on_hover_text(if self.an_hidden { "Statistics, spectrum and spectrogram of the selection: the window is too small to show them, make it larger" } else { "Statistics, spectrum and spectrogram of the selection (below the tracks, or to their right in a low, wide window)" });
-            ui.menu_button("Output", |ui| {
+            crate::windows::sticky_menu(ui, "Output", |ui| {
                 if graph_on() {
                     ui.label("The timeline plays into the Routing window:\nconnect its Timeline out node to an output or the analyser.");
                     ui.add(egui::DragValue::new(&mut self.rec_off_ms).range(-500.0..=500.0).speed(0.5).suffix(" ms")).on_hover_text("Shift new recordings earlier by this much to make up for the interface latency");
@@ -1045,7 +1045,7 @@ impl Daw {
                 self.seek(f);
             }
         }
-        ruler_resp.context_menu(|ui| {
+        egui::Popup::context_menu(&ruler_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             let (frame, hit) = self.ruler_ctx;
             if ui.button("Add a marker here").clicked() {
                 self.checkpoint(p);
@@ -1585,7 +1585,7 @@ impl Daw {
                 ui.close();
             }
             if ui.button("Import audio file to this track...").on_hover_text("Place a file on this track at the playhead").clicked() && self.open_dlg.is_none() {
-                self.import_target = Some((id, self.cursor));
+                self.import_target = Some((id, if IMPORT_AT_START.load(Relaxed) { 0 } else { self.cursor }));
                 self.open_dlg = Some(dialogs::open_many("Add audio to the track", "Audio files", decode::EXTENSIONS));
                 ui.close();
             }
@@ -1632,7 +1632,7 @@ impl Daw {
                     ui.close();
                 }
             }
-            ui.menu_button("Input trim (gain / delay)", |ui| {
+            crate::windows::sticky_menu(ui, "Input trim (gain / delay)", |ui| {
                 ui.label(RichText::new("For recording from several interfaces at once:").small().weak());
                 let t = &mut p.tracks[ti];
                 let mut ch = false;
@@ -1759,7 +1759,10 @@ impl Daw {
             });
             // volume + pan (+ channel view)
             ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = 46.0;
+                // the two faders take what the icons and the little buttons leave, so nothing runs under the level meters
+                let minis = 1 + usize::from(p.tracks[ti].clips.iter().any(|c| c.src.stereo()));
+                let free = ui.available_width() - 2.0 * 12.0 - minis as f32 * 18.0 - (3 + minis) as f32 * ui.spacing().item_spacing.x;
+                ui.spacing_mut().slider_width = (free / 2.0).clamp(18.0, 60.0);
                 let mut t = p.tracks[ti].clone();
                 draw_icon(ui, SliderIcon::Volume);
                 let tip = format!("Volume {:+.1} dB", t.vol_db);

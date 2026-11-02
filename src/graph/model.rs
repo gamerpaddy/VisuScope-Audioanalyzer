@@ -32,6 +32,8 @@ pub enum Kind {
     Split,
     /// two inputs (left, right) made into one stereo signal
     Merge,
+    /// stereo in, two stereo outputs that are copies of it (two lines from one)
+    Dual,
     Analyzer,
     Output,
     TimelineRec,
@@ -108,7 +110,7 @@ const P_CONV: &[ParamDef] = &[s("Mix", 0.0, 100.0, 30.0, " %"), s("Level", -24.0
 const P_NR: &[ParamDef] = &[s("Reduce", 0.0, 40.0, 12.0, " dB"), s("Strength", 0.0, 100.0, 50.0, " %"), c("Noise", 0, &["follow", "learn", "frozen"])];
 const P_FUZZ: &[ParamDef] = &[s("Fuzz", 0.0, 100.0, 70.0, " %"), s("Gate", 0.0, 100.0, 10.0, " %"), l("Tone", 300.0, 20000.0, 5000.0, " Hz"), s("Output", -36.0, 12.0, -10.0, " dB")];
 const P_CRUSH: &[ParamDef] = &[s("Bits", 1.0, 24.0, 8.0, ""), s("Hold", 1.0, 64.0, 1.0, ""), s("Mix", 0.0, 100.0, 100.0, " %")];
-const P_JITTER: &[ParamDef] = &[s("Depth", 0.0, 2000.0, 100.0, " us"), l("Rate", 0.1, 5000.0, 8.0, " Hz"), c("Shape", 0, &["Random", "Sine"]), s("Mix", 0.0, 100.0, 100.0, " %")];
+const P_JITTER: &[ParamDef] = &[l("Depth", 1.0, 50000.0, 100.0, " us"), l("Rate", 0.1, 5000.0, 8.0, " Hz"), c("Shape", 0, &["Random", "Sine"]), s("Mix", 0.0, 100.0, 100.0, " %")];
 const P_TREM: &[ParamDef] = &[l("Rate", 0.1, 30.0, 5.0, " Hz"), s("Depth", 0.0, 100.0, 50.0, " %"), c("Shape", 0, &["Sine", "Triangle", "Square"])];
 const P_STEREO: &[ParamDef] = &[s("Width", 0.0, 200.0, 100.0, " %"), s("Balance", -100.0, 100.0, 0.0, " %")];
 const P_UTIL: &[ParamDef] = &[c("Mode", 0, &["Stereo (through)", "Left to both", "Right to both", "Mono sum", "Swap L/R", "Invert left", "Invert right", "Invert both"])];
@@ -139,7 +141,7 @@ const FX: (u8, u8, u8) = (90, 110, 170);
 const SNK: (u8, u8, u8) = (170, 100, 80);
 
 impl Kind {
-    pub const ALL: [Kind; 26] = [
+    pub const ALL: [Kind; 27] = [
         Kind::Input,
         Kind::Generator,
         Kind::TimelineOut,
@@ -163,6 +165,7 @@ impl Kind {
         Kind::Mixer,
         Kind::Split,
         Kind::Merge,
+        Kind::Dual,
         Kind::Analyzer,
         Kind::Output,
         Kind::TimelineRec,
@@ -193,10 +196,11 @@ impl Kind {
             Kind::NoiseRed => k("Noise reduction", "Effect", "denoise noise reduction hiss hum spectral subtraction gate profile", 1, 1, P_NR, FX),
             Kind::Mixer => k("Mixer", "Routing", "mix sum combine merge bus", MIX_MAX, 1, P_MIXER, (150, 120, 70)),
             Kind::Split => k("Split left / right", "Routing", "split channels left right separate mono dual", 1, 2, P_NONE, (150, 120, 70)),
+            Kind::Dual => k("Split to two stereo lines", "Routing", "split duplicate copy fan out two lines stereo branch send", 1, 2, P_NONE, (150, 120, 70)),
             Kind::Merge => k("Merge left / right", "Routing", "merge combine channels left right stereo join", 2, 1, P_NONE, (150, 120, 70)),
             Kind::Analyzer => k("Analyzer", "Sink", "spectrum scope analysis meter display", 1, 0, P_NONE, SNK),
             Kind::Output => k("Output device", "Sink", "speakers headphones playback monitor dac", 1, 0, P_OUTPUT, SNK),
-            Kind::TimelineRec => k("Timeline record", "Sink", "daw track record arm", 1, 0, P_NONE, SNK),
+            Kind::TimelineRec => k("Timeline track (record)", "Sink", "daw track record arm timeline sink multitrack new track", 1, 0, P_NONE, SNK),
         }
     }
 
@@ -228,6 +232,7 @@ impl Kind {
             Kind::NoiseRed => "nr",
             Kind::Mixer => "mix",
             Kind::Split => "split",
+            Kind::Dual => "dual",
             Kind::Merge => "merge",
             Kind::Analyzer => "ana",
             Kind::Output => "out",
@@ -376,11 +381,13 @@ impl Graph {
         self.edges.retain(|e| e.from != id && e.to != id);
     }
 
-    /// Remove a node; an effect with one input and one output is cut out of its line: whatever fed it is connected straight to
-    /// whatever it fed (where that is possible; the other kinds of node just leave their connections).
+    /// Remove a node; a node that has something connected to one input only (and has an output) is cut out of its line: whatever
+    /// fed it is connected straight to whatever it fed. With several inputs in use (a mixer with two sources) there is no
+    /// straight way through, and the node just goes with its connections.
     pub fn remove_bridged(&mut self, id: NodeId) {
-        let one_in_one_out = self.node(id).is_some_and(|n| n.kind.info().inputs == 1 && n.kind.info().outputs == 1);
-        let incoming = if one_in_one_out { self.edge_into(id, 0).copied() } else { None };
+        let feeds: Vec<Edge> = self.node(id).map(|n| (0..n.inputs()).filter_map(|p| self.edge_into(id, p as u8).copied()).collect()).unwrap_or_default();
+        let has_output = self.node(id).is_some_and(|n| n.outputs() > 0);
+        let incoming = if feeds.len() == 1 && has_output { feeds.first().copied() } else { None };
         let outgoing: Vec<Edge> = self.edges.iter().filter(|e| e.from == id).copied().collect();
         self.remove(id);
         if let Some(i) = incoming {
@@ -390,11 +397,40 @@ impl Graph {
         }
     }
 
+    /// True when the signal at an output has the same sound on both sides (it is one channel on both sides): an output of a split
+    /// node, a channel utility set to one channel or the mono sum, and what the linear effects, a mixer of such signals or a width
+    /// control without balance make of it. Such a line gains nothing from being split into channels.
+    pub fn carries_mono(&self, from: NodeId, depth: u32) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        let Some(n) = self.node(from) else { return false };
+        let upstream = |s: &Graph, port: u8| s.edge_into(from, port).is_some_and(|e| s.carries_mono(e.from, depth + 1));
+        match n.kind {
+            Kind::Split => true,
+            Kind::Dual => upstream(self, 0),
+            Kind::Utility => matches!(n.param(0).round() as usize, 1..=3) || upstream(self, 0),
+            // the same processing on both sides keeps identical sides identical
+            Kind::Gain | Kind::Eq | Kind::Filter | Kind::Comp | Kind::Limiter | Kind::Gate | Kind::Delay | Kind::Distortion | Kind::Fuzz | Kind::Crusher | Kind::Jitter | Kind::Tremolo | Kind::Phase | Kind::NoiseRed => upstream(self, 0),
+            Kind::Stereo => n.param(1).abs() < 1e-6 && upstream(self, 0),
+            Kind::Mixer => {
+                let used: Vec<u8> = (0..n.inputs() as u8).filter(|p| self.edge_into(from, *p).is_some()).collect();
+                !used.is_empty() && used.iter().all(|p| upstream(self, *p))
+            }
+            _ => false,
+        }
+    }
+
     /// Put a split node into the line that feeds `port` of `to`: the left channel goes on to `to`, the right output is free
     /// to be connected anywhere. Returns the new node.
     pub fn split_wire(&mut self, to: NodeId, port: u8, x: f32, y: f32) -> Option<NodeId> {
+        self.split_wire_as(Kind::Split, to, port, x, y)
+    }
+
+    /// The same with any node that has one input and two outputs (the split into channels, the split into two stereo lines).
+    pub fn split_wire_as(&mut self, kind: Kind, to: NodeId, port: u8, x: f32, y: f32) -> Option<NodeId> {
         let e = *self.edge_into(to, port)?;
-        let s = self.add(Kind::Split, x, y);
+        let s = self.add(kind, x, y);
         if self.connect_from(e.from, e.from_port, s, 0).is_err() || self.connect_from(s, 0, to, port).is_err() {
             self.remove(s);
             // the old line is still there if the new one could not be made
@@ -406,7 +442,11 @@ impl Graph {
 
     /// A split node on an output, next to the lines that already leave it (they stay).
     pub fn split_output(&mut self, from: NodeId, from_port: u8, x: f32, y: f32) -> Option<NodeId> {
-        let s = self.add(Kind::Split, x, y);
+        self.split_output_as(Kind::Split, from, from_port, x, y)
+    }
+
+    pub fn split_output_as(&mut self, kind: Kind, from: NodeId, from_port: u8, x: f32, y: f32) -> Option<NodeId> {
+        let s = self.add(kind, x, y);
         if self.connect_from(from, from_port, s, 0).is_err() {
             self.remove(s);
             return None;
@@ -632,13 +672,28 @@ mod tests {
         g.connect(e3, o1, 0).unwrap();
         g.remove_bridged(e3);
         assert!(g.edge_into(o1, 0).is_none());
-        // a source, a sink and a mixer are removed without bridging (a mixer has several inputs)
+        // a mixer with one source in use is a plain line too; with two sources there is no straight way through
         g.connect(a, mx, 0).unwrap();
         g.connect(mx, o1, 0).unwrap();
         g.remove_bridged(mx);
-        assert!(g.edge_into(o1, 0).is_none() && g.node(mx).is_none());
+        assert_eq!(g.edge_into(o1, 0).map(|e| e.from), Some(a));
+        let (b2, mx2) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Mixer, 0.0, 0.0));
+        g.connect(a, mx2, 0).unwrap();
+        g.connect(b2, mx2, 1).unwrap();
+        g.connect(mx2, o1, 0).unwrap();
+        g.remove_bridged(mx2);
+        assert!(g.edge_into(o1, 0).is_none() && g.node(mx2).is_none());
+        // a split node: what fed it goes straight to whatever its outputs fed
+        g.connect(a, o1, 0).unwrap();
+        let sp = g.add(Kind::Split, 0.0, 0.0);
+        g.connect(a, sp, 0).unwrap();
+        g.connect_from(sp, 1, o2, 0).unwrap();
+        g.remove_bridged(sp);
+        assert_eq!(g.edge_into(o2, 0).map(|e| e.from), Some(a));
+        // sources and sinks go without bridging
         g.remove_bridged(o2);
         g.remove_bridged(a);
+        g.remove_bridged(b2);
         assert!(g.edges.is_empty());
         // a port that already had another line keeps the line that was bridged in (a port takes one connection)
         let (s1, f, m2) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Gain, 0.0, 0.0), g.add(Kind::Mixer, 0.0, 0.0));
@@ -646,6 +701,59 @@ mod tests {
         g.connect(f, m2, 2).unwrap();
         g.remove_bridged(f);
         assert_eq!(g.edge_into(m2, 2).map(|e| e.from), Some(s1));
+    }
+
+    #[test]
+    fn mono_lines_are_recognised() {
+        let mut g = Graph::default();
+        let (a, sp, f, eq, mx, wid) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Split, 0.0, 0.0), g.add(Kind::Gain, 0.0, 0.0), g.add(Kind::Eq, 0.0, 0.0), g.add(Kind::Mixer, 0.0, 0.0), g.add(Kind::Stereo, 0.0, 0.0));
+        assert!(!g.carries_mono(a, 0), "a generator is stereo");
+        g.connect(a, sp, 0).unwrap();
+        assert!(g.carries_mono(sp, 0));
+        // effects after a split keep it mono; effects after a stereo source do not
+        g.connect_from(sp, 0, f, 0).unwrap();
+        g.connect(f, eq, 0).unwrap();
+        assert!(g.carries_mono(eq, 0));
+        let f2 = g.add(Kind::Gain, 0.0, 0.0);
+        g.connect(a, f2, 0).unwrap();
+        assert!(!g.carries_mono(f2, 0));
+        // a mixer of mono lines is mono, with one stereo line in it it is not
+        g.connect(eq, mx, 0).unwrap();
+        assert!(g.carries_mono(mx, 0));
+        g.connect(f2, mx, 1).unwrap();
+        assert!(!g.carries_mono(mx, 0));
+        // the width control keeps mono only with the balance in the middle
+        g.connect(eq, wid, 0).unwrap();
+        assert!(g.carries_mono(wid, 0));
+        g.node_mut(wid).unwrap().p[1] = 30.0;
+        assert!(!g.carries_mono(wid, 0));
+        // a channel utility that makes one channel of it is mono whatever feeds it
+        let u = g.add(Kind::Utility, 0.0, 0.0);
+        g.node_mut(u).unwrap().p[0] = 3.0;
+        assert!(g.carries_mono(u, 0));
+        // nodes without an output, and unknown nodes
+        assert!(!g.carries_mono(999, 0));
+    }
+
+    #[test]
+    fn a_line_can_be_split_into_two_stereo_lines() {
+        let mut g = Graph::default();
+        let (a, o) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Analyzer, 0.0, 0.0));
+        g.connect(a, o, 0).unwrap();
+        let d = g.split_wire_as(Kind::Dual, o, 0, 1.0, 1.0).unwrap();
+        assert_eq!(g.node(d).unwrap().kind, Kind::Dual);
+        assert_eq!((g.node(d).unwrap().inputs(), g.node(d).unwrap().outputs()), (1, 2));
+        assert_eq!(g.edge_into(d, 0).map(|e| e.from), Some(a));
+        assert_eq!(g.edge_into(o, 0).map(|e| (e.from, e.from_port)), Some((d, 0)));
+        // the second line is free; a stereo source stays stereo, a mono one stays mono
+        assert!(!g.carries_mono(d, 0));
+        let s = g.split_output_as(Kind::Dual, a, 0, 2.0, 2.0).unwrap();
+        assert_eq!(g.edge_into(s, 0).map(|e| e.from), Some(a));
+        let sp = g.add(Kind::Split, 0.0, 0.0);
+        let d2 = g.add(Kind::Dual, 0.0, 0.0);
+        g.connect(a, sp, 0).unwrap();
+        g.connect_from(sp, 0, d2, 0).unwrap();
+        assert!(g.carries_mono(d2, 0));
     }
 
     #[test]
