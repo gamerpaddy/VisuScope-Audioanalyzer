@@ -1057,8 +1057,11 @@ impl Daw {
                 Job::Merged(src, at, remove, index) => {
                     let n = remove.len();
                     self.with_proj(|p| {
+                        // the merged track is shown like the tracks it replaces (expanded into its channels, with their mono and split buttons)
+                        let h = p.tracks.iter().find(|t| remove.contains(&t.id)).map_or(1, |t| t.h);
                         p.tracks.retain(|t| !remove.contains(&t.id));
                         let ti = p.add_track(Some(src.name.clone()), Input { dev: String::new(), mode: Mode::Mix });
+                        p.tracks[ti].h = h;
                         p.add_clip(ti, src, at);
                         // the merged track takes the place of the first of the tracks
                         let t = p.tracks.remove(ti);

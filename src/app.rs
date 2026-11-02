@@ -116,6 +116,7 @@ pub struct App {
     pub area: Option<egui::Rect>,
     /// area of the previous frame: the windows follow when it changes (side bar resized)
     pub prev_area: Option<egui::Rect>,
+    pub follow: crate::windows::Follow,
     /// undo / redo of window arrangement changes
     pub lay: crate::layouts::LayHist,
     pub opts_open: bool,
@@ -354,6 +355,7 @@ impl App {
             saved_area: None,
             area: None,
             prev_area: None,
+            follow: Default::default(),
             lay: Default::default(),
             opts_open: false,
             graph_on: false,

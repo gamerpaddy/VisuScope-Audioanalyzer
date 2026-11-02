@@ -1886,9 +1886,15 @@ impl Daw {
                             changed = true;
                             ck = true;
                         }
-                        draw_icon(ui, SliderIcon::Volume);
-                        let tip = format!("{name} channel gain {:+.1} dB", t.ch_db[k]);
-                        changed |= self.fader(ui, ("chv", id, k), &mut t.ch_db[k], -24.0..=12.0, 0.0, 1.0, &tip);
+                        // level differences between the channels are the balance's job; a gain set here by an older version is shown so it can be cleared
+                        if t.ch_db[k].abs() > 0.05 {
+                            ui.label(RichText::new(format!("{:+.1} dB", t.ch_db[k])).small().weak());
+                            if ui.small_button("0 dB").on_hover_text("Clear the gain of this channel (use the balance for level differences between the channels)").clicked() {
+                                t.ch_db[k] = 0.0;
+                                changed = true;
+                                ck = true;
+                            }
+                        }
                     });
                 }
             }

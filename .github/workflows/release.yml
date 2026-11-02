@@ -28,9 +28,17 @@ jobs:
         with:
           name: visuscope-windows
           path: VisuScope-*.zip
+      - name: Release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          # the description of a release is release-notes/<tag>.md; without one the release at least names its version
+          $f = "release-notes/${{ github.ref_name }}.md"
+          if (-not (Test-Path $f)) { Set-Content -Path $f -Value "VisuScope ${{ github.ref_name }}" }
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: VisuScope-*.zip
-          generate_release_notes: true
+          body_path: release-notes/${{ github.ref_name }}.md
+          generate_release_notes: false

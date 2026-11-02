@@ -155,6 +155,13 @@ impl App {
             if icon_btn(ui, Ico::Down, "Pan down", false) {
                 a.py = -0.2;
             }
+            if idx == 0 {
+                // the spectrum: clear the average, maximum and minimum traces without opening the settings
+                ui.add_space(4.0);
+                if ui.button("Reset max/min").on_hover_text("Restart the average, maximum and minimum traces").clicked() {
+                    self.p.reset_gen = self.p.reset_gen.wrapping_add(1);
+                }
+            }
             if tilt {
                 ui.add_space(4.0);
                 ui.label(RichText::new("tilt").small().weak());

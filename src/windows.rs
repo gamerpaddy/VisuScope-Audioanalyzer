@@ -28,6 +28,69 @@ const MIN_W: f32 = 200.0;
 const MIN_H: f32 = 110.0;
 const WIN_FILL: Color32 = Color32::from_rgb(22, 26, 33);
 
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+
+    fn layout(area: Rect) -> Vec<(Option<Rect>, Option<Rect>)> {
+        // four windows tiled in the area, one maximised once (its return rectangle)
+        let (w, h) = (area.width() / 2.0, area.height() / 2.0);
+        let q = |x: f32, y: f32| Rect::from_min_size(area.min + vec2(x * w, y * h), vec2(w, h));
+        vec![(Some(q(0.0, 0.0)), None), (Some(q(1.0, 0.0)), None), (Some(q(0.0, 1.0)), Some(q(0.0, 1.0))), (Some(q(1.0, 1.0)), None), (None, None)]
+    }
+
+    #[test]
+    fn shrinking_the_window_to_almost_nothing_and_growing_it_again_brings_the_layout_back() {
+        let big = Rect::from_min_size(pos2(0.0, 30.0), vec2(1600.0, 900.0));
+        let mut f = Follow::default();
+        let mut cur = layout(big);
+        // the first frame: nothing to follow yet
+        assert!(f.step(cur.clone(), big, None).is_none());
+        let mut prev = big;
+        // dragged smaller in steps to a tiny size (below the smallest window size), then bigger again
+        let sizes: Vec<f32> = (0..30).map(|k| 1600.0 - k as f32 * 52.0).chain((0..40).map(|k| 100.0 + k as f32 * 38.0)).collect();
+        for wdt in sizes {
+            let area = Rect::from_min_size(pos2(0.0, 30.0), vec2(wdt.max(60.0), (wdt * 0.6).max(60.0)));
+            if let Some(next) = f.step(cur.clone(), area, Some(prev)) {
+                cur = next;
+            }
+            prev = area;
+        }
+        // finish at the size where we began
+        let area = big;
+        if let Some(next) = f.step(cur.clone(), area, Some(prev)) {
+            cur = next;
+        }
+        let want = layout(big);
+        for (c, w) in cur.iter().zip(&want) {
+            match (c.0, w.0) {
+                (Some(c), Some(w)) => assert!((c.min - w.min).length() < 0.5 && (c.size() - w.size()).length() < 0.5, "{c:?} vs {w:?}"),
+                (None, None) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(cur[2].1.is_some());
+    }
+
+    #[test]
+    fn a_change_by_the_user_becomes_the_new_base() {
+        let a = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0));
+        let mut f = Follow::default();
+        let mut cur = layout(a);
+        f.step(cur.clone(), a, None);
+        let b = Rect::from_min_size(pos2(0.0, 0.0), vec2(500.0, 300.0));
+        cur = f.step(cur, b, Some(a)).unwrap();
+        // the user moves window 0 in the small area: that is the layout now, and growing keeps the move
+        let moved = Rect::from_min_size(pos2(100.0, 100.0), vec2(200.0, 100.0));
+        cur[0].0 = Some(moved);
+        let out = f.step(cur.clone(), a, Some(b)).unwrap();
+        let r = out[0].0.unwrap();
+        assert!((r.min.x - 200.0).abs() < 0.5 && (r.min.y - 200.0).abs() < 0.5 && (r.width() - 400.0).abs() < 0.5, "{r:?}");
+        // nothing changes while the area stays
+        assert!(f.step(out, a, Some(a)).is_none());
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum DragKind {
     Move,
@@ -84,6 +147,42 @@ pub fn win_short(i: usize) -> &'static str {
 
 pub fn win_weight(i: usize) -> f32 {
     if i < BUILTIN { WEIGHT[i] } else { tools::INFO[i - BUILTIN].weight }
+}
+
+/// How the windows follow the area when the application window is resized. The layout the user (or a preset, or the tiling) made is
+/// remembered together with the area it was made for, and every other size of the area is derived from THAT, never from the previous
+/// frame's rectangles: a window that was squeezed to its minimum size on the way down is not stuck small on the way up.
+#[derive(Default)]
+pub struct Follow {
+    base: Vec<(Option<Rect>, Option<Rect>)>,
+    base_area: Option<Rect>,
+    produced: Vec<(Option<Rect>, Option<Rect>)>,
+}
+
+fn map_rect(r: Rect, from: Rect, to: Rect) -> Rect {
+    let (sx, sy) = (to.width() / from.width().max(1.0), to.height() / from.height().max(1.0));
+    Rect::from_min_size(to.min + vec2((r.min.x - from.min.x) * sx, (r.min.y - from.min.y) * sy), vec2(r.width() * sx, r.height() * sy))
+}
+
+impl Follow {
+    /// `cur` are the rectangles (and the rectangles to return to) now, `prev_area` the area of the previous frame. Returns the
+    /// rectangles to use when the area changed.
+    pub fn step(&mut self, cur: Vec<(Option<Rect>, Option<Rect>)>, area: Rect, prev_area: Option<Rect>) -> Option<Vec<(Option<Rect>, Option<Rect>)>> {
+        if self.produced != cur || self.base_area.is_none() || self.base.len() != cur.len() {
+            // somebody else changed the layout (a drag, a preset, the tiling): it is the new base, made for the previous area
+            self.base = cur.clone();
+            self.base_area = Some(prev_area.filter(|a| a.width() > 50.0 && a.height() > 50.0).unwrap_or(area));
+        }
+        let base_area = self.base_area?;
+        if area.width() < 50.0 || area.height() < 50.0 {
+            self.produced = cur;
+            return None;
+        }
+        // (back at the size the layout was made for, this gives the layout itself)
+        let out: Vec<(Option<Rect>, Option<Rect>)> = if base_area == area { self.base.clone() } else { self.base.iter().map(|(r, p)| (r.map(|r| map_rect(r, base_area, area)), p.map(|r| map_rect(r, base_area, area)))).collect() };
+        self.produced = out.clone();
+        if out == cur { None } else { Some(out) }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -287,9 +386,13 @@ impl App {
 
     /// Rect a window currently occupies on screen (a collapsed window is only its title bar).
     fn shown_rect(&self, i: usize, area: Rect) -> Rect {
+        self.shown_rect_of(i, area, self.wins[i].rect)
+    }
+
+    fn shown_rect_of(&self, i: usize, area: Rect, rect: Option<Rect>) -> Rect {
         let w = &self.wins[i];
         let casc = i as f32 * 24.0;
-        let r = w.rect.unwrap_or_else(|| Rect::from_min_size(area.min + vec2(30.0 + casc, 30.0 + casc), vec2(560.0, 380.0)));
+        let r = rect.unwrap_or_else(|| Rect::from_min_size(area.min + vec2(30.0 + casc, 30.0 + casc), vec2(560.0, 380.0)));
         if w.collapsed { Rect::from_min_size(r.min, vec2(r.width(), TITLE_H)) } else { r }
     }
 
@@ -557,14 +660,13 @@ impl App {
             }
             self.apply_initial_layout(area);
         }
-        // the windows follow the area when it changes (side bar dragged, application window resized)
-        if let Some(old) = self.prev_area.filter(|o| *o != area && o.width() > 50.0 && o.height() > 50.0) {
-            if self.layout_ready && self.win_drag.is_none() {
-                let (sx, sy) = (area.width() / old.width(), area.height() / old.height());
-                let map = |r: Rect| Rect::from_min_size(area.min + vec2((r.min.x - old.min.x) * sx, (r.min.y - old.min.y) * sy), vec2(r.width() * sx, r.height() * sy));
-                for w in self.wins.iter_mut() {
-                    w.rect = w.rect.map(map);
-                    w.prev = w.prev.map(map);
+        // the windows follow the area when it changes (application window resized)
+        if self.layout_ready && self.win_drag.is_none() && !self.need_tile {
+            let cur: Vec<(Option<Rect>, Option<Rect>)> = self.wins.iter().map(|w| (w.rect, w.prev)).collect();
+            if let Some(next) = self.follow.step(cur, area, self.prev_area) {
+                for (w, (r, p)) in self.wins.iter_mut().zip(next) {
+                    w.rect = r;
+                    w.prev = p;
                 }
             }
         }
@@ -595,15 +697,13 @@ impl App {
                 self.ms[i] += 0.1 * (t0.elapsed().as_secs_f32() * 1000.0 - self.ms[i]);
                 continue;
             }
-            if self.win_drag.as_ref().map_or(true, |d| d.i != i) {
-                if let Some(r) = self.wins[i].rect {
-                    let c = Self::clamp_rect(r, area);
-                    if c != r {
-                        self.wins[i].rect = Some(c);
-                    }
-                }
+            // a window is kept inside the area and above the minimum size when it is drawn; the rectangle that is kept is not touched
+            // (so that it grows back with the area), except while another window is being dragged
+            let kept = self.wins[i].rect.map(|r| Self::clamp_rect(r, area));
+            if self.win_drag.as_ref().is_some_and(|d| d.i != i) && kept != self.wins[i].rect {
+                self.wins[i].rect = kept;
             }
-            let r = self.shown_rect(i, area);
+            let r = self.shown_rect_of(i, area, kept);
             let id = egui::Id::new(("visuscope_win", i));
             let focused = self.focus == i;
             let collapsed = self.wins[i].collapsed;
