@@ -84,6 +84,10 @@ impl App {
     pub fn manage_monitor(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
         self.mon_gain.store(10f32.powf(self.mon_gain_db / 20.0).to_bits(), Relaxed);
+        // the switch lives in the spectrum window: with that window closed or a cursor gone, the sound must not stay band-limited unseen
+        if !self.wins[0].open || self.cur_a.is_none() || self.cur_b.is_none() {
+            self.band_listen = false;
+        }
         match (self.band_listen, self.cur_a, self.cur_b) {
             (true, Some(a), Some(b)) if (a - b).abs() > 1.0 => crate::shared::BAND.set(true, a.min(b), a.max(b)),
             _ => crate::shared::BAND.set(false, 0.0, 0.0),
@@ -404,6 +408,11 @@ impl App {
                     ui.selectable_value(&mut self.p.spectro_src, i as u8, *n);
                 }
             }).response.on_hover_text("Difference: what is louder in the left than in the right channel is orange, the other way round blue. Put two signals on L and R to compare them (a before / after, two microphones)");
+            if self.p.spectro_src == 3 {
+                ui.end_row();
+                ui.label("");
+                ui.label(RichText::new("Difference mode has its own colours: colormap, floor and ceiling do not apply.").small().weak());
+            }
             if (before == 3) != (self.p.spectro_src == 3) {
                 // the history holds another kind of value: start over, with the matching colours
                 self.clear_history();

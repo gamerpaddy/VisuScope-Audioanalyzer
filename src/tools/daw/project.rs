@@ -361,13 +361,17 @@ impl Project {
 
     /// Make sure ids handed out later do not collide with `id` (after loading).
     pub fn reserve_id(&mut self, id: u32) {
-        self.next_id = self.next_id.max(id + 1);
+        self.next_id = self.next_id.max(id.saturating_add(1));
     }
 
     pub const MAX_MARKS: usize = 500;
 
     /// Add a marker (`len` 0) or region; the name defaults to the next free "Marker n" / "Region n".
     pub fn add_mark(&mut self, at: i64, len: i64, name: Option<String>) -> Option<u32> {
+        // the same place twice (a held key repeats) is one marker
+        if let Some(m) = self.marks.iter().find(|m| m.at == at.max(0) && m.len == len.max(0)) {
+            return Some(m.id);
+        }
         if self.marks.len() >= Self::MAX_MARKS {
             return None;
         }
@@ -778,6 +782,11 @@ mod tests {
         assert_eq!(p.mark_near(500, true).map(|m| m.at), Some(900));
         assert_eq!(p.mark_near(500, false).map(|m| m.at), Some(100));
         assert!(p.mark_near(900, true).is_none());
+        // a held key adds the same marker again and again: it stays one
+        let n = p.marks.len();
+        let a = p.add_mark(900, 0, None);
+        assert_eq!(p.marks.len(), n);
+        assert_eq!(a, p.marks.iter().find(|m| m.at == 900).map(|m| m.id));
     }
 
     #[test]

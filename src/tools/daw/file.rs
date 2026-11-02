@@ -240,6 +240,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
             proj.tracks[ti].clips.push(c);
         }
     }
+    proj.marks.sort_by_key(|m| m.at);
     Ok(Loaded { proj, missing, max_src_id: max_src })
 }
 
@@ -322,6 +323,11 @@ mod tests {
             p.clip_mut(c).unwrap().fade_in = 50;
             p.add_clip(ti, src, 4000);
         }
+        p.tracks[0].auto_set(100, -3.0);
+        p.tracks[0].auto_set(3000, 5.0);
+        p.tracks[1].invert = true;
+        p.add_mark(500, 0, Some("a".into()));
+        p.add_mark(900, 400, Some("b".into()));
         save(&p, &path).unwrap();
         let good = std::fs::read(&path).unwrap();
         let mut seed = 0xD1B5_4A32_D192_ED03u64;
@@ -358,8 +364,11 @@ mod tests {
                         }
                     }
                     let end = q.end_frame().clamp(0, 20_000);
-                    let _ = q.render(0, end, None);
+                    let (l, r) = q.render(0, end, None);
+                    assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()), "damaged automation made a non-finite sample");
                     let _ = q.render(-500, 500, None);
+                    assert!(q.marks.iter().all(|m| m.at >= 0 && m.len >= 0));
+                    assert!(q.tracks.iter().all(|t| t.auto.windows(2).all(|w| w[0].0 < w[1].0) && t.auto.iter().all(|(f, d)| *f >= 0 && d.is_finite())));
                 }
             });
             assert!(r.is_ok(), "case {case} panicked");

@@ -185,6 +185,10 @@ pub trait Tool {
     fn update(&mut self, _cx: &mut Ctx, _visible: bool) {}
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx);
     fn overlay(&self, _ov: &SpecOverlay, _cx: &Ctx) {}
+    /// Why the last thing the tool was asked to start did not run (empty when all is well).
+    fn problem(&self) -> Option<String> {
+        None
+    }
     /// Short status-bar message (recording, alarms ...).
     fn status(&self) -> Option<(String, Color32)> {
         None

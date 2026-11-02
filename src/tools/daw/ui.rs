@@ -888,6 +888,8 @@ impl Daw {
         if lane_resp.clicked() {
             if let Some(pos) = lane_resp.interact_pointer_pos() {
                 match self.hit(p, &view, &rows, pos) {
+                    // a click on an automation point of the edited track is not a click on the clip below it
+                    _ if self.auto_hit(p, &view, &rows, pos).is_some() => {}
                     Some(h) => {
                         let id = p.tracks[h.ti].clips[h.ci].id;
                         if shift {

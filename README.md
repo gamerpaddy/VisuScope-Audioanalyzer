@@ -62,6 +62,7 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Desktop-style windows with thin title bars: they snap to each other and to the edges, dock to halves / quarters when released against an edge, and neighbours that touch follow when an edge is resized (Alt: resize one window only, Ctrl: move without snapping)
 - 24 layout presets (analysis, timeline / studio, acoustics ...), saved layouts (Ctrl+1 to 9), auto tiling, pop-out windows; windows follow when the side bar or the application window is resized
 - Undo / redo for layout changes (Ctrl+Alt+Z / Ctrl+Alt+Y), separate from the timeline's own undo
+- **Assistant** (button at the right end of the top bar): type what you want in plain words, e.g. "measure the frequency, impulse response and distortion with a sweep on input mic1", "THD vs level on the line input", "room acoustics with a sweep from 50 hz to 16 khz", "generate a 1 khz tone at -20 db and monitor it". It shows its plan first (input device and channel, sweep range / length / level / averages, which windows to open and tile, generator and monitor settings) and then sets it up, optionally starting the measurements one after the other. It works offline with keywords and numbers; no service is involved
 - Snapshots menu: the whole session (windows, tool settings, generators, routing graph) saved under a name together with notes, and put back with one click
 - Options dialog for frame rate, readout rate, window behaviour and the remembered dialog folder
 - The version is shown in the title bar and at the right end of the top bar
@@ -118,7 +119,7 @@ The Layouts menu shows every preset as a small picture of its arrangement (also 
 
 ## Latency
 
-The output holds back a small cushion of sound before it plays so that short stalls of the system do not crackle. The cushion is not fixed: it starts at 30 ms, grows at once when a gap occurs, remembers that the smaller value was not enough, and after a calm stretch tries a slightly smaller one (never below a value that already failed). A source that runs a little fast is played 0.5 % faster until the surplus is gone, so the delay does not creep up. The Profiler shows the cushion in use. The safety buffer of Options is added on top.
+The output holds back a small cushion of sound before it plays so that short stalls of the system do not crackle. The reserve is not fixed: it starts at 20 ms (on top of one callback of the device), grows at once when a gap occurs and remembers that the smaller value was not enough. It only becomes smaller again when the queue has stayed clearly above it for a while, so no gap is provoked to find out. A source that runs a little fast, or a queue that holds more than the reserve needs, is played 0.5 % faster until the surplus is gone, so the delay does not creep up. The Profiler shows the cushion in use. The safety buffer of Options is added on top.
 
 ## Profiler
 

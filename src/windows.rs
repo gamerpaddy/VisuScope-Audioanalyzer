@@ -777,6 +777,11 @@ impl App {
         egui::Panel::top("topbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                // the Assistant button and the version stay in view; the rest scrolls sideways when the window is narrow
+                let left_w = (ui.available_width() - 190.0).max(120.0);
+                egui::ScrollArea::horizontal().id_salt("topbar_scroll").max_width(left_w).auto_shrink([true, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
                 ui.label(egui::RichText::new("Windows").weak());
                 for i in 0..BUILTIN {
                     let mut o = self.wins[i].open;
@@ -846,7 +851,13 @@ impl App {
                 if ui.button("Options").on_hover_text("Frame rate, window behaviour, folders ...").clicked() {
                     self.opts_open = !self.opts_open;
                 }
+                });
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let on = self.assist.open;
+                    if ui.selectable_label(on, egui::RichText::new("Assistant").strong()).on_hover_text("Describe what you want to measure and it sets up the input, windows and settings (and can start the measurement)").clicked() {
+                        self.assist.open = !on;
+                    }
                     ui.label(egui::RichText::new(format!("v{}", crate::VERSION)).small().weak()).on_hover_text(format!("VisuScope {}", crate::VERSION_FULL));
                 });
             });
@@ -854,6 +865,7 @@ impl App {
     }
 
     pub fn status_bar_ui(&mut self, ui: &mut Ui) {
+        self.assistant_ui(ui.ctx());
         let statuses = self.tool_statuses();
         egui::Panel::bottom("statusbar").show(ui, |ui| {
             ui.horizontal(|ui| {

@@ -111,7 +111,7 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
         let s = ctl.seek.swap(NO_SEEK, Relaxed);
         if s != NO_SEEK {
             pos = s.max(0);
-            mon.lock().buf.clear();
+            mon.lock().flush();
         }
         carry += dt * sr as f64;
         let mut n = carry.floor() as usize;

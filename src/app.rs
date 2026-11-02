@@ -192,6 +192,7 @@ pub struct App {
     pub preset_name: String,
     /// snapshots menu: name and notes being typed, the last message, a delete waiting for a second click
     pub snap_name: String,
+    pub assist: crate::assistant::State,
     pub snap_note: String,
     pub snap_msg: String,
     pub snap_del: Option<String>,
@@ -416,6 +417,7 @@ impl App {
             presets: Vec::new(),
             preset_name: String::new(),
             snap_name: String::new(),
+            assist: Default::default(),
             snap_note: String::new(),
             snap_msg: String::new(),
             snap_del: None,

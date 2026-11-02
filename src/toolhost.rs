@@ -228,6 +228,7 @@ impl App {
                 }
             }
         }
+        self.assist_tick();
         let mut req = Requests::default();
         {
             let mut cx = make_ctx!(self, &mut req);

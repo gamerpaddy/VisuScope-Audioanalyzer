@@ -89,7 +89,7 @@ impl Drop for Player {
 
 impl Player {
     fn start(dev: &str, sh: PlayShared) -> Player {
-        let q = Arc::new(Mutex::new(Queue { buf: Default::default(), src_sr: sh.sr }));
+        let q = Arc::new(Mutex::new(Queue { buf: Default::default(), src_sr: sh.sr, ..Default::default() }));
         let gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let status = Arc::new(Mutex::new(String::new()));
         let h = monitor::start(q.clone(), gain.clone(), Some(dev.to_string()).filter(|d| !d.is_empty()), status.clone());
@@ -366,12 +366,18 @@ impl NullTest {
                 }
             }
         });
-        if let Some(s) = pick {
+        if let Some(s) = pick.filter(|s| *s != cur) {
+            // the old signal belongs to the old source: a capture or a file is needed again
             if is_b {
                 self.sb = s.clone();
+                self.b = None;
             } else {
                 self.sa = s.clone();
+                self.a = None;
             }
+            self.stats = None;
+            self.curves = None;
+            self.msg.clear();
             if s == Src::File {
                 self.dlg = Some((is_b, dialogs::open("Open audio file", "Audio", decode::EXTENSIONS)));
             }
@@ -448,8 +454,10 @@ fn xcorr_lag(a: &[f32], b: &[f32], max_lag: usize) -> Option<(f64, f32)> {
     let n = (a.len() + b.len()).next_power_of_two();
     let mut pl = FftPlanner::<f32>::new();
     let (fwd, inv) = (pl.plan_fft_forward(n), pl.plan_fft_inverse(n));
+    // without the mean: an offset gives every lag a correlation that falls off linearly with the lag and hides the real peak
     let prep = |x: &[f32]| -> Vec<Complex32> {
-        let mut v: Vec<Complex32> = x.iter().map(|s| Complex32::new(*s, 0.0)).collect();
+        let mean = (x.iter().map(|v| *v as f64).sum::<f64>() / x.len() as f64) as f32;
+        let mut v: Vec<Complex32> = x.iter().map(|s| Complex32::new(*s - mean, 0.0)).collect();
         v.resize(n, Complex32::new(0.0, 0.0));
         fwd.process(&mut v);
         v
@@ -470,11 +478,63 @@ fn xcorr_lag(a: &[f32], b: &[f32], max_lag: usize) -> Option<(f64, f32)> {
     if best <= 0.0 {
         return None;
     }
-    // parabola through the peak and its neighbours
+    // a parabola through the peak is only a start (the peak of broadband material is narrow): the fraction is then searched
+    // directly, as the delay at which the fractionally delayed B matches A best
     let (y0, y1, y2) = (at(bk - 1).abs(), at(bk).abs(), at(bk + 1).abs());
     let den = y0 - 2.0 * y1 + y2;
     let off = if den.abs() > 1e-12 { (0.5 * (y0 - y2) / den).clamp(-0.5, 0.5) } else { 0.0 };
-    Some((bk as f64 + off as f64, at(bk)))
+    let sign = if at(bk) < 0.0 { -1.0 } else { 1.0 };
+    let lag = refine_lag(a, b, bk as f64 + off as f64, sign);
+    Some((lag, at(bk)))
+}
+
+/// Match of A with B delayed by `d` (signed, over a stretch in the middle of the signals).
+fn match_at(a: &[f32], b: &[f32], d: f64, sign: f32, means: (f32, f32)) -> f64 {
+    let len = a.len().min(b.len());
+    let span = len.min(24576);
+    let lo = (len - span) / 2;
+    let (di, fr) = (d.floor() as isize, (d - d.floor()) as f32);
+    let taps: Vec<f32> = (1 - SINC_K..=SINC_K)
+        .map(|k| {
+            let x = k as f32 + fr;
+            let s = if x.abs() < 1e-6 { 1.0 } else { (std::f32::consts::PI * x).sin() / (std::f32::consts::PI * x) };
+            s * (0.42 + 0.5 * (std::f32::consts::PI * x / SINC_K as f32).cos() + 0.08 * (2.0 * std::f32::consts::PI * x / SINC_K as f32).cos())
+        })
+        .collect();
+    let (mut acc, mut energy) = (0f64, 1e-30f64);
+    for n in lo..lo + span {
+        let first = n as isize - di + 1 - SINC_K;
+        if first < 0 || first + 2 * SINC_K > b.len() as isize {
+            continue;
+        }
+        let mut v = 0f32;
+        for (j, t) in taps.iter().enumerate() {
+            v += (b[(first + j as isize) as usize] - means.1) * t;
+        }
+        acc += (a[n] - means.0) as f64 * v as f64 * sign as f64;
+        energy += v as f64 * v as f64;
+    }
+    // the residual left after the best level match: what is explained by B, so a delay that lets the delayed B grow or
+    // shrink at the edges of the stretch is not favoured
+    acc.max(0.0).powi(2) / energy
+}
+
+/// Search the fraction around `start` (+- 0.75 sample) for the best match.
+fn refine_lag(a: &[f32], b: &[f32], start: f64, sign: f32) -> f64 {
+    let mean = |x: &[f32]| (x.iter().map(|v| *v as f64).sum::<f64>() / x.len().max(1) as f64) as f32;
+    let means = (mean(a), mean(b));
+    let (mut lo, mut hi) = (start - 0.75, start + 0.75);
+    for _ in 0..16 {
+        let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        if match_at(a, b, m1, sign, means) < match_at(a, b, m2, sign, means) {
+            lo = m1;
+        } else {
+            hi = m2;
+        }
+    }
+    let r = 0.5 * (lo + hi);
+    // only accept it when it really matches better than the start
+    if match_at(a, b, r, sign, means) >= match_at(a, b, start, sign, means) { r } else { start }
 }
 
 /// Mean power spectrum (Hann, 50 % overlap) of a signal, `n / 2 + 1` bins, scaled so that a full-scale sine is about 0 dB.
@@ -507,12 +567,20 @@ fn fmt_db(v: f32) -> String {
 }
 
 impl Tool for NullTest {
-    fn update(&mut self, cx: &mut Ctx, _visible: bool) {
+    fn update(&mut self, cx: &mut Ctx, visible: bool) {
+        // a closed window must not go on playing
+        if !visible && (self.playing || self.player.is_some()) {
+            self.playing = false;
+            self.player = None;
+        }
         let done = self.loading.as_ref().and_then(|(is_b, slot)| slot.lock().take().map(|r| (*is_b, r)));
         {
             if let Some((is_b, res)) = done {
                 self.loading = None;
+                let still_wanted = if is_b { self.sb == Src::File } else { self.sa == Src::File };
                 match res {
+                    _ if !still_wanted => {}
+                    Ok((_, _, x)) if x.is_empty() => self.msg = "that file holds no audio".into(),
                     Ok((name, sr, x)) => {
                         let sig = Some(Sig { name, sr, x: Arc::new(x) });
                         if is_b {
@@ -539,6 +607,11 @@ impl Tool for NullTest {
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
+        // nothing to play without both signals (the Stop button is not available then)
+        if self.a.is_none() || self.b.is_none() {
+            self.playing = false;
+            self.player = None;
+        }
         // the live signals are what the analysers read: the side bar's channels, or the analyzer node of the routing graph
         ui.horizontal_wrapped(|ui| {
             self.source_row(ui, cx, false);
@@ -559,7 +632,7 @@ impl Tool for NullTest {
             ch |= ui.add_enabled(ready, egui::DragValue::new(&mut self.delay).speed(0.05).range(-96000.0..=96000.0).max_decimals(2).suffix(" smp")).on_hover_text("Samples B is delayed by to line up with A (negative: moved earlier). Fractions are interpolated").changed();
             let mut ms = (self.delay / rate * 1000.0) as f32;
             if ui.add_enabled(ready, egui::DragValue::new(&mut ms).speed(0.01).max_decimals(3).suffix(" ms")).changed() {
-                self.delay = ms as f64 * rate / 1000.0;
+                self.delay = (ms as f64 * rate / 1000.0).clamp(-96000.0, 96000.0);
                 ch = true;
             }
             ui.label(RichText::new("Level").small().weak());
@@ -688,7 +761,7 @@ impl Tool for NullTest {
                 if sc != 0.0 {
                     if let Some(p) = resp.hover_pos() {
                         let t = plot.fx(p.x);
-                        let ns = (span * (-sc * 0.003).exp()).clamp(0.002, total);
+                        let ns = (span * (-sc * 0.003).exp()).max(0.002).min(total);
                         self.view_span = if ns >= total * 0.999 { 0.0 } else { ns };
                         let frac = (t - self.view_start) / span.max(1e-6);
                         self.view_start = (t - frac * ns).clamp(0.0, (total - ns).max(0.0));
@@ -815,10 +888,10 @@ mod tests {
         let b: Vec<f32> = delayed(&a, 37.4, a.len()).iter().map(|v| -0.5 * v).collect();
         let (lag, c) = xcorr_lag(&a, &b, 2000).unwrap();
         // xcorr_lag(x, y) answers: y delayed by lag matches x. Here A matches B advanced by 37.4 -> lag = -37.4, negative polarity
-        assert!((lag + 37.4).abs() < 0.15, "{lag}");
+        assert!((lag + 37.4).abs() < 0.05, "{lag}");
         assert!(c < 0.0);
         let (lag2, c2) = xcorr_lag(&b, &a, 2000).unwrap();
-        assert!((lag2 - 37.4).abs() < 0.15, "{lag2}");
+        assert!((lag2 - 37.4).abs() < 0.05, "{lag2}");
         assert!(c2 < 0.0);
         // apply what was found: the residual is far below the signal
         let moved = delayed(&a, lag2 + 0.0, a.len());
@@ -832,6 +905,15 @@ mod tests {
         }
         let depth = 10.0 * (num / den).log10();
         assert!(depth < -50.0, "null depth {depth} dB");
+    }
+
+    #[test]
+    fn a_constant_offset_does_not_hide_the_delay() {
+        // two stretches of one noise signal with a large DC offset, 8000 samples apart
+        let x: Vec<f32> = noise(40000, 3).iter().map(|v| v + 0.8).collect();
+        let (a, b) = (&x[8000..38000], &x[..30000]);
+        let (lag, _) = xcorr_lag(a, b, 12000).unwrap();
+        assert!((lag + 8000.0).abs() < 0.2, "{lag}");
     }
 
     #[test]
@@ -858,5 +940,39 @@ mod tests {
         assert!(lo <= 10 && hi <= 10);
         let s = avg_spectrum(&[0.0; 100], 1024);
         assert_eq!(s.len(), 513);
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::time::Instant;
+
+    /// `cargo test --release bench_null -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_null() {
+        for secs in [4usize, 20] {
+            let n = secs * 48000;
+            let mut s = 7u32;
+            let a: Vec<f32> = (0..n)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 17;
+                    s ^= s << 5;
+                    s as f32 / u32::MAX as f32 - 0.5
+                })
+                .collect();
+            let b = delayed(&a, 123.4, n);
+            let t = Instant::now();
+            let r = xcorr_lag(&a, &b, 96000);
+            println!("{secs:2} s: xcorr {:6.1} ms  lag {:?}", t.elapsed().as_secs_f64() * 1000.0, r.map(|r| r.0));
+            let t = Instant::now();
+            let _ = delayed(&b, 12.3, n);
+            println!("{secs:2} s: fractional delay {:6.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+            let t = Instant::now();
+            let _ = avg_spectrum(&a, 8192);
+            println!("{secs:2} s: spectrum {:6.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 }

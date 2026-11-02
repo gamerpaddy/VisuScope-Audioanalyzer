@@ -379,7 +379,7 @@ impl Run {
             Kind::Split => Rt::Split,
             Kind::Merge => Rt::Merge,
             Kind::Output => {
-                let q = Arc::new(Mutex::new(Queue { buf: VecDeque::new(), src_sr: self.rate }));
+                let q = Arc::new(Mutex::new(Queue { buf: VecDeque::new(), src_sr: self.rate, ..Default::default() }));
                 // the sentinel device name makes `apply` open the stream
                 Rt::Out { dev: "\u{1}".into(), q, status: Arc::new(Mutex::new(String::new())), _h: None, gain: 1.0, mute: false, band: BandFilter::default(), buf: blank() }
             }
@@ -474,7 +474,7 @@ impl Run {
                 let want = n.s.clone();
                 if *dev != want {
                     *dev = want.clone();
-                    q.lock().buf.clear();
+                    q.lock().flush();
                     *status.lock() = String::new();
                     *_h = Some(monitor::start(q.clone(), Arc::new(AtomicU32::new(1.0f32.to_bits())), Some(want).filter(|d| !d.is_empty()), status.clone()));
                 }
@@ -1058,6 +1058,70 @@ mod tests {
             let pk = l.iter().fold(0f32, |m, v| m.max(v.abs()));
             assert!(pk.is_finite() && pk > 0.1 && pk < 1.5, "{kind:?} peak {pk}");
         }
+    }
+
+    #[test]
+    fn a_convolution_node_loads_its_file_in_the_background_and_then_delays_by_it() {
+        let dir = std::env::temp_dir().join(format!("visuscope_ir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ir.wav");
+        // an impulse response that is a single spike 480 samples (10 ms) in
+        {
+            let mut ir = vec![0f32; 2000];
+            ir[480] = 1.0;
+            let mut w = crate::tools::wavio::WavWriter::create(&path, crate::tools::wavio::Format::Float32, 1, 48000).unwrap();
+            w.write(&ir, &ir).unwrap();
+            w.finish().unwrap();
+        }
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let cv = g.add(Kind::Convolver, 0.0, 0.0);
+        {
+            let n = g.node_mut(cv).unwrap();
+            n.p[0] = 100.0;
+            n.s = path.to_string_lossy().to_string();
+        }
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.connect(gn, cv, 0).unwrap();
+        g.connect(cv, an, 0).unwrap();
+        // an impulse train would show the delay; a sine shows the level: 0.5 in, 0.5 out once the file is loaded
+        let p = GenParams { on: true, level_db: [-6.0206; 2], ..GenParams::default() };
+        let (mut run, sh) = engine_with(g, vec![p]);
+        // until the file is read the node passes the signal on; the status tells when it is there
+        let start = std::time::Instant::now();
+        loop {
+            run.tick(Some(1024));
+            let st = run.e.node_status.lock().get(&cv).cloned().unwrap_or_default();
+            if st.contains("s impulse response") {
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 10, "the impulse response never arrived: {st}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for _ in 0..16 {
+            run.tick(Some(1024));
+        }
+        let (l, _) = ring_tail(&sh, 4096);
+        let pk = l.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!((pk - 0.5).abs() < 0.03, "level through a unit-energy spike: {pk}");
+        let st = run.e.node_status.lock().get(&cv).cloned().unwrap_or_default();
+        assert!(st.contains("0.04 s impulse response"), "{st}");
+        // a missing file ends in a message, not in silence that nobody explains
+        let mut g2 = run.e.graph_clone();
+        g2.node_mut(cv).unwrap().s = dir.join("nothing.wav").to_string_lossy().to_string();
+        run.rebuild(&g2);
+        let start = std::time::Instant::now();
+        loop {
+            run.tick(Some(1024));
+            let st = run.e.node_status.lock().get(&cv).cloned().unwrap_or_default();
+            if !st.is_empty() && !st.contains("loading") {
+                assert!(!st.contains("s impulse response"), "{st}");
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 5, "no message for a missing file");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

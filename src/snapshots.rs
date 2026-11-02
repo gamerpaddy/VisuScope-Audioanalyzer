@@ -95,6 +95,8 @@ impl App {
             }
             let mut restore: Option<String> = None;
             let mut remove: Option<String> = None;
+            // a long list scrolls, so that the fields below it stay reachable
+            egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
             for n in &names {
                 ui.horizontal(|ui| {
                     if ui.button(n).on_hover_text("Restore this snapshot (the current state is replaced)").clicked() {
@@ -109,6 +111,7 @@ impl App {
                     }
                 });
             }
+            });
             if let Some(n) = remove {
                 delete(&n);
                 self.snap_del = None;
@@ -142,7 +145,10 @@ impl App {
     }
 
     fn restore_snapshot(&mut self, s: &Snap) {
+        // the layouts the user saved belong to the user, not to the moment of the snapshot
+        let layouts = std::mem::take(&mut self.presets);
         self.load_settings_from(&s.settings);
+        self.presets = layouts;
         if !s.graph.trim().is_empty() {
             *crate::graph::bus().graph_restore.lock() = Some(s.graph.clone());
         }
@@ -164,6 +170,34 @@ mod tests {
         assert!(decode("nonsense").is_none());
         assert!(decode("VSNAP 1\nnote=x\n---graph\n---settings\n").is_none());
         assert!(decode("VSNAP 1").is_none());
+    }
+
+    #[test]
+    fn damaged_snapshot_text_never_panics() {
+        let good = encode(&Snap { note: "a
+b".into(), settings: "fft=16384
+window=Hann".into(), graph: "VSGRAPH 1
+node 1|in|0|0|0||1,2".into() });
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2000 {
+            let mut b = good.clone().into_bytes();
+            for _ in 0..1 + next() % 5 {
+                let i = (next() % b.len() as u64) as usize;
+                b[i] = next() as u8;
+            }
+            if next() % 3 == 0 {
+                b.truncate((next() % b.len() as u64) as usize);
+            }
+            let text = String::from_utf8_lossy(&b).to_string();
+            let r = std::panic::catch_unwind(|| decode(&text).map(|s| s.note.len() + s.settings.len() + s.graph.len()));
+            assert!(r.is_ok(), "panicked on {text:?}");
+        }
     }
 
     #[test]

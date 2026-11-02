@@ -79,6 +79,9 @@ pub struct Distortion {
     last_seq: u64,
     save: Option<dialogs::Pending>,
     note: String,
+    /// a stepped measurement the assistant asked for (mode), started by the next update
+    want_start: Option<usize>,
+    want_stop: bool,
 }
 
 fn db_of(lin: f64) -> f32 {
@@ -176,6 +179,8 @@ impl Distortion {
             last_seq: 0,
             save: None,
             note: String::new(),
+            want_start: None,
+            want_stop: false,
         }
     }
 
@@ -396,11 +401,36 @@ impl Tool for Distortion {
                 }
             }
         }
+        if std::mem::take(&mut self.want_stop) && self.running() {
+            self.finish(cx, true);
+        }
+        if let Some(m) = self.want_start.take() {
+            if !self.running() {
+                self.mode = m.min(2);
+                self.start(cx);
+            }
+        }
         if !visible && self.running() {
             self.finish(cx, true);
         }
         if self.running() {
             self.step(cx);
+        }
+    }
+
+    fn problem(&self) -> Option<String> {
+        Some(self.note.clone()).filter(|n| !n.is_empty() && !self.running() && n != "stopped")
+    }
+
+    /// From the assistant: "mode N" chooses the measurement, "start N" chooses a stepped one (0 to 2) and starts it, "stop" stops it (fields separated by a tab).
+    fn command(&mut self, c: &str) {
+        let p: Vec<&str> = c.split('\t').collect();
+        let m = p.get(1).and_then(|v| v.parse::<usize>().ok()).filter(|m| *m < MODES.len());
+        match (p.first().copied(), m) {
+            (Some("mode"), Some(m)) if !self.running() => self.mode = m,
+            (Some("start"), Some(m)) if m < 3 => self.want_start = Some(m),
+            (Some("stop"), _) => self.want_stop = true,
+            _ => {}
         }
     }
 

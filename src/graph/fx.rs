@@ -185,14 +185,15 @@ impl ConvUnit {
             chans.push(chans[0].clone());
         }
         let len = chans[0].len().max(chans[1].len());
-        self.ir_secs = len as f32 / fs as f32;
+        let secs = len as f32 / fs as f32;
         let energy: f32 = chans.iter().map(|c| c.iter().map(|v| v * v).sum::<f32>()).sum::<f32>() / 2.0;
         let norm = if energy > 1e-12 { 1.0 / energy.sqrt() } else { 1.0 };
-        let block = Self::block_for(self.ir_secs);
+        let block = Self::block_for(secs);
         let (mix, gain) = (self.mix, self.gain);
         *self = Self::with_block(block);
         self.mix = mix;
         self.gain = gain;
+        self.ir_secs = secs;
         let n = block * 2;
         let nparts = len.div_ceil(block).max(1);
         for (c, v) in chans.iter().enumerate() {
@@ -636,5 +637,146 @@ mod bench {
         let mut dl = DelayUnit::new(2.0, fs);
         dl.set(&[250.0, 30.0, 50.0], fs);
         time("delay", &mut |a, b| dl.process(a, b));
+    }
+}
+
+#[cfg(test)]
+mod chunking {
+    use super::super::dsp::*;
+    use super::*;
+
+    fn signal(n: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut s = 0x2545_F491u32;
+        let mut noise = move || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s as f32 / u32::MAX as f32 - 0.5
+        };
+        ((0..n).map(|i| (i as f32 * 0.031).sin() * 0.4 + noise() * 0.1).collect(), (0..n).map(|i| (i as f32 * 0.047).sin() * 0.3 + noise() * 0.1).collect())
+    }
+
+    /// The result must not depend on how the engine happens to cut the stream into blocks.
+    fn same_for_every_block_size(name: &str, mut make: impl FnMut() -> Box<dyn FnMut(&mut [f32], &mut [f32])>) {
+        let (l0, r0) = signal(20000);
+        let mut reference: Option<(Vec<f32>, Vec<f32>)> = None;
+        for blk in [20000usize, 1, 7, 480, 1000, 1024, 4097] {
+            let (mut l, mut r) = (l0.clone(), r0.clone());
+            let mut f = make();
+            let mut at = 0;
+            while at < l.len() {
+                let e = (at + blk).min(l.len());
+                f(&mut l[at..e], &mut r[at..e]);
+                at = e;
+            }
+            match &reference {
+                None => reference = Some((l, r)),
+                Some((rl, rr)) => {
+                    let d = l.iter().zip(rl).chain(r.iter().zip(rr)).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+                    assert!(d < 1e-4, "{name}: block {blk} differs by {d}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn phase_convolution_noise_reduction_and_distortion_do_not_depend_on_the_block_size() {
+        let fs = 48000.0;
+        same_for_every_block_size("phase 90", || {
+            let mut u = PhaseUnit::default();
+            u.set(&[0.0, 1.0, 90.0, 1000.0, 0.7], fs);
+            Box::new(move |l, r| u.process(l, r))
+        });
+        same_for_every_block_size("phase all-pass + invert", || {
+            let mut u = PhaseUnit::default();
+            u.set(&[1.0, 2.0, 0.0, 800.0, 1.5], fs);
+            Box::new(move |l, r| u.process(l, r))
+        });
+        for secs in [0.05f32, 1.0, 3.0] {
+            same_for_every_block_size(&format!("convolution {secs} s"), || {
+                let mut u = ConvUnit::new();
+                let ir: Vec<f32> = (0..(secs * fs) as usize).map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * (-(i as f32) / (fs * secs * 0.3)).exp()).collect();
+                let ir2: Vec<f32> = ir.iter().rev().copied().collect();
+                u.set_ir(&[ir, ir2], fs as u32, fs as u32);
+                u.set(&[60.0, 3.0]);
+                Box::new(move |l, r| u.process(l, r))
+            });
+        }
+        same_for_every_block_size("noise reduction", || {
+            let mut u = NoiseRedUnit::new();
+            u.set(&[15.0, 60.0, 0.0]);
+            Box::new(move |l, r| u.process(l, r))
+        });
+        same_for_every_block_size("harmonic series", || {
+            let mut u = DistUnit::default();
+            u.set(&[0.0, 4.0, 12000.0, 70.0, 0.0, 40.0, 25.0, 50.0], fs);
+            Box::new(move |l, r| u.process(l, r))
+        });
+        same_for_every_block_size("distortion fold", || {
+            let mut u = DistUnit::default();
+            u.set(&[18.0, 3.0, 9000.0, 100.0, -6.0, 0.0, 0.0, 0.0], fs);
+            Box::new(move |l, r| u.process(l, r))
+        });
+    }
+
+    #[test]
+    fn the_stereo_channels_stay_separate_in_the_new_effects() {
+        let fs = 48000.0;
+        for k in 0..4 {
+            let n = 12000;
+            let mut l: Vec<f32> = (0..n).map(|i| (i as f32 * 0.05).sin() * 0.4).collect();
+            let mut r = vec![0f32; n];
+            match k {
+                0 => {
+                    let mut u = PhaseUnit::default();
+                    u.set(&[0.0, 1.0, 45.0, 1000.0, 0.7], fs);
+                    u.process(&mut l, &mut r);
+                }
+                1 => {
+                    let mut u = ConvUnit::new();
+                    u.set_ir(&[(0..2000).map(|i| (i as f32 * 0.1).sin() * (-(i as f32) / 500.0).exp()).collect()], 48000, 48000);
+                    u.set(&[100.0, 0.0]);
+                    u.process(&mut l, &mut r);
+                }
+                2 => {
+                    let mut u = NoiseRedUnit::new();
+                    u.set(&[12.0, 50.0, 0.0]);
+                    u.process(&mut l, &mut r);
+                }
+                _ => {
+                    let mut u = DistUnit::default();
+                    u.set(&[0.0, 4.0, 12000.0, 100.0, 0.0, 40.0, 40.0, 50.0], fs);
+                    u.process(&mut l, &mut r);
+                }
+            }
+            assert!(r.iter().all(|v| v.abs() < 1e-6), "effect {k}: the silent right channel got signal");
+            assert!(l.iter().any(|v| v.abs() > 0.05), "effect {k}: the left channel is silent");
+        }
+    }
+
+    #[test]
+    fn the_band_listen_filter_passes_its_band_and_stops_the_rest() {
+        let fs = 48000.0f32;
+        let band = |f: f32| {
+            crate::shared::BAND.set(true, 500.0, 2000.0);
+            let mut u = BandFilter::default();
+            let x: Vec<f32> = (0..24000).map(|i| 0.5 * (2.0 * PI * f * i as f32 / fs).sin()).collect();
+            let (mut l, mut r) = (x.clone(), x.clone());
+            for (a, b) in l.chunks_mut(480).zip(r.chunks_mut(480)) {
+                u.process(a, b, fs);
+            }
+            crate::shared::BAND.set(false, 0.0, 0.0);
+            (l[12000..].iter().map(|v| v * v).sum::<f32>() / 12000.0).sqrt() / (0.5 / 2f32.sqrt())
+        };
+        // the test shares a global switch with nothing else that runs audio, but keep it in one test
+        assert!(band(1000.0) > 0.85, "in band {}", band(1000.0));
+        assert!(band(60.0) < 0.05, "below {}", band(60.0));
+        assert!(band(12000.0) < 0.05, "above {}", band(12000.0));
+        // off: untouched
+        let mut u = BandFilter::default();
+        let mut l = vec![0.3f32; 100];
+        let mut r = l.clone();
+        u.process(&mut l, &mut r, fs);
+        assert!(l.iter().all(|v| *v == 0.3));
     }
 }
