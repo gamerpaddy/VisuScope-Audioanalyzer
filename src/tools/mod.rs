@@ -20,6 +20,7 @@ pub mod impulse;
 pub mod loudness;
 pub mod logger;
 pub mod monitor;
+pub mod nulltest;
 pub mod octave;
 pub mod peaks;
 pub mod profiler;
@@ -37,7 +38,7 @@ pub mod tap;
 pub mod transfer;
 pub mod wavio;
 
-pub const TOOL_COUNT: usize = 17;
+pub const TOOL_COUNT: usize = 18;
 /// Index of the routing graph's window in `INFO` (it only exists while the graph is switched on).
 pub const ROUTING: usize = 15;
 
@@ -68,12 +69,13 @@ pub const INFO: [ToolInfo; TOOL_COUNT] = [
     ToolInfo { short: "Timeline", title: "Timeline (multitrack)", weight: 4.0, tip: "Multitrack recorder and editor: record several sources and channels at once, load, edit and analyse tracks" },
     ToolInfo { short: "Routing", title: "Routing (node editor)", weight: 8.0, tip: "Connect every input and output like a patch bay: split signals to the analysers, the timeline or output devices, with effects in between" },
     ToolInfo { short: "Profiler", title: "Profiler (latency & interrupts)", weight: 1.5, tip: "System latency, kernel DPC / interrupt time and audio callback timing; shows what caused a crackle" },
+    ToolInfo { short: "Null test", title: "Null test (difference of two signals)", weight: 2.4, tip: "Line up two signals (input channels or files), subtract them and see and hear what is left" },
 ];
 
 /// How the Tools menu groups the tools (indices into `INFO`).
 pub const GROUPS: [(&str, &[usize]); 4] = [
     ("Measure", &[1, 2, 10, 9, 4]),
-    ("Analyse", &[0, 3, 5, 8, 7, 16]),
+    ("Analyse", &[0, 3, 5, 8, 7, 17, 16]),
     ("Test & design", &[11, 13]),
     ("Record & report", &[14, 15, 6, 12]),
 ];
@@ -97,6 +99,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(daw::Daw::new()),
         Box::new(crate::graph::editor::Routing::new()),
         Box::new(profiler::Profiler::new()),
+        Box::new(nulltest::NullTest::new()),
     ];
     debug_assert_eq!(v.len(), TOOL_COUNT);
     v

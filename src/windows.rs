@@ -821,6 +821,7 @@ impl App {
                     }
                 });
                 self.layouts_menu(ui);
+                self.snapshots_menu(ui);
                 ui.separator();
                 if ui.button("Tile").on_hover_text("Fill the area without gaps; visual windows get the most space").clicked() {
                     self.need_tile = true;

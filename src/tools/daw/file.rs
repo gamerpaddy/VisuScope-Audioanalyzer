@@ -68,10 +68,13 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
         }
         let _ = writeln!(out, "src {}|{}/{}|{}", c.src.id, media_name, file, esc(&c.src.name));
     }
+    for m in &proj.marks {
+        let _ = writeln!(out, "mark {}|{}|{}|{}", m.id, m.at, m.len, esc(&m.name));
+    }
     for t in &proj.tracks {
         let _ = writeln!(
             out,
-            "track {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "track {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             t.id,
             esc(&t.name),
             t.color,
@@ -88,8 +91,13 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
             t.ch_mute[0] as u8,
             t.ch_mute[1] as u8,
             t.in_db,
-            t.in_ms
+            t.in_ms,
+            t.invert as u8
         );
+        if !t.auto.is_empty() {
+            let pts: Vec<String> = t.auto.iter().map(|(f, d)| format!("{f}:{d}")).collect();
+            let _ = writeln!(out, "auto {}|{}", t.id, pts.join(","));
+        }
         for c in &t.clips {
             let _ = writeln!(out, "clip {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.id, c.id, c.src.id, c.start, c.off, c.len, c.gain_db, c.fade_in, c.fade_out, c.reverse as u8, c.muted as u8, esc(&c.name));
         }
@@ -134,6 +142,28 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
             proj.sr = v.trim().parse().unwrap_or(48000).clamp(8000, 384000);
         } else if let Some(v) = l.strip_prefix("master ") {
             proj.master_db = v.trim().parse().unwrap_or(0.0);
+        } else if let Some(r) = l.strip_prefix("auto ") {
+            if let Some((id, pts)) = r.split_once('|') {
+                if let Some(ti) = id.trim().parse::<u32>().ok().and_then(|id| proj.track_index(id)) {
+                    for pt in pts.split(',') {
+                        if let Some((fr, db)) = pt.split_once(':') {
+                            if let (Ok(fr), Ok(db)) = (fr.trim().parse::<i64>(), db.trim().parse::<f32>()) {
+                                if db.is_finite() && fr >= 0 {
+                                    proj.tracks[ti].auto_set(fr.min(i64::MAX / 4), db);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if let Some(r) = l.strip_prefix("mark ") {
+            let f: Vec<&str> = r.split('|').collect();
+            if let (true, Ok(id), Ok(at), Ok(len)) = (f.len() >= 4, f[0].parse::<u32>(), f.get(1).unwrap_or(&"").parse::<i64>(), f.get(2).unwrap_or(&"").parse::<i64>()) {
+                if proj.marks.len() < Project::MAX_MARKS {
+                    proj.reserve_id(id);
+                    proj.marks.push(Mark { id, at: at.clamp(0, i64::MAX / 4), len: len.clamp(0, i64::MAX / 4), name: unesc(f[3]) });
+                }
+            }
         } else if let Some(r) = l.strip_prefix("track ") {
             let f: Vec<&str> = r.split('|').collect();
             if f.len() < 10 {
@@ -159,6 +189,8 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 mute: f[5] == "1",
                 solo: f[6] == "1",
                 arm: false,
+                auto: Vec::new(),
+                invert: f.get(17) == Some(&"1"),
                 input: Input { dev: unesc(f[8]), mode: mode_parse(f[9]) },
                 h: f[7].parse::<u8>().unwrap_or(1).min(2),
             });
@@ -244,6 +276,11 @@ mod tests {
         p.tracks[0].vol_db = -4.5;
         p.tracks[0].pan = 0.25;
         p.tracks[0].solo = true;
+        p.tracks[0].invert = true;
+        p.tracks[0].auto_set(300, -6.0);
+        p.tracks[0].auto_set(900, 3.5);
+        p.add_mark(2000, 0, Some("drop | here".into()));
+        p.add_mark(500, 1500, None);
         p.master_db = -1.0;
         save(&p, &path).unwrap();
         let q = load(&path).unwrap();
@@ -254,6 +291,11 @@ mod tests {
         assert_eq!((t.name.as_str(), t.input.dev.as_str(), t.input.mode), ("Gtr | left", "dev|1", Mode::Pair(1)));
         assert!((t.in_db + 3.5).abs() < 1e-6 && (t.in_ms - 12.5).abs() < 1e-6 && t.chan == Chan::Right);
         assert!(t.solo && (t.vol_db + 4.5).abs() < 1e-6 && (t.pan - 0.25).abs() < 1e-6);
+        assert!(t.invert);
+        assert_eq!(t.auto, vec![(300, -6.0), (900, 3.5)]);
+        assert_eq!(q.marks.len(), 2);
+        assert_eq!((q.marks[0].at, q.marks[0].len, q.marks[0].name.as_str()), (500, 1500, "Region 1"));
+        assert_eq!((q.marks[1].at, q.marks[1].len, q.marks[1].name.as_str()), (2000, 0, "drop | here"));
         let (a, b) = (&p.tracks[0].clips[0], &t.clips[0]);
         assert_eq!((a.start, a.off, a.len, a.fade_in, a.reverse), (b.start, b.off, b.len, b.fade_in, b.reverse));
         assert!(b.src.stereo());

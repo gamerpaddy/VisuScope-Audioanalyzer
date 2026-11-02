@@ -28,6 +28,47 @@ impl Queue {
     }
 }
 
+/// How much sound an output holds back before it starts playing (and again after a gap). It starts small and learns:
+/// a gap makes it larger at once and remembers that the smaller value was too little; after a calm stretch it tries a
+/// slightly smaller one again, never below the largest value that failed. The result is the least delay this system
+/// and these sources can do without hiccups.
+pub struct Cushion {
+    cur: f32,
+    floor: f32,
+    calm: f32,
+}
+
+impl Cushion {
+    pub const START_MS: f32 = 30.0;
+    pub const FLOOR_MS: f32 = 12.0;
+    pub const MAX_MS: f32 = 150.0;
+    /// seconds without a gap before a smaller cushion is tried
+    const CALM_SECS: f32 = 12.0;
+
+    pub fn new() -> Self {
+        Self { cur: Self::START_MS, floor: Self::FLOOR_MS, calm: 0.0 }
+    }
+
+    pub fn ms(&self) -> f32 {
+        self.cur
+    }
+
+    pub fn on_gap(&mut self) {
+        self.floor = (self.cur + 3.0).min(Self::MAX_MS);
+        self.cur = (self.cur * 1.3 + 4.0).clamp(self.floor, Self::MAX_MS);
+        self.calm = 0.0;
+    }
+
+    /// `secs` of sound were played without a gap.
+    pub fn on_played(&mut self, secs: f32) {
+        self.calm += secs;
+        if self.calm >= Self::CALM_SECS {
+            self.calm = 0.0;
+            self.cur = (self.cur - 2.0).max(self.floor);
+        }
+    }
+}
+
 pub struct Handle {
     stop: Arc<AtomicBool>,
 }
@@ -122,6 +163,10 @@ where
     let (mut prev, mut next) = ((0f32, 0f32), (0f32, 0f32));
     let mut frac = 1.0f64;
     let mut primed = false;
+    let mut cushion = Cushion::new();
+    // a source that ran dry and came back within a quarter of a second had a hiccup; one that stays away has stopped
+    // (the timeline was stopped): only the first teaches the cushion
+    let mut gap: Option<f32> = None;
     let dead_cb = dead.clone();
     dev.build_output_stream(
         cfg,
@@ -134,15 +179,31 @@ where
             let g = f32::from_bits(gain.load(Relaxed));
             let safety_ms = crate::prof::safety_ms() as usize;
             let Some(mut q) = q.try_lock() else { return };
-            let step = q.src_sr.max(1) as f64 / out_sr as f64;
-            // pre-buffer ~60 ms before (re)starting so short hiccups do not stutter
+            let mut step = q.src_sr.max(1) as f64 / out_sr as f64;
+            // the cushion that is held back before playing starts (it learns, see `Cushion`), plus the safety buffer of Options
+            let want = (q.src_sr as f32 * (cushion.ms() + safety_ms as f32) / 1000.0) as usize;
             if !primed {
-                // 60 ms of cushion, plus the safety buffer chosen in Options
-                if q.buf.len() < (q.src_sr as usize * (60 + safety_ms) / 1000).max(64) {
+                if let Some(g) = gap.as_mut() {
+                    *g += data.len() as f32 / ch as f32 / out_sr.max(1) as f32;
+                    if *g > 0.25 {
+                        gap = None;
+                    }
+                }
+                if q.buf.len() < want.max(64) {
                     return;
                 }
                 primed = true;
+                if gap.take().is_some() {
+                    cushion.on_gap();
+                }
             }
+            crate::prof::C.out_cushion_ms.store((cushion.ms() + safety_ms as f32) as u32, Relaxed);
+            // more is queued than the cushion needs (a source that runs a little fast, or a cushion that just got smaller):
+            // play slightly faster (0.5 %, inaudible) until the surplus is gone
+            if q.buf.len() > want + want / 2 + q.src_sr as usize / 100 {
+                step *= 1.005;
+            }
+            cushion.on_played(data.len() as f32 / ch as f32 / out_sr.max(1) as f32);
             for frame in data.chunks_mut(ch) {
                 while frac >= 1.0 {
                     prev = next;
@@ -151,6 +212,7 @@ where
                         None => {
                             // the source did not deliver in time: a gap in the sound
                             primed = false;
+                            gap = Some(0.0);
                             crate::prof::C.out_underruns.fetch_add(1, Relaxed);
                             return;
                         }
@@ -183,6 +245,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cushion_shrinks_when_calm_grows_after_a_gap_and_remembers_what_failed() {
+        let mut c = Cushion::new();
+        assert_eq!(c.ms(), Cushion::START_MS);
+        // calm: smaller, down to the floor and no further
+        for _ in 0..40 {
+            c.on_played(6.0);
+        }
+        assert_eq!(c.ms(), Cushion::FLOOR_MS);
+        // a gap: larger at once
+        let before = c.ms();
+        c.on_gap();
+        assert!(c.ms() > before + 3.0, "{}", c.ms());
+        let failed_at = before;
+        // calm again: it comes back down, but not to a value that already failed
+        for _ in 0..400 {
+            c.on_played(6.0);
+        }
+        assert!(c.ms() >= failed_at + 3.0 - 1e-3, "{}", c.ms());
+        // repeated gaps never leave the allowed range
+        for _ in 0..50 {
+            c.on_gap();
+        }
+        assert!(c.ms() <= Cushion::MAX_MS);
+    }
 
     #[test]
     fn queue_drops_oldest_when_behind() {

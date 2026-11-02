@@ -440,7 +440,17 @@ impl Daw {
             p.tracks[1].pan = -0.4;
             p.tracks[2].vol_db = -8.0;
             p.tracks[3].pan = 0.3;
+            // the newer features, for screenshots: polarity, volume automation, markers and a region
+            p.tracks[1].invert = true;
+            let s = sr as i64;
+            for (f, d) in [(0, 0.0), (2 * s, -18.0), (4 * s, -3.0), (6 * s, -24.0)] {
+                p.tracks[3].auto_set(f, d);
+            }
+            p.add_mark(s, 0, Some("verse".into()));
+            p.add_mark(3 * s, 2 * s, Some("sweep".into()));
+            p.add_mark(7 * s, 0, Some("end".into()));
         });
+        self.auto_edit = Some(self.proj.lock().tracks[3].id);
         self.fit_pending = true;
     }
 }

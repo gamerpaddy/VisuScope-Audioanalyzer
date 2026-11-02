@@ -499,6 +499,11 @@ fn run(sh: Arc<Shared>) {
                     match p.spectro_src {
                         0 => s.live[0][k],
                         1 => s.live[1][k],
+                        // difference of the channels in dB, shown around the middle of the range (bins with no signal in either channel stay neutral)
+                        3 => {
+                            let (a, b) = (s.live[0][k], s.live[1][k]);
+                            if a.max(b) < -100.0 { -75.0 } else { -75.0 + (a - b).clamp(-75.0, 75.0) }
+                        }
                         _ => s.live[0][k].max(s.live[1][k]),
                     }
                 };
@@ -512,7 +517,9 @@ fn run(sh: Arc<Shared>) {
                     let b = (b1.ceil() as usize).min(half);
                     let mut m = -300.0f32;
                     for k in a..=b {
-                        m = m.max(get(&st, k));
+                        let v = get(&st, k);
+                        // a difference keeps the largest deviation from the middle, up or down
+                        m = if p.spectro_src == 3 && m > -299.0 { if (v + 75.0).abs() > (m + 75.0).abs() { v } else { m } } else { m.max(v) };
                     }
                     m
                 };

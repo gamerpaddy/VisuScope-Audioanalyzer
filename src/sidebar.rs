@@ -84,6 +84,10 @@ impl App {
     pub fn manage_monitor(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
         self.mon_gain.store(10f32.powf(self.mon_gain_db / 20.0).to_bits(), Relaxed);
+        match (self.band_listen, self.cur_a, self.cur_b) {
+            (true, Some(a), Some(b)) if (a - b).abs() > 1.0 => crate::shared::BAND.set(true, a.min(b), a.max(b)),
+            _ => crate::shared::BAND.set(false, 0.0, 0.0),
+        }
         let want = self.mon_on && !self.mon_feedback() && !self.graph_on;
         let dev = self.mon_output_id().unwrap_or_default();
         if let Some((_, d)) = &self.mon_handle {
@@ -394,11 +398,18 @@ impl App {
             ui.add(egui::Slider::new(&mut self.p.cols_per_sec, 2.0..=240.0).logarithmic(true));
             ui.end_row();
             ui.label("Source");
-            egui::ComboBox::from_id_salt("sgsrc").selected_text(["Left", "Right", "Max(L,R)"][self.p.spectro_src as usize]).show_ui(ui, |ui| {
-                for (i, n) in ["Left", "Right", "Max(L,R)"].iter().enumerate() {
+            let before = self.p.spectro_src;
+            egui::ComboBox::from_id_salt("sgsrc").selected_text(["Left", "Right", "Max(L,R)", "Difference L - R"][self.p.spectro_src.min(3) as usize]).show_ui(ui, |ui| {
+                for (i, n) in ["Left", "Right", "Max(L,R)", "Difference L - R"].iter().enumerate() {
                     ui.selectable_value(&mut self.p.spectro_src, i as u8, *n);
                 }
-            });
+            }).response.on_hover_text("Difference: what is louder in the left than in the right channel is orange, the other way round blue. Put two signals on L and R to compare them (a before / after, two microphones)");
+            if (before == 3) != (self.p.spectro_src == 3) {
+                // the history holds another kind of value: start over, with the matching colours
+                self.clear_history();
+                self.lut = self.cmap.lut();
+                self.rebuild_dyn_lut();
+            }
             ui.end_row();
         });
     }

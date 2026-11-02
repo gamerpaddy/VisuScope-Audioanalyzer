@@ -93,6 +93,8 @@ pub struct App {
     pub stereo: StereoState,
 
     pub cur_a: Option<f32>,
+    /// play only the band between cursor A and B
+    pub band_listen: bool,
     pub cur_b: Option<f32>,
     pub snap_peak: bool,
     pub snaps: Vec<Snapshot>,
@@ -188,6 +190,11 @@ pub struct App {
     pub popped: [bool; WIN_COUNT],
     pub presets: Vec<UserPreset>,
     pub preset_name: String,
+    /// snapshots menu: name and notes being typed, the last message, a delete waiting for a second click
+    pub snap_name: String,
+    pub snap_note: String,
+    pub snap_msg: String,
+    pub snap_del: Option<String>,
     pub test_sweep_started: bool,
     /// test hooks: VISUSCOPE_SHOT=file.png [VISUSCOPE_SHOT_AFTER=secs] saves a screenshot and exits,
     /// VISUSCOPE_LAYOUT=n applies the n-th layout preset (0 based) once the layout is ready
@@ -323,6 +330,7 @@ impl App {
             d3: View3d::new(),
             stereo: StereoState::new(),
             cur_a: None,
+            band_listen: false,
             cur_b: None,
             snap_peak: true,
             snaps: Vec::new(),
@@ -407,6 +415,10 @@ impl App {
             popped: [false; WIN_COUNT],
             presets: Vec::new(),
             preset_name: String::new(),
+            snap_name: String::new(),
+            snap_note: String::new(),
+            snap_msg: String::new(),
+            snap_del: None,
             test_sweep_started: false,
             shot_env: std::env::var("VISUSCOPE_SHOT").ok().map(|p| (p, std::env::var("VISUSCOPE_SHOT_AFTER").ok().and_then(|v| v.parse().ok()).unwrap_or(9.0))),
             shot_state: None,
@@ -425,7 +437,7 @@ impl App {
         app
     }
 
-    fn settings_string(&self) -> String {
+    pub fn settings_string(&self) -> String {
         use std::fmt::Write;
         let mut s = String::new();
         let mut kv = |k: &str, v: &dyn std::fmt::Display| {
@@ -531,6 +543,11 @@ impl App {
 
     fn load_settings(&mut self) {
         let Ok(text) = std::fs::read_to_string(settings_path()) else { return };
+        self.load_settings_from(&text);
+    }
+
+    /// Apply a settings text (the settings file, or the one stored in a snapshot).
+    pub fn load_settings_from(&mut self, text: &str) {
         let m: std::collections::HashMap<&str, &str> = text.lines().filter_map(|l| l.split_once('=')).collect();
         fn get<T: std::str::FromStr>(m: &std::collections::HashMap<&str, &str>, k: &str) -> Option<T> {
             // a number that is NaN or infinite (a damaged file) is treated as missing: it would poison every calculation
@@ -571,7 +588,7 @@ impl App {
             p.cols_per_sec = v.clamp(2.0, 240.0);
         }
         if let Some(v) = get::<u8>(&m, "spectro_src") {
-            p.spectro_src = v.min(2);
+            p.spectro_src = v.min(3);
         }
         if let Some(v) = get(&m, "log_freq") {
             p.log_freq = v;
@@ -846,6 +863,18 @@ impl App {
     }
 
     pub fn rebuild_dyn_lut(&mut self) {
+        if self.p.spectro_src == 3 {
+            // difference of the channels: dark where they agree, orange where the left is louder, blue where the right is
+            for v in 0..256 {
+                let diff = v as f32 / 255.0 * HIST_DB_RANGE - HIST_DB_RANGE + 75.0;
+                let t = (diff / 30.0).clamp(-1.0, 1.0);
+                let a = t.abs().powf(0.8);
+                let (lo, hi) = (if t < 0.0 { (10.0, 14.0, 22.0) } else { (14.0, 12.0, 10.0) }, if t < 0.0 { (70.0, 150.0, 255.0) } else { (255.0, 150.0, 60.0) });
+                self.dyn_lut[v] = Color32::from_rgb((lo.0 + (hi.0 - lo.0) * a) as u8, (lo.1 + (hi.1 - lo.1) * a) as u8, (lo.2 + (hi.2 - lo.2) * a) as u8);
+            }
+            self.recolor = true;
+            return;
+        }
         let span = (self.col_hi - self.col_lo).max(1.0);
         for v in 0..256 {
             let db = v as f32 / 255.0 * HIST_DB_RANGE - HIST_DB_RANGE;
@@ -855,7 +884,7 @@ impl App {
         self.recolor = true;
     }
 
-    fn clear_history(&mut self) {
+    pub fn clear_history(&mut self) {
         self.sg_hist.fill(0);
         self.wf_hist.fill(0);
         self.sg_head = 0;

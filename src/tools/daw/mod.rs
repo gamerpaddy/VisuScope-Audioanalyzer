@@ -97,6 +97,7 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
     const BLK: usize = 4096;
     let (mut l, mut r, mut fl, mut fr) = (vec![0f32; BLK], vec![0f32; BLK], vec![0f32; BLK], vec![0f32; BLK]);
     let mut pk = vec![[0f32; 2]; MAX_TRACKS];
+    let mut scratch = vec![[0f32; 2]; MAX_TRACKS];
     let (mut carry, mut last) = (0f64, Instant::now());
     while !ctl.stop.load(Relaxed) {
         std::thread::sleep(Duration::from_millis(4));
@@ -135,14 +136,12 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
                     let b = crate::graph::bus();
                     b.tl_push(sr, None, &l[..k], &r[..k]);
                     let want = b.want_tracks.lock().clone();
-                    let mut scratch = vec![[0f32; 2]; MAX_TRACKS];
                     for tid in want {
                         p.mix(pos, &mut fl[..k], &mut fr[..k], Some(tid), &mut scratch);
                         b.tl_push(sr, Some(tid), &fl[..k], &fr[..k]);
                     }
                 }
                 if focus >= 0 && !to_graph {
-                    let mut scratch = vec![[0f32; 2]; MAX_TRACKS];
                     p.mix(pos, &mut fl[..k], &mut fr[..k], Some(focus as u32), &mut scratch);
                 }
                 for (i, t) in pk.iter().enumerate().take(p.tracks.len()) {
@@ -322,6 +321,12 @@ pub struct Daw {
     split_req: Option<u32>,
     /// timeline frame under the last right-click
     ctx_frame: i64,
+    /// frame and marker under the last right-click on the ruler
+    ruler_ctx: (i64, Option<u32>),
+    /// track whose volume automation is being edited, the point being dragged (track index, point), and the point under the last right-click
+    auto_edit: Option<u32>,
+    auto_drag: Option<(usize, usize)>,
+    auto_ctx: Option<(usize, usize)>,
     /// slider that is being edited by typing a value
     val_edit: Option<(eframe::egui::Id, String, bool)>,
     export_dlg: Option<(Pending, Export)>,
@@ -429,6 +434,10 @@ impl Daw {
             an_hidden: false,
             split_req: None,
             ctx_frame: 0,
+            ruler_ctx: (0, None),
+            auto_edit: None,
+            auto_drag: None,
+            auto_ctx: None,
             val_edit: None,
             export_dlg: None,
             proj_dlg: None,

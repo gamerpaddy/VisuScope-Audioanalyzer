@@ -36,6 +36,7 @@ pub enum BqType {
     HighPass,
     LowPass,
     Notch,
+    AllPass,
 }
 
 impl Biquad {
@@ -60,6 +61,7 @@ impl Biquad {
             BqType::HighPass => ((1.0 + cw) / 2.0, -(1.0 + cw), (1.0 + cw) / 2.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha),
             BqType::LowPass => ((1.0 - cw) / 2.0, 1.0 - cw, (1.0 - cw) / 2.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha),
             BqType::Notch => (1.0, -2.0 * cw, 1.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha),
+            BqType::AllPass => (1.0 - alpha, -2.0 * cw, 1.0 + alpha, 1.0 + alpha, -2.0 * cw, 1.0 - alpha),
         };
         self.b0 = b0 / a0;
         self.b1 = b1 / a0;
@@ -99,6 +101,47 @@ impl Biquad {
         let (nr, ni) = (self.b0 + self.b1 * c1 + self.b2 * c2, -(self.b1 * s1 + self.b2 * s2));
         let (dr, di) = (1.0 + self.a1 * c1 + self.a2 * c2, -(self.a1 * s1 + self.a2 * s2));
         10.0 * ((nr * nr + ni * ni) / (dr * dr + di * di).max(1e-20)).max(1e-20).log10()
+    }
+}
+
+/// Band-pass (two 12 dB/oct sections per side) controlled by `shared::BAND`: the "listen to this band" switch of the
+/// spectrum windows. Does nothing while it is off.
+#[derive(Clone, Default)]
+pub struct BandFilter {
+    hp: [Biquad; 2],
+    lp: [Biquad; 2],
+    key: (u32, u32, u32),
+    engaged: bool,
+}
+
+impl BandFilter {
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], fs: f32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let b = &crate::shared::BAND;
+        if !b.on.load(Relaxed) {
+            self.engaged = false;
+            return;
+        }
+        let key = (b.lo.load(Relaxed), b.hi.load(Relaxed), fs as u32);
+        if key != self.key || !self.engaged {
+            let (lo, hi) = (f32::from_bits(key.0).clamp(10.0, fs * 0.45), f32::from_bits(key.1).clamp(20.0, fs * 0.49));
+            for (k, q) in [0.5412f32, 1.3066].into_iter().enumerate() {
+                self.hp[k].set(BqType::HighPass, fs, lo, 0.0, q);
+                self.lp[k].set(BqType::LowPass, fs, hi.max(lo * 1.05), 0.0, q);
+            }
+            if !self.engaged {
+                // a fresh start without the sound of old filter state
+                for u in self.hp.iter_mut().chain(self.lp.iter_mut()) {
+                    u.z1 = [0.0; 2];
+                    u.z2 = [0.0; 2];
+                }
+            }
+            self.key = key;
+            self.engaged = true;
+        }
+        for u in self.hp.iter_mut().chain(self.lp.iter_mut()) {
+            u.process(l, r);
+        }
     }
 }
 
@@ -565,18 +608,22 @@ pub struct DistUnit {
     out: f32,
     tone: Tone,
     dc: DcBlock,
+    /// the "harmonic series" type: a series of even and / or odd harmonics instead of a waveshaper
+    harmonic: bool,
+    harm: HarmUnit,
 }
 
 impl Default for DistUnit {
     fn default() -> Self {
-        Self { drive: 4.0, shape: DistShape::Soft, mix: 1.0, out: 0.5, tone: Tone::default(), dc: DcBlock::default() }
+        Self { drive: 4.0, shape: DistShape::Soft, mix: 1.0, out: 0.5, tone: Tone::default(), dc: DcBlock::default(), harmonic: false, harm: HarmUnit::default() }
     }
 }
 
 impl DistUnit {
     pub fn set(&mut self, p: &[f32], fs: f32) {
         self.drive = db_to_lin(p.first().copied().unwrap_or(12.0));
-        self.shape = match p.get(1).copied().unwrap_or(0.0).round() as usize {
+        let ty = p.get(1).copied().unwrap_or(0.0).round() as usize;
+        self.shape = match ty {
             1 => DistShape::Hard,
             2 => DistShape::Asym,
             3 => DistShape::Fold,
@@ -585,9 +632,19 @@ impl DistUnit {
         self.tone.set(p.get(2).copied().unwrap_or(12000.0), fs);
         self.mix = p.get(3).copied().unwrap_or(100.0) * 0.01;
         self.out = db_to_lin(p.get(4).copied().unwrap_or(-6.0));
+        self.harmonic = ty == 4;
+        if self.harmonic {
+            // the mix scales the added harmonics (the dry signal is part of the unit's output)
+            let m = self.mix * 100.0;
+            self.harm.set(&[p.get(5).copied().unwrap_or(40.0) * m * 0.01, p.get(6).copied().unwrap_or(0.0) * m * 0.01, p.get(7).copied().unwrap_or(50.0), p.get(4).copied().unwrap_or(0.0)], fs);
+        }
     }
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        if self.harmonic {
+            self.harm.process(l, r);
+            return;
+        }
         for (c, ch) in [l, r].into_iter().enumerate() {
             for v in ch.iter_mut() {
                 let dry = *v;

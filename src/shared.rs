@@ -290,3 +290,23 @@ pub fn freq_to_u(f: f32, log: bool, sr: f32) -> f32 {
         f / nyq
     }
 }
+
+
+/// "Listen to the band between cursor A and B": everything that is played back (the side bar monitor and the output
+/// nodes of the routing graph) is band-passed while this is on. Not an analysis setting: it never changes what is measured.
+pub struct BandListen {
+    pub on: std::sync::atomic::AtomicBool,
+    pub lo: AtomicU32,
+    pub hi: AtomicU32,
+}
+
+pub static BAND: BandListen = BandListen { on: std::sync::atomic::AtomicBool::new(false), lo: AtomicU32::new(0), hi: AtomicU32::new(0) };
+
+impl BandListen {
+    pub fn set(&self, on: bool, lo: f32, hi: f32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.lo.store(lo.to_bits(), Relaxed);
+        self.hi.store(hi.to_bits(), Relaxed);
+        self.on.store(on, Relaxed);
+    }
+}

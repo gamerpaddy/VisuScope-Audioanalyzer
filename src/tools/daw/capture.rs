@@ -152,9 +152,21 @@ impl Capture {
     }
 
     /// Everything captured since the last call, per lane (empty for lanes that are not tapped).
+    #[allow(dead_code)]
     pub fn tap_drain(&self) -> Vec<Vec<f32>> {
         let mut t = self.buf.tap.lock();
         t.iter_mut().map(std::mem::take).collect()
+    }
+
+    /// Same, into buffers the caller keeps: the vectors are exchanged, so the capture callback goes on filling ones that already have
+    /// their capacity and never has to allocate while audio runs.
+    pub fn tap_drain_into(&self, out: &mut Vec<Vec<f32>>) {
+        let mut t = self.buf.tap.lock();
+        out.resize_with(t.len(), Vec::new);
+        for (o, s) in out.iter_mut().zip(t.iter_mut()) {
+            o.clear();
+            std::mem::swap(o, s);
+        }
     }
 
     pub fn start(id: String) -> Self {

@@ -200,6 +200,10 @@ pub struct Routing {
     /// size of every node in model units as drawn last frame, and a request to move overlapping nodes apart
     sizes: HashMap<NodeId, (f32, f32)>,
     tidy_pending: bool,
+    /// file dialog for the impulse response of a convolution node
+    ir_dlg: Option<(NodeId, crate::tools::dialogs::Pending)>,
+    /// A/B: the active slot and both versions of the patch
+    ab: Option<(usize, [Graph; 2])>,
 }
 
 type Vec2 = egui::Vec2;
@@ -213,7 +217,12 @@ fn demo_graph(input: &str) -> Graph {
     let g1 = g.add(Kind::Generator, 30.0, 250.0);
     let g2 = g.add(Kind::Generator, 30.0, 360.0);
     g.node_mut(g2).unwrap().p[0] = 2.0;
-    let gain = g.add(Kind::Harmonics, 290.0, 20.0);
+    let gain = g.add(Kind::Distortion, 290.0, 20.0);
+    {
+        let p = &mut g.node_mut(gain).unwrap().p;
+        p[1] = DIST_HARMONIC as f32;
+        p[4] = 0.0;
+    }
     let mx = g.add(Kind::Mixer, 290.0, 190.0);
     let eq = g.add(Kind::Eq, 540.0, 60.0);
     let sp = g.add(Kind::Split, 920.0, 60.0);
@@ -287,13 +296,14 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, eq_over: false, eq_over_prev: false, sizes: HashMap::new(), tidy_pending: true, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, eq_over: false, eq_over_prev: false, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     fn push(&mut self) {
         if let Some(e) = &self.eng {
             e.set_graph(self.g.clone());
         }
+        *bus().graph_text.lock() = self.g.encode();
         self.dirty = true;
     }
 
@@ -307,6 +317,7 @@ impl Routing {
         }
         self.tidy_pending = true;
         e.set_graph(self.g.clone());
+        *bus().graph_text.lock() = self.g.encode();
         self.eng = Some(e);
         self.fit_next = true;
     }
@@ -389,6 +400,40 @@ impl Routing {
         // devices, generators and tracks are chosen in the nodes themselves, not listed here
         let _ = cx;
         v
+    }
+
+    /// Bands from the EQ design window go into the selected equaliser node, else the first one; without any a new one is
+    /// put in front of the first output.
+    fn take_eq_bands(&mut self, mut bands: Vec<[f32; 3]>, preamp: f32) {
+        bands.sort_by(|a, b| b[1].abs().total_cmp(&a[1].abs()));
+        bands.truncate(EQ_MAX);
+        bands.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        if bands.is_empty() {
+            return;
+        }
+        let existing = self.sel.iter().copied().find(|id| self.g.node(*id).is_some_and(|n| n.kind == Kind::Eq)).or_else(|| self.g.nodes.iter().find(|n| n.kind == Kind::Eq).map(|n| n.id));
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let out = self.g.nodes.iter().find(|n| n.kind == Kind::Output && self.g.edge_into(n.id, 0).is_some()).map(|n| n.id);
+                let at = out.and_then(|o| self.g.node(o)).map(|n| pos2(n.x - 300.0, n.y)).unwrap_or_else(|| self.free_spot());
+                let en = Entry { label: String::new(), group: "Effect", keywords: String::new(), kind: Kind::Eq, s: String::new(), p0: None };
+                self.add_entry(&en, at, out.map_or(Link::None, |o| Link::Insert(o, 0)));
+                match self.sel.iter().next().copied() {
+                    Some(id) => id,
+                    None => return,
+                }
+            }
+        };
+        if let Some(n) = self.g.node_mut(id) {
+            n.p = bands.iter().flat_map(|b| [0.0, b[0].clamp(20.0, 20000.0), b[1].clamp(-24.0, 24.0), b[2].clamp(0.1, 10.0)]).collect();
+            n.bypass = false;
+        }
+        self.sel.clear();
+        self.sel.insert(id);
+        self.tidy_pending = true;
+        self.push();
+        self.note = format!("EQ design loaded into an equaliser node ({} bands){}", bands.len(), if preamp < -0.05 { format!("; lower the level by {:.1} dB (Gain node) to keep the headroom", -preamp) } else { String::new() });
     }
 
     fn add_entry(&mut self, en: &Entry, at: Pos2, link: Link) {
@@ -896,9 +941,56 @@ impl Routing {
                     });
                 }
             }
+            Kind::Distortion => {
+                let old = n.param(1).round() as usize;
+                for i in [1, 0, 2, 5, 6, 7, 3, 4] {
+                    if n.shows(i) {
+                        ch |= Self::param_row(ui, n, i, 50.0);
+                    }
+                }
+                let new = n.param(1).round() as usize;
+                if new != old {
+                    // the harmonics are meant to be added at the level of the signal, the clippers are turned down
+                    if new == DIST_HARMONIC && (n.p[4] + 6.0).abs() < 0.01 {
+                        n.p[4] = 0.0;
+                    } else if old == DIST_HARMONIC && n.p[4].abs() < 0.01 {
+                        n.p[4] = -6.0;
+                    }
+                }
+                if new == DIST_HARMONIC {
+                    ui.label(RichText::new("a series of harmonics of the signal, relative to its level").small().weak());
+                }
+            }
+            Kind::Convolver => {
+                let name = if n.s.is_empty() { "none".to_string() } else { std::path::Path::new(&n.s).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| n.s.clone()) };
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui.button("Load IR...").on_hover_text("A room, a cabinet or a measured impulse response (also one saved from the Impulse window)").clicked() {
+                        self.ir_dlg = Some((n.id, crate::tools::dialogs::open("Impulse response", "Audio", crate::tools::decode::EXTENSIONS)));
+                    }
+                    ui.add(egui::Label::new(RichText::new(name).small().weak()).truncate());
+                    if !n.s.is_empty() && ui.small_button("x").on_hover_text("Remove the impulse response").clicked() {
+                        n.s.clear();
+                        ch = true;
+                    }
+                });
+                for i in 0..2 {
+                    ch |= Self::param_row(ui, n, i, 40.0);
+                }
+                if let Some(s) = status {
+                    ui.label(RichText::new(s).small().color(Color32::from_gray(120)));
+                }
+            }
             _ => {
                 for i in 0..n.kind.info().params.len() {
-                    ch |= Self::param_row(ui, n, i, 56.0);
+                    if n.shows(i) {
+                        ch |= Self::param_row(ui, n, i, 56.0);
+                    }
+                }
+                if matches!(n.kind, Kind::Phase | Kind::NoiseRed) {
+                    if let Some(s) = status.filter(|s| !s.is_empty()) {
+                        ui.label(RichText::new(s).small().color(Color32::from_gray(120)));
+                    }
                 }
             }
         }
@@ -916,6 +1008,49 @@ impl Routing {
             }
         }
         ch
+    }
+
+    /// A / B: two versions of the patch, switched with one click (to hear what a node or a change does).
+    fn ab_buttons(&mut self, ui: &mut Ui) {
+        let cur = self.ab.as_ref().map_or(0, |a| a.0);
+        let mut go: Option<usize> = None;
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for k in 0..2 {
+            let tip = if self.ab.is_none() { "A / B compare: click B to make a second version of this patch from here on; click A or B to switch between them" } else { "Switch to this version of the patch" };
+            if ui.selectable_label(self.ab.is_some() && cur == k || self.ab.is_none() && k == 0, ["A", "B"][k]).on_hover_text(tip).clicked() && (cur != k || self.ab.is_none() && k == 1) {
+                go = Some(k);
+            }
+        }
+        if self.ab.is_some() {
+            let other = 1 - cur;
+            if ui.small_button("copy").on_hover_text(format!("Copy this version over {}", ["A", "B"][other])).clicked() {
+                let g = self.g.clone();
+                if let Some(a) = self.ab.as_mut() {
+                    a.1[other] = g;
+                }
+            }
+            if ui.small_button("x").on_hover_text("Stop comparing and keep this version").clicked() {
+                self.ab = None;
+            }
+        }
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if let Some(k) = go {
+            let cur_g = self.g.clone();
+            let (from, slots) = match self.ab.take() {
+                Some((c, mut s)) => {
+                    s[c] = cur_g;
+                    (c, s)
+                }
+                None => (0, [cur_g.clone(), cur_g]),
+            };
+            let _ = from;
+            self.g = slots[k].clone();
+            self.ab = Some((k, slots));
+            self.sel.clear();
+            self.sel_wire = None;
+            self.tidy_pending = true;
+            self.push();
+        }
     }
 
     /// Save, load and delete named routings.
@@ -1480,6 +1615,30 @@ impl Tool for Routing {
                 self.push();
             }
         }
+        *bus().first_out.lock() = self.g.nodes.iter().find(|n| n.kind == Kind::Output).map(|n| n.s.clone()).unwrap_or_default();
+        let restore = bus().graph_restore.lock().take();
+        if let Some(g) = restore.and_then(|t| Graph::decode(&t)).filter(|g| !g.nodes.is_empty()) {
+            self.g = g;
+            self.sel.clear();
+            self.sel_wire = None;
+            self.ab = None;
+            self.tidy_pending = true;
+            self.push();
+        }
+        let sent = bus().eq_send.lock().take();
+        if let Some((bands, preamp)) = sent {
+            self.take_eq_bands(bands, preamp);
+        }
+        if let Some((id, dlg)) = &self.ir_dlg {
+            if let Some(res) = dlg.take() {
+                let id = *id;
+                self.ir_dlg = None;
+                if let (Some(path), Some(n)) = (res, self.g.node_mut(id)) {
+                    n.s = path.to_string_lossy().to_string();
+                    self.push();
+                }
+            }
+        }
         if self.dirty && self.last_save.elapsed().as_secs_f32() > 1.0 {
             self.save_file();
         }
@@ -1502,6 +1661,7 @@ impl Tool for Routing {
                 self.tidy_pending = true;
             }
             self.routings_menu(ui, cx);
+            self.ab_buttons(ui);
             if ui.small_button(format!("{:.0} %", self.zoom * 100.0)).on_hover_text("Zoom of the node window: Shift + mouse wheel (click: back to 100 %)").clicked() {
                 self.zoom = 1.0;
             }

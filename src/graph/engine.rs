@@ -4,6 +4,7 @@
 //! frames); without one the engine follows the wall clock.
 
 use super::dsp::*;
+use super::fx::{ConvUnit, NoiseRedUnit, PhaseUnit};
 use super::model::*;
 use crate::prof;
 use crate::shared::Shared;
@@ -46,6 +47,13 @@ pub struct Bus {
     pub rec_requests: Mutex<Vec<(u32, String)>>,
     /// record nodes (capture ids) that receive audio from a timeline output: a loopback inside the program
     pub virt_loop: Mutex<std::collections::HashSet<String>>,
+    /// device of the first output node (tools that play sound use it while the graph is on; empty = default output)
+    pub first_out: Mutex<String>,
+    /// bands (frequency, gain, Q) the EQ design window wants in an equaliser node, and the preamp it asks for
+    pub eq_send: Mutex<Option<(Vec<[f32; 3]>, f32)>>,
+    /// the graph as text (for snapshots) and a graph text a snapshot wants put back
+    pub graph_text: Mutex<String>,
+    pub graph_restore: Mutex<Option<String>>,
 }
 
 pub fn bus() -> &'static Bus {
@@ -174,6 +182,9 @@ impl Drop for Engine {
 
 // ---------------------------------------------------------------------- runtime
 
+/// An impulse response that is being read on a worker thread (a long file must not stall the audio thread).
+type IrLoad = Arc<Mutex<Option<Result<(u32, Vec<Vec<f32>>), String>>>>;
+
 enum Rt {
     None,
     Input { dev: String, rs: Option<Rs>, li: usize, ri: usize, gain: f32, delay: DelayUnit, primed: bool },
@@ -188,8 +199,10 @@ enum Rt {
     Lim(LimiterUnit),
     Gate(GateUnit),
     Dly(DelayUnit),
-    Harm(HarmUnit),
     Dist(DistUnit),
+    Phase(PhaseUnit),
+    Conv { u: Box<ConvUnit>, path: String, loading: Option<IrLoad> },
+    Nr(Box<NoiseRedUnit>),
     Fuzz(FuzzUnit),
     Crush(CrushUnit),
     Jit(JitterUnit),
@@ -197,7 +210,7 @@ enum Rt {
     Mix { gain: [f32; MIX_MAX], mute: [bool; MIX_MAX], master: f32 },
     Split,
     Merge,
-    Out { dev: String, q: Arc<Mutex<Queue>>, status: Arc<Mutex<String>>, _h: Option<monitor::Handle>, gain: f32, mute: bool },
+    Out { dev: String, q: Arc<Mutex<Queue>>, status: Arc<Mutex<String>>, _h: Option<monitor::Handle>, gain: f32, mute: bool, band: BandFilter, buf: [Vec<f32>; 2] },
     Rec { id: String },
 }
 
@@ -232,6 +245,8 @@ struct Run {
     claimed: bool,
     gens: Vec<GenParams>,
     gen_buf: Vec<f32>,
+    /// what the devices delivered since the last pass (kept between passes, see `Capture::tap_drain_into`)
+    drain: HashMap<String, Vec<Vec<f32>>>,
 }
 
 fn blank() -> [Vec<f32>; 2] {
@@ -256,6 +271,7 @@ impl Run {
             claimed: false,
             gens: Vec::new(),
             gen_buf: vec![0.0; CHUNK * 2],
+            drain: HashMap::new(),
         }
     }
 
@@ -351,8 +367,10 @@ impl Run {
             Kind::Limiter => Rt::Lim(LimiterUnit::default()),
             Kind::Gate => Rt::Gate(GateUnit::default()),
             Kind::Delay => Rt::Dly(DelayUnit::new(2.0, fs)),
-            Kind::Harmonics => Rt::Harm(HarmUnit::default()),
             Kind::Distortion => Rt::Dist(DistUnit::default()),
+            Kind::Phase => Rt::Phase(PhaseUnit::default()),
+            Kind::Convolver => Rt::Conv { u: Box::new(ConvUnit::new()), path: String::new(), loading: None },
+            Kind::NoiseRed => Rt::Nr(Box::new(NoiseRedUnit::new())),
             Kind::Fuzz => Rt::Fuzz(FuzzUnit::default()),
             Kind::Crusher => Rt::Crush(CrushUnit::default()),
             Kind::Jitter => Rt::Jit(JitterUnit::new(fs)),
@@ -363,7 +381,7 @@ impl Run {
             Kind::Output => {
                 let q = Arc::new(Mutex::new(Queue { buf: VecDeque::new(), src_sr: self.rate }));
                 // the sentinel device name makes `apply` open the stream
-                Rt::Out { dev: "\u{1}".into(), q, status: Arc::new(Mutex::new(String::new())), _h: None, gain: 1.0, mute: false }
+                Rt::Out { dev: "\u{1}".into(), q, status: Arc::new(Mutex::new(String::new())), _h: None, gain: 1.0, mute: false, band: BandFilter::default(), buf: blank() }
             }
             Kind::TimelineRec => Rt::Rec { id: String::new() },
             Kind::Gain => Rt::Gain(1.0),
@@ -408,8 +426,39 @@ impl Run {
             Rt::Lim(u) => u.set(&pv, fs),
             Rt::Gate(u) => u.set(&pv, fs),
             Rt::Dly(u) => u.set(&pv, fs),
-            Rt::Harm(u) => u.set(&pv, fs),
             Rt::Dist(u) => u.set(&pv, fs),
+            Rt::Phase(u) => {
+                u.set(&pv, fs);
+                let ms = u.latency() as f32 * 1000.0 / fs;
+                let st = if ms > 0.0 { format!("delays the signal by {ms:.1} ms") } else { String::new() };
+                self.e.node_status.lock().insert(n.id, st);
+            }
+            Rt::Conv { u, path, loading } => {
+                u.set(&pv);
+                if *path != n.s {
+                    *path = n.s.clone();
+                    let st = if path.is_empty() {
+                        u.loaded = false;
+                        *loading = None;
+                        "no impulse response chosen".to_string()
+                    } else {
+                        let slot: IrLoad = Arc::new(Mutex::new(None));
+                        let (s2, p2) = (slot.clone(), path.clone());
+                        std::thread::spawn(move || {
+                            let r = std::panic::catch_unwind(|| crate::tools::decode::read_all(std::path::Path::new(p2.as_str()))).unwrap_or_else(|_| Err("the decoder failed on this file".into()));
+                            *s2.lock() = Some(r);
+                        });
+                        *loading = Some(slot);
+                        "loading the impulse response...".to_string()
+                    };
+                    self.e.node_status.lock().insert(n.id, st);
+                }
+            }
+            Rt::Nr(u) => {
+                u.set(&pv);
+                let st = if u.learning { "learning the noise: keep only the noise playing".to_string() } else { format!("delays by {:.1} ms{}", u.latency() as f32 * 1000.0 / fs, if u.has_profile() { ", profile stored" } else { "" }) };
+                self.e.node_status.lock().insert(n.id, st);
+            }
             Rt::Fuzz(u) => u.set(&pv, fs),
             Rt::Crush(u) => u.set(&pv),
             Rt::Jit(u) => u.set(&pv),
@@ -421,7 +470,7 @@ impl Run {
                     mute[k] = n.param(2 + MIX_MAX + k) >= 0.5;
                 }
             }
-            Rt::Out { dev, q, status, _h, gain, mute } => {
+            Rt::Out { dev, q, status, _h, gain, mute, .. } => {
                 let want = n.s.clone();
                 if *dev != want {
                     *dev = want.clone();
@@ -550,16 +599,41 @@ impl Run {
             sh.sr.store(self.rate, Relaxed);
             sh.chans.store(2, Relaxed);
         }
+        // impulse responses that finished loading
+        for n in self.nodes.iter_mut() {
+            if let Rt::Conv { u, loading, .. } = &mut n.rt {
+                let done = loading.as_ref().and_then(|l| l.lock().take());
+                if let Some(res) = done {
+                    *loading = None;
+                    let st = match res {
+                        Ok((sr, ch)) => {
+                            u.set_ir(&ch, sr, self.rate);
+                            if u.loaded { format!("{:.2} s impulse response, delays by {:.1} ms", u.ir_secs, u.latency() as f32 * 1000.0 / self.rate as f32) } else { "the file holds no audio".to_string() }
+                        }
+                        Err(e) => {
+                            u.loaded = false;
+                            e
+                        }
+                    };
+                    self.e.node_status.lock().insert(n.id, st);
+                }
+            }
+        }
         let now = Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f64().min(0.25);
         self.last_tick = now;
-        self.gens = self.e.gens.lock().clone();
+        self.gens.clone_from(&*self.e.gens.lock());
 
         // 1. what the devices delivered
-        let mut drained: HashMap<&str, Vec<Vec<f32>>> = HashMap::new();
         let mut total_now = 0u64;
+        self.drain.retain(|k, _| self.caps.contains_key(k));
         for (dev, (cap, _)) in &self.caps {
-            drained.insert(dev.as_str(), cap.tap_drain());
+            if !self.drain.contains_key(dev) {
+                self.drain.insert(dev.clone(), Vec::new());
+            }
+            if let Some(buf) = self.drain.get_mut(dev) {
+                cap.tap_drain_into(buf);
+            }
             if self.master.and_then(|m| if let Rt::Input { dev: d, .. } = &self.nodes[m].rt { Some(d == dev) } else { None }).unwrap_or(false) {
                 total_now = cap.total_frames();
             }
@@ -572,7 +646,7 @@ impl Run {
                         *rs = Some(Rs::new(sr, self.rate));
                     }
                 }
-                let (Some(rs), Some(lanes)) = (rs.as_mut(), drained.get(dev.as_str())) else { continue };
+                let (Some(rs), Some(lanes)) = (rs.as_mut(), self.drain.get(dev.as_str())) else { continue };
                 let ch = cap.format().map_or(2, |f| f.1);
                 let (a, b) = ((*li).min(ch.max(1) - 1), (*ri).min(ch.max(1) - 1));
                 let (l, r) = (lanes.get(a).map(|v| v.as_slice()).unwrap_or(&[]), lanes.get(b).map(|v| v.as_slice()).unwrap_or(&[]));
@@ -780,15 +854,20 @@ impl Run {
                         }
                     }
                 }
-                Rt::Out { q, gain, mute, .. } => {
+                Rt::Out { q, gain, mute, band, buf, .. } => {
                     let (a, b) = inp.map(|b| (&b[0][..n], &b[1][..n])).unwrap_or((&ZERO[..n], &ZERO[..n]));
                     if inp.is_some() && !*mute {
-                        let (mut l, mut r) = (a.to_vec(), b.to_vec());
-                        l.iter_mut().for_each(|v| *v *= *gain);
-                        r.iter_mut().for_each(|v| *v *= *gain);
+                        // scratch buffers of the node: nothing is allocated per block
+                        let [bl, br] = buf;
+                        for (dst, src) in [(&mut *bl, a), (&mut *br, b)] {
+                            for (d, s) in dst[..n].iter_mut().zip(src) {
+                                *d = *s * *gain;
+                            }
+                        }
+                        band.process(&mut bl[..n], &mut br[..n], rate as f32);
                         let mut q = q.lock();
                         q.src_sr = rate;
-                        q.push(&l, &r);
+                        q.push(&bl[..n], &br[..n]);
                     }
                     node.peak = peak2(a, b, node.peak);
                     continue;
@@ -852,8 +931,10 @@ impl Run {
                                 node.extra = if u.open { 1.0 } else { 0.0 };
                             }
                             Rt::Dly(u) => u.process(l, r),
-                            Rt::Harm(u) => u.process(l, r),
                             Rt::Dist(u) => u.process(l, r),
+                            Rt::Phase(u) => u.process(l, r),
+                            Rt::Conv { u, .. } => u.process(l, r),
+                            Rt::Nr(u) => u.process(l, r),
                             Rt::Fuzz(u) => u.process(l, r),
                             Rt::Crush(u) => u.process(l, r),
                             Rt::Jit(u) => u.process(l, r),
@@ -936,6 +1017,47 @@ mod tests {
         assert!((pk - 0.25).abs() < 0.02, "peak {pk}");
         assert_eq!(sh.ring_owner.load(Relaxed), 3);
         assert_eq!(sh.sr.load(Relaxed), 48000);
+    }
+
+    #[test]
+    fn a_phase_node_cancels_a_copy_of_the_signal_in_a_mixer_and_the_new_effects_run_in_the_engine() {
+        // generator -> mixer in 1, generator -> inverting phase node -> mixer in 2: the sum is silent
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let ph = g.add(Kind::Phase, 0.0, 0.0);
+        g.node_mut(ph).unwrap().p[0] = 1.0;
+        let mx = g.add(Kind::Mixer, 0.0, 0.0);
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.connect(gn, mx, 0).unwrap();
+        g.connect(gn, ph, 0).unwrap();
+        g.connect(ph, mx, 1).unwrap();
+        g.connect(mx, an, 0).unwrap();
+        let p = GenParams { on: true, level_db: [-6.0; 2], ..GenParams::default() };
+        let (mut run, sh) = engine_with(g, vec![p.clone()]);
+        for _ in 0..40 {
+            run.tick(Some(1024));
+        }
+        let (l, r) = ring_tail(&sh, 4096);
+        assert!(l.iter().chain(r.iter()).all(|v| v.abs() < 1e-5), "the inverted copy cancels the original");
+        // every new effect passes a signal without blowing up (with no file loaded the convolution passes the signal)
+        for kind in [Kind::Phase, Kind::Convolver, Kind::NoiseRed, Kind::Distortion] {
+            let mut g = Graph::default();
+            let gn = g.add(Kind::Generator, 0.0, 0.0);
+            let fx = g.add(kind, 0.0, 0.0);
+            if kind == Kind::Distortion {
+                g.node_mut(fx).unwrap().p[1] = DIST_HARMONIC as f32;
+            }
+            let an = g.add(Kind::Analyzer, 0.0, 0.0);
+            g.connect(gn, fx, 0).unwrap();
+            g.connect(fx, an, 0).unwrap();
+            let (mut run, sh) = engine_with(g, vec![p.clone()]);
+            for _ in 0..40 {
+                run.tick(Some(1024));
+            }
+            let (l, _) = ring_tail(&sh, 4096);
+            let pk = l.iter().fold(0f32, |m, v| m.max(v.abs()));
+            assert!(pk.is_finite() && pk > 0.1 && pk < 1.5, "{kind:?} peak {pk}");
+        }
     }
 
     #[test]

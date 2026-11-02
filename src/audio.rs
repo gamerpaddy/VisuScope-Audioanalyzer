@@ -232,6 +232,7 @@ where
     let ch = cfg.channels as usize;
     let in_sr = cfg.sample_rate;
     let (mut ml, mut mr): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
+    let mut band = crate::graph::dsp::BandFilter::default();
     let sh_err = sh.clone();
     let dead_cb = dead.clone();
     let mut timer = crate::prof::CbTimer::new();
@@ -272,6 +273,7 @@ where
                 }
             }
             if mon {
+                band.process(&mut ml, &mut mr, in_sr as f32);
                 if let Some(mut q) = sh.mon_q.try_lock() {
                     q.src_sr = in_sr;
                     q.push(&ml, &mr);

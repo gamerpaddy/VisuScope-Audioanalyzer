@@ -20,6 +20,8 @@ pub struct Counters {
     pub xruns: AtomicU32,
     /// output streams that ran dry (counted by the monitor / graph output callbacks)
     pub out_underruns: AtomicU32,
+    /// the output cushion (ms, learned, includes the safety buffer) of the output that played last
+    pub out_cushion_ms: AtomicU32,
     /// routing graph: processing time of one tick, ticks, ticks that came late
     pub eng_tick_max_us: AtomicU64,
     pub eng_tick_sum_us: AtomicU64,
@@ -39,6 +41,7 @@ pub static C: Counters = Counters {
     cb_sr: AtomicU32::new(0),
     xruns: AtomicU32::new(0),
     out_underruns: AtomicU32::new(0),
+    out_cushion_ms: AtomicU32::new(0),
     eng_tick_max_us: AtomicU64::new(0),
     eng_tick_sum_us: AtomicU64::new(0),
     eng_ticks: AtomicU64::new(0),

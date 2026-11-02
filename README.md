@@ -18,7 +18,8 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 
 **Views**
 - Spectrum: FFT 1024 to 262144, many window functions, live/average/max/min traces, cursors, snapshots, CSV export
-- Spectrogram and waterfall
+- Spectrogram and waterfall; the spectrogram can show the *difference* of the two channels (orange: left louder, blue: right louder), which makes a before / after of two signals visible
+- *Listen A-B* (corner of the spectrum): hear only the band between cursor A and cursor B, through the monitor or the output nodes of the routing graph
 - 3D spectrum
 - Stereo field: goniometer, correlation, balance, mid/side, correlation per frequency
 - Oscilloscope: auto, normal, single and roll trigger, HF reject, adjustable trigger position and level
@@ -36,6 +37,7 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Sound level meter: A/C/Z, Fast/Slow/Impulse, Leq, Lmax, peak, L10/L50/L90, calibrator or specification calibration
 - Distortion sweeps: THD / THD+N vs frequency and level, IMD (SMPTE, CCIF) vs level, harmonics 2 to 6 from one sweep (Farina)
 - Room acoustics: RT60 / EDT / clarity per octave band, waterfall (CSD), STI and %ALcons, room modes with theoretical axial modes
+- Null test: two signals (input channels or files) are lined up automatically (delay to a fraction of a sample, polarity, level) and subtracted; the residual is shown on a scope and a spectrum next to the originals, the null depth is read out in dB, and A, B or the difference can be played (with a boost for small errors) on the chosen output, or on the first output node while the routing graph is on
 - Peak list with note names, tuner
 - Signal statistics: histogram, clipping, bit depth use, trends
 - Reference curves and limit masks with pass/fail
@@ -51,7 +53,7 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 **Automation and output**
 - Test sequences: a small script drives the generator, measures, sweeps and checks limits (pass/fail); `visuscope --run test.vss --report result.txt` runs it from the command line (exit code 0 pass, 1 fail, 2 error)
 - Measurement report as HTML (print to PDF), response export as FRD / REW text, impulse response as WAV
-- EQ design: parametric filters fitted to a measurement, exported as Equalizer APO text, biquads or a linear / minimum phase FIR
+- EQ design: parametric filters fitted to a measurement, exported as Equalizer APO text, biquads or a linear / minimum phase FIR; with the routing graph on, *Send to routing* puts the filters into an equaliser node (the selected one, the first one, or a new one in front of the output) so the correction can be heard and measured again
 
 **Interface**
 - Optional routing graph: all inputs, outputs and effects as nodes in one window (see below), with several generators, a profiler for audio hiccups and layout previews
@@ -60,6 +62,7 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Desktop-style windows with thin title bars: they snap to each other and to the edges, dock to halves / quarters when released against an edge, and neighbours that touch follow when an edge is resized (Alt: resize one window only, Ctrl: move without snapping)
 - 24 layout presets (analysis, timeline / studio, acoustics ...), saved layouts (Ctrl+1 to 9), auto tiling, pop-out windows; windows follow when the side bar or the application window is resized
 - Undo / redo for layout changes (Ctrl+Alt+Z / Ctrl+Alt+Y), separate from the timeline's own undo
+- Snapshots menu: the whole session (windows, tool settings, generators, routing graph) saved under a name together with notes, and put back with one click
 - Options dialog for frame rate, readout rate, window behaviour and the remembered dialog folder
 - The version is shown in the title bar and at the right end of the top bar
 
@@ -67,6 +70,9 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Record several tracks at once from several devices: any channel, stereo pair or mono mix of any input (or loopback) per track, e.g. track 1 = device A left, track 2 = device A right, track 3 = device B mono mix
 - Load audio files (also multichannel, drag and drop) as tracks; sample rates are converted
 - Non-destructive editing: split, trim, move across tracks, fades, gain, normalize, reverse, duplicate, copy / paste, range delete, undo / redo, snapping
+- Polarity switch (Ø) per track, for null tests and phase checks
+- Markers and regions on the ruler: K adds a marker at the playhead (or a region over the selected range), [ and ] jump between markers, right-click the ruler to rename, delete, select or loop a region
+- Volume automation per track: *Edit volume automation* in the track menu, double-click a lane for a new point, drag to move, right-click to delete; the level is added to the fader
 - Stereo tracks can show their left and right channel as sub-tracks (`LR` button) with their own mute and gain; right-click a track to convert it to mono or split it into a left and a right track (panned hard left / right)
 - Right-click a track or an empty lane to import a file onto that track or to choose the input it records from
 - Mouse wheel zooms, Shift+wheel pans, Alt+wheel (or the wheel over the headers) scrolls the tracks; double-click a slider to type a value, right-click resets it
@@ -88,11 +94,12 @@ Off by default; switch it on in **Options > Routing graph (node editor)**. Every
 
 - **Sources:** input devices (pick any two channels as left / right, with a trim in dB and a delay in ms to line up several interfaces), generators, the timeline (master or one track)
 - **Effects:** gain / polarity, equalizer (up to 12 bands, notch with adjustable depth, live curve, *Draw* mode: drag the dots in the graph, wheel = width, click empty space = new band, right-click a dot = remove), high- and low-pass (12 to 48 dB/oct), compressor and limiter (gain reduction meters), noise gate, delay, stereo width and balance, channel utility (mono, swap, invert)
-- **Distortion and character:** harmonics (adds a series of even harmonics, 2nd / 4th / 6th ..., and / or of odd ones, 3rd / 5th / 7th ...; the amounts are relative to the signal level and "richness" decides how far up the series reaches), distortion (soft, hard clip, asymmetric, fold-back, with tone and mix), fuzz (with a gate that sputters), bit crusher (bits and sample hold), jitter / wow and flutter (random or sine timing modulation), tremolo
+- **Distortion and character:** distortion / harmonics in one node (soft, hard clip, asymmetric and fold-back clippers with tone and mix, or the *harmonic series* type: a series of even harmonics, 2nd / 4th / 6th ..., and / or of odd ones, 3rd / 5th / 7th ..., relative to the signal level, with "richness" deciding how far up the series reaches; files with the old separate harmonics node load as that type), fuzz (with a gate that sputters), bit crusher (bits and sample hold), jitter / wow and flutter (random or sine timing modulation), tremolo
+- **Phase, space and cleaning:** phase shift / invert (polarity switch, a constant shift of every frequency, which adds about 5 ms of delay and is accurate above roughly 300 Hz, or an all-pass at a chosen frequency), convolution (loads any audio file as an impulse response: rooms, cabinets, an impulse response measured in the Impulse window; partitioned FFT, up to 6 s) and noise reduction (spectral subtraction that follows the noise floor, or learns a profile from noise alone: set *Noise* to *learn*, then to *frozen*)
 - **Routing:** a mixer with 1 to 8 inputs (level and mute each), *Split left / right* (two outputs, one channel each) and *Merge left / right* (two inputs become one stereo signal). Every wire carries a stereo pair: the dot shows the left half in cyan and the right half in pink; split and merge ports show one channel
 - **Sinks:** the analyser (spectrum, scope, loudness ... read what is connected to it), output devices, timeline tracks (arm a track and connect something to its record node). Connect *Timeline out* (master or a track) to a *Timeline record* node to record the master out, or a processed track, onto a new track inside the program; the delay of the loop is compensated
 
-The *Routings* menu in the toolbar saves the current patch under a name and lists all saved routings to load or delete. The mouse wheel zooms the node window about the pointer (Alt + wheel pans, the zoom button resets to 100 %).
+The **A / B** buttons in the toolbar hold two versions of the patch and switch between them with one click (*copy* makes the other one a copy of this one): the quickest way to hear what a node or a change does. The *Routings* menu in the toolbar saves the current patch under a name and lists all saved routings to load or delete. The mouse wheel zooms the node window about the pointer (Alt + wheel pans, the zoom button resets to 100 %).
 Each node shows a level meter; wires brighten with the signal. A loop is refused, and an output that is captured by the input feeding it is marked as feedback. The graph is saved automatically and restored at the next start.
 
 ![Generators](docs/generators.png)
@@ -108,6 +115,10 @@ The Layouts menu shows every preset as a small picture of its arrangement (also 
 ## Safety buffer
 
 *Options > Safety buffer* holds back extra audio before it is played (output devices, the monitor, timeline playback) and cushions the sources of the routing graph. It adds the same amount of delay and hides short stalls of the system, so use it when the Profiler reports an output that ran dry or the sound crackles.
+
+## Latency
+
+The output holds back a small cushion of sound before it plays so that short stalls of the system do not crackle. The cushion is not fixed: it starts at 30 ms, grows at once when a gap occurs, remembers that the smaller value was not enough, and after a calm stretch tries a slightly smaller one (never below a value that already failed). A source that runs a little fast is played 0.5 % faster until the surplus is gone, so the delay does not creep up. The Profiler shows the cushion in use. The safety buffer of Options is added on top.
 
 ## Profiler
 

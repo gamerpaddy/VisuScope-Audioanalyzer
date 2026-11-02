@@ -199,6 +199,25 @@ impl App {
         painter.galley(r.min, galley, col);
     }
 
+    /// "Listen A-B": a small switch in the corner of a frequency view. While on, the monitor plays only the band between
+    /// cursor A and cursor B.
+    fn band_switch(&mut self, ui: &mut Ui, painter: &Painter, plot: Rect) {
+        let ready = matches!((self.cur_a, self.cur_b), (Some(a), Some(b)) if (a - b).abs() > 1.0);
+        let r = Rect::from_min_size(plot.left_top() + vec2(6.0, 6.0), vec2(74.0, 18.0));
+        let resp = ui.interact(r, ui.id().with(("band_switch", plot.left() as i32, plot.top() as i32)), Sense::click());
+        let on = self.band_listen && ready;
+        painter.rect_filled(r, 3.0, if on { Color32::from_rgb(110, 190, 120) } else if resp.hovered() { Color32::from_rgb(52, 62, 80) } else { Color32::from_rgba_unmultiplied(34, 40, 52, 200) });
+        painter.text(r.center(), Align2::CENTER_CENTER, "Listen A-B", FontId::proportional(10.5), if on { Color32::BLACK } else if ready { Color32::from_rgb(190, 200, 215) } else { Color32::from_gray(110) });
+        let tip = if ready { "Hear only the band between cursor A and cursor B (needs the Monitor in the side bar, or an output node in the routing graph)" } else { "Set cursor A (click) and cursor B (right-click) to the two ends of the band first" };
+        if resp.on_hover_text(tip).clicked() && ready {
+            self.band_listen = !self.band_listen;
+        }
+        if on {
+            let (a, b) = (self.cur_a.unwrap_or(0.0), self.cur_b.unwrap_or(0.0));
+            painter.text(r.right_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, format!("{} - {}", fmt_hz(a.min(b)), fmt_hz(a.max(b))), FontId::proportional(10.5), Color32::from_rgb(140, 220, 150));
+        }
+    }
+
     // ------------------------------------------------------------------ spectrum
 
     pub fn panel_spectrum(&mut self, ui: &mut Ui) {
@@ -433,6 +452,12 @@ impl App {
             }
         }
 
+        if let (true, Some(a), Some(b)) = (self.band_listen, self.cur_a, self.cur_b) {
+            let (xa, xb) = (x_of_u(self.f_to_u(a.min(b))), x_of_u(self.f_to_u(a.max(b))));
+            clip.rect_filled(Rect::from_min_max(Pos2::new(xa, plot.top()), Pos2::new(xb, plot.bottom())), 0.0, Color32::from_rgba_unmultiplied(110, 190, 120, 28));
+        }
+        self.band_switch(ui, &painter, plot);
+
         // hover crosshair
         if let Some(hp) = hover {
             clip.line_segment([Pos2::new(hp.x, plot.top()), Pos2::new(hp.x, plot.bottom())], Stroke::new(1.0, Color32::from_white_alpha(50)));
@@ -551,6 +576,9 @@ impl App {
             t += step;
         }
         painter.rect_stroke(plot, 0.0, Stroke::new(1.0, GRID_MAJOR), egui::StrokeKind::Inside);
+        if self.p.spectro_src == 3 {
+            self.draw_cursor_label(&painter, plot.right_bottom() + vec2(-6.0, -6.0), "L - R:  orange = left louder,  blue = right louder  (full colour = 30 dB)".into(), Color32::from_gray(210), Align2::RIGHT_BOTTOM);
+        }
 
         for (name, c, f) in [("A", CUR_A, self.cur_a), ("B", CUR_B, self.cur_b)] {
             if let Some(f) = f {

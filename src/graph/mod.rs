@@ -5,6 +5,7 @@
 pub mod dsp;
 pub mod editor;
 pub mod engine;
+pub mod fx;
 pub mod model;
 
 pub use engine::bus;

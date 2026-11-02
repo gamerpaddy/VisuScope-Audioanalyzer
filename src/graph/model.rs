@@ -17,7 +17,6 @@ pub enum Kind {
     Limiter,
     Gate,
     Delay,
-    Harmonics,
     Distortion,
     Fuzz,
     Crusher,
@@ -25,6 +24,9 @@ pub enum Kind {
     Tremolo,
     Stereo,
     Utility,
+    Phase,
+    Convolver,
+    NoiseRed,
     Mixer,
     /// stereo in, two outputs: the left channel and the right channel, each on both sides
     Split,
@@ -82,14 +84,28 @@ const P_COMP: &[ParamDef] = &[
 const P_LIMIT: &[ParamDef] = &[s("Ceiling", -24.0, 0.0, -1.0, " dB"), l("Release", 1.0, 500.0, 60.0, " ms")];
 const P_GATE: &[ParamDef] = &[s("Threshold", -90.0, 0.0, -50.0, " dB"), l("Attack", 0.1, 50.0, 2.0, " ms"), l("Release", 5.0, 1000.0, 120.0, " ms"), s("Range", -90.0, 0.0, -80.0, " dB")];
 const P_DELAY: &[ParamDef] = &[s("Time", 0.0, 2000.0, 250.0, " ms"), s("Feedback", 0.0, 95.0, 30.0, " %"), s("Mix", 0.0, 100.0, 50.0, " %")];
-const P_HARM: &[ParamDef] = &[s("Even", 0.0, 100.0, 40.0, " %"), s("Odd", 0.0, 100.0, 0.0, " %"), s("Richness", 0.0, 100.0, 50.0, " %"), s("Output", -24.0, 12.0, 0.0, " dB")];
 const P_DIST: &[ParamDef] = &[
     s("Drive", 0.0, 48.0, 12.0, " dB"),
-    c("Shape", 0, &["Soft (tube-like)", "Hard clip", "Asymmetric (even)", "Fold-back"]),
+    c("Type", 0, DIST_TYPES),
     l("Tone", 500.0, 20000.0, 12000.0, " Hz"),
     s("Mix", 0.0, 100.0, 100.0, " %"),
     s("Output", -36.0, 12.0, -6.0, " dB"),
+    s("Even", 0.0, 100.0, 40.0, " %"),
+    s("Odd", 0.0, 100.0, 0.0, " %"),
+    s("Richness", 0.0, 100.0, 50.0, " %"),
 ];
+/// The last type is a series of harmonics instead of a clipper.
+pub const DIST_TYPES: &[&str] = &["Soft (tube-like)", "Hard clip", "Asymmetric (even)", "Fold-back", "Harmonic series (even / odd)"];
+pub const DIST_HARMONIC: usize = 4;
+const P_PHASE: &[ParamDef] = &[
+    c("Polarity", 0, &["normal", "inverted"]),
+    c("Shift", 0, &["off", "all frequencies", "all-pass at frequency"]),
+    s("Angle", 0.0, 360.0, 90.0, " deg"),
+    l("Freq", 20.0, 20000.0, 1000.0, " Hz"),
+    l("Q", 0.1, 10.0, 0.7, ""),
+];
+const P_CONV: &[ParamDef] = &[s("Mix", 0.0, 100.0, 30.0, " %"), s("Level", -24.0, 24.0, 0.0, " dB")];
+const P_NR: &[ParamDef] = &[s("Reduce", 0.0, 40.0, 12.0, " dB"), s("Strength", 0.0, 100.0, 50.0, " %"), c("Noise", 0, &["follow", "learn", "frozen"])];
 const P_FUZZ: &[ParamDef] = &[s("Fuzz", 0.0, 100.0, 70.0, " %"), s("Gate", 0.0, 100.0, 10.0, " %"), l("Tone", 300.0, 20000.0, 5000.0, " Hz"), s("Output", -36.0, 12.0, -10.0, " dB")];
 const P_CRUSH: &[ParamDef] = &[s("Bits", 1.0, 24.0, 8.0, ""), s("Hold", 1.0, 64.0, 1.0, ""), s("Mix", 0.0, 100.0, 100.0, " %")];
 const P_JITTER: &[ParamDef] = &[s("Depth", 0.0, 2000.0, 100.0, " us"), l("Rate", 0.1, 5000.0, 8.0, " Hz"), c("Shape", 0, &["Random", "Sine"]), s("Mix", 0.0, 100.0, 100.0, " %")];
@@ -123,7 +139,7 @@ const FX: (u8, u8, u8) = (90, 110, 170);
 const SNK: (u8, u8, u8) = (170, 100, 80);
 
 impl Kind {
-    pub const ALL: [Kind; 24] = [
+    pub const ALL: [Kind; 26] = [
         Kind::Input,
         Kind::Generator,
         Kind::TimelineOut,
@@ -134,7 +150,6 @@ impl Kind {
         Kind::Limiter,
         Kind::Gate,
         Kind::Delay,
-        Kind::Harmonics,
         Kind::Distortion,
         Kind::Fuzz,
         Kind::Crusher,
@@ -142,6 +157,9 @@ impl Kind {
         Kind::Tremolo,
         Kind::Stereo,
         Kind::Utility,
+        Kind::Phase,
+        Kind::Convolver,
+        Kind::NoiseRed,
         Kind::Mixer,
         Kind::Split,
         Kind::Merge,
@@ -163,14 +181,16 @@ impl Kind {
             Kind::Limiter => k("Limiter", "Effect", "dynamics ceiling brickwall peak", 1, 1, P_LIMIT, FX),
             Kind::Gate => k("Noise gate", "Effect", "dynamics expander silence", 1, 1, P_GATE, FX),
             Kind::Delay => k("Delay", "Effect", "echo time feedback", 1, 1, P_DELAY, FX),
-            Kind::Harmonics => k("Harmonics (even / odd)", "Effect", "even odd harmonics exciter saturation second third overtones", 1, 1, P_HARM, FX),
-            Kind::Distortion => k("Distortion", "Effect", "overdrive distort clip saturate drive tube fold", 1, 1, P_DIST, FX),
+            Kind::Distortion => k("Distortion / harmonics", "Effect", "overdrive distort clip saturate drive tube fold harmonics even odd exciter second third overtones", 1, 1, P_DIST, FX),
             Kind::Fuzz => k("Fuzz", "Effect", "fuzz box guitar clip sputter", 1, 1, P_FUZZ, FX),
             Kind::Crusher => k("Bit crusher", "Effect", "bitcrusher bit depth sample rate reduce lofi quantise", 1, 1, P_CRUSH, FX),
             Kind::Jitter => k("Jitter / wow & flutter", "Effect", "jitter clock timing wow flutter vibrato modulation", 1, 1, P_JITTER, FX),
             Kind::Tremolo => k("Tremolo", "Effect", "tremolo amplitude modulation lfo", 1, 1, P_TREM, FX),
             Kind::Stereo => k("Stereo width", "Effect", "width balance pan mid side", 1, 1, P_STEREO, FX),
             Kind::Utility => k("Channel utility", "Effect", "mono swap invert left right channel phase", 1, 1, P_UTIL, FX),
+            Kind::Phase => k("Phase shift / invert", "Effect", "phase invert polarity shift allpass hilbert rotate null", 1, 1, P_PHASE, FX),
+            Kind::Convolver => k("Convolution (IR / reverb)", "Effect", "convolution impulse response ir reverb cabinet room load wav", 1, 1, P_CONV, FX),
+            Kind::NoiseRed => k("Noise reduction", "Effect", "denoise noise reduction hiss hum spectral subtraction gate profile", 1, 1, P_NR, FX),
             Kind::Mixer => k("Mixer", "Routing", "mix sum combine merge bus", MIX_MAX, 1, P_MIXER, (150, 120, 70)),
             Kind::Split => k("Split left / right", "Routing", "split channels left right separate mono dual", 1, 2, P_NONE, (150, 120, 70)),
             Kind::Merge => k("Merge left / right", "Routing", "merge combine channels left right stereo join", 2, 1, P_NONE, (150, 120, 70)),
@@ -196,7 +216,6 @@ impl Kind {
             Kind::Limiter => "lim",
             Kind::Gate => "gate",
             Kind::Delay => "dly",
-            Kind::Harmonics => "harm",
             Kind::Distortion => "dist",
             Kind::Fuzz => "fuzz",
             Kind::Crusher => "crush",
@@ -204,6 +223,9 @@ impl Kind {
             Kind::Tremolo => "trem",
             Kind::Stereo => "wid",
             Kind::Utility => "util",
+            Kind::Phase => "phase",
+            Kind::Convolver => "conv",
+            Kind::NoiseRed => "nr",
             Kind::Mixer => "mix",
             Kind::Split => "split",
             Kind::Merge => "merge",
@@ -241,6 +263,29 @@ pub struct Node {
 impl Node {
     pub fn new(id: NodeId, kind: Kind, x: f32, y: f32) -> Self {
         Self { id, kind, x, y, p: kind.info().params.iter().map(|d| d.def).collect(), s: String::new(), bypass: false }
+    }
+
+    /// False for a parameter that means nothing in the node's current mode (the editor leaves its row out).
+    pub fn shows(&self, i: usize) -> bool {
+        match self.kind {
+            Kind::Distortion => {
+                let harmonic = self.param(1).round() as usize == DIST_HARMONIC;
+                match i {
+                    0 | 2 => !harmonic,
+                    5..=7 => harmonic,
+                    _ => true,
+                }
+            }
+            Kind::Phase => {
+                let mode = self.param(1).round() as usize;
+                match i {
+                    2 => mode == 1,
+                    3 | 4 => mode == 2,
+                    _ => true,
+                }
+            }
+            _ => true,
+        }
     }
 
     /// Number of input ports (a mixer has as many as its "Inputs" parameter says).
@@ -446,18 +491,27 @@ impl Graph {
                 if f.len() < 7 {
                     continue;
                 }
-                let (Ok(id), Some(kind)) = (f[0].parse::<NodeId>(), Kind::from_code(f[1])) else { continue };
+                // files of older versions have a separate harmonics node: it is the "harmonic series" type of the distortion now
+                let legacy_harm = f[1] == "harm";
+                let (Ok(id), Some(kind)) = (f[0].parse::<NodeId>(), if legacy_harm { Some(Kind::Distortion) } else { Kind::from_code(f[1]) }) else { continue };
                 if g.nodes.iter().any(|n| n.id == id || (kind == Kind::Analyzer && n.kind == kind)) {
                     continue;
                 }
                 let mut n = Node::new(id, kind, f[2].parse().unwrap_or(0.0), f[3].parse().unwrap_or(0.0));
                 n.bypass = f[4] == "1";
                 n.s = unesc(f[5]);
+                if legacy_harm {
+                    n.p[1] = DIST_HARMONIC as f32;
+                    n.p[3] = 100.0;
+                    n.p[4] = 0.0;
+                }
                 for (i, v) in f[6].split(',').enumerate() {
                     let Ok(v) = v.parse::<f32>() else { continue };
                     if !v.is_finite() {
                         continue;
                     }
+                    // old harmonics: even, odd, richness, output -> parameters 5, 6, 7 and 4
+                    let i = if legacy_harm { [5, 6, 7, 4].get(i).copied().unwrap_or(99) } else { i };
                     if let Some(slot) = n.p.get_mut(i) {
                         *slot = v;
                     } else if kind == Kind::Eq && i == n.p.len() && i < 4 * 12 {
@@ -620,5 +674,36 @@ mod tests {
         let mut h = h;
         let n = h.add(Kind::Gain, 0.0, 0.0);
         assert!(g.nodes.iter().all(|x| x.id != n));
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn old_harmonics_nodes_load_as_the_harmonic_series_of_the_distortion() {
+        let text = "VSGRAPH 1\nnode 3|harm|10|20|0||40,15,70,-3\nnode 4|dist|10|20|1||24,2,8000,50,-9\n";
+        let g = Graph::decode(text).unwrap();
+        let h = g.node(3).unwrap();
+        assert_eq!(h.kind, Kind::Distortion);
+        assert_eq!(h.param(1) as usize, DIST_HARMONIC);
+        assert_eq!((h.p[5], h.p[6], h.p[7], h.p[4]), (40.0, 15.0, 70.0, -3.0));
+        assert!(h.shows(5) && !h.shows(0));
+        // an old distortion keeps its values and the new ones get their defaults
+        let d = g.node(4).unwrap();
+        assert_eq!((d.p[0], d.p[1], d.p[2], d.p[3], d.p[4]), (24.0, 2.0, 8000.0, 50.0, -9.0));
+        assert_eq!(d.p.len(), 8);
+        assert!(d.shows(0) && !d.shows(5));
+    }
+
+    #[test]
+    fn every_kind_has_a_code_and_round_trips() {
+        let mut g = Graph::default();
+        for k in Kind::ALL {
+            g.add(k, 0.0, 0.0);
+        }
+        let h = Graph::decode(&g.encode()).unwrap();
+        assert_eq!(h.nodes.len(), g.nodes.len());
     }
 }

@@ -15,6 +15,7 @@ mod options;
 mod prof;
 mod scope;
 mod shared;
+mod snapshots;
 mod sidebar;
 mod stereo;
 mod tf;

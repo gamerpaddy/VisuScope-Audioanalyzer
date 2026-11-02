@@ -271,15 +271,61 @@ pub struct Track {
     pub mute: bool,
     pub solo: bool,
     pub arm: bool,
+    /// polarity: the whole track is turned upside down (null tests, phase checks)
+    pub invert: bool,
+    /// volume automation: (frame, dB) points, sorted; the level is added to the fader and held beyond the ends
+    pub auto: Vec<(i64, f32)>,
     pub input: Input,
     /// 0..=2 (small, normal, large)
     pub h: u8,
 }
 
+/// Range of the automation lane (dB).
+pub const AUTO_RANGE: (f32, f32) = (-40.0, 12.0);
+pub const MAX_AUTO_POINTS: usize = 2000;
+
 impl Track {
+    /// Automation level (dB) at a frame; `seg` is the index of the first point after the frame.
+    fn auto_at(&self, seg: usize, f: i64) -> f32 {
+        let a = &self.auto;
+        if a.is_empty() {
+            0.0
+        } else if seg == 0 {
+            a[0].1
+        } else if seg >= a.len() {
+            a[a.len() - 1].1
+        } else {
+            let ((f0, d0), (f1, d1)) = (a[seg - 1], a[seg]);
+            d0 + (d1 - d0) * ((f - f0) as f32 / (f1 - f0).max(1) as f32)
+        }
+    }
+
+    /// Insert a point (keeping the order; a point on the same frame is replaced).
+    pub fn auto_set(&mut self, frame: i64, db: f32) -> Option<usize> {
+        let db = db.clamp(AUTO_RANGE.0, AUTO_RANGE.1);
+        let i = self.auto.partition_point(|p| p.0 < frame);
+        if i < self.auto.len() && self.auto[i].0 == frame {
+            self.auto[i].1 = db;
+        } else if self.auto.len() < MAX_AUTO_POINTS {
+            self.auto.insert(i, (frame.max(0), db));
+        } else {
+            return None;
+        }
+        Some(i)
+    }
+
     pub fn height(&self) -> f32 {
         [58.0, 84.0, 130.0][self.h.min(2) as usize]
     }
+}
+
+/// A named point (`len` = 0) or range of the timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub id: u32,
+    pub at: i64,
+    pub len: i64,
+    pub name: String,
 }
 
 #[derive(Clone)]
@@ -287,6 +333,7 @@ pub struct Project {
     pub sr: u32,
     pub tracks: Vec<Track>,
     pub master_db: f32,
+    pub marks: Vec<Mark>,
     next_id: u32,
 }
 
@@ -303,7 +350,7 @@ fn pan_gains(pan: f32, stereo: bool) -> (f32, f32) {
 
 impl Project {
     pub fn new(sr: u32) -> Self {
-        Self { sr, tracks: Vec::new(), master_db: 0.0, next_id: 1 }
+        Self { sr, tracks: Vec::new(), master_db: 0.0, marks: Vec::new(), next_id: 1 }
     }
 
     pub fn next(&mut self) -> u32 {
@@ -315,6 +362,26 @@ impl Project {
     /// Make sure ids handed out later do not collide with `id` (after loading).
     pub fn reserve_id(&mut self, id: u32) {
         self.next_id = self.next_id.max(id + 1);
+    }
+
+    pub const MAX_MARKS: usize = 500;
+
+    /// Add a marker (`len` 0) or region; the name defaults to the next free "Marker n" / "Region n".
+    pub fn add_mark(&mut self, at: i64, len: i64, name: Option<String>) -> Option<u32> {
+        if self.marks.len() >= Self::MAX_MARKS {
+            return None;
+        }
+        let id = self.next();
+        let kind = if len > 0 { "Region" } else { "Marker" };
+        let n = self.marks.iter().filter(|m| (m.len > 0) == (len > 0)).count() + 1;
+        self.marks.push(Mark { id, at: at.max(0), len: len.max(0), name: name.unwrap_or_else(|| format!("{kind} {n}")) });
+        self.marks.sort_by_key(|m| m.at);
+        Some(id)
+    }
+
+    /// The marker before / after a frame (for jumping around).
+    pub fn mark_near(&self, frame: i64, forward: bool) -> Option<&Mark> {
+        if forward { self.marks.iter().filter(|m| m.at > frame).min_by_key(|m| m.at) } else { self.marks.iter().filter(|m| m.at < frame).max_by_key(|m| m.at) }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -329,7 +396,7 @@ impl Project {
     pub fn add_track(&mut self, name: Option<String>, input: Input) -> usize {
         let id = self.next();
         let n = self.tracks.len();
-        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, input, h: 1 });
+        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, invert: false, auto: Vec::new(), input, h: 1 });
         n
     }
 
@@ -385,7 +452,15 @@ impl Project {
         l.fill(0.0);
         r.fill(0.0);
         let any_solo = self.tracks.iter().any(|t| t.solo);
-        let (mut tl, mut tr) = (vec![0f32; n], vec![0f32; n]);
+        // the track buffers are kept between calls (the playback thread mixes every few milliseconds)
+        thread_local! {
+            static BUFS: std::cell::RefCell<(Vec<f32>, Vec<f32>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+        }
+        let (mut tl, mut tr) = BUFS.with(|b| std::mem::take(&mut *b.borrow_mut()));
+        tl.clear();
+        tl.resize(n, 0.0);
+        tr.clear();
+        tr.resize(n, 0.0);
         for (ti, t) in self.tracks.iter().enumerate() {
             let audible = match only {
                 Some(id) => t.id == id,
@@ -459,11 +534,21 @@ impl Project {
                     tr[o] += sr * e * pr;
                 }
             }
-            let vg = db_to_lin(t.vol_db);
+            let vg = db_to_lin(t.vol_db) * if t.invert { -1.0 } else { 1.0 };
             let (mut pl, mut pr) = (0f32, 0f32);
             if any {
+                let mut seg = t.auto.partition_point(|p| p.0 <= start);
                 for i in 0..n {
-                    let (a, b) = (tl[i] * vg, tr[i] * vg);
+                    let g = if t.auto.is_empty() {
+                        vg
+                    } else {
+                        let f = start + i as i64;
+                        while seg < t.auto.len() && t.auto[seg].0 <= f {
+                            seg += 1;
+                        }
+                        vg * db_to_lin(t.auto_at(seg, f))
+                    };
+                    let (a, b) = (tl[i] * g, tr[i] * g);
                     pl = pl.max(a.abs());
                     pr = pr.max(b.abs());
                     l[i] += a;
@@ -474,6 +559,7 @@ impl Project {
                 *p = [pl, pr];
             }
         }
+        BUFS.with(|b| *b.borrow_mut() = (tl, tr));
         if only.is_none() {
             let mg = db_to_lin(self.master_db);
             if (mg - 1.0).abs() > 1e-6 {
@@ -671,6 +757,56 @@ mod tests {
         let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
         let id = p.add_clip(ti, src(n), 100);
         (p, id)
+    }
+
+    #[test]
+    fn an_inverted_track_cancels_its_twin_and_markers_stay_ordered() {
+        let mut p = Project::new(48000);
+        let src = Arc::new(Source::new(1, "s".into(), vec![(0..2000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect()]));
+        for _ in 0..2 {
+            let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+            p.add_clip(ti, src.clone(), 0);
+        }
+        let (l, _) = p.render(0, 2000, None);
+        assert!(l.iter().any(|v| v.abs() > 0.3));
+        p.tracks[1].invert = true;
+        let (l, r) = p.render(0, 2000, None);
+        assert!(l.iter().chain(r.iter()).all(|v| v.abs() < 1e-6), "two identical tracks, one inverted, are silent");
+        p.add_mark(900, 0, None);
+        p.add_mark(100, 50, None);
+        assert_eq!(p.marks.iter().map(|m| m.at).collect::<Vec<_>>(), vec![100, 900]);
+        assert_eq!(p.mark_near(500, true).map(|m| m.at), Some(900));
+        assert_eq!(p.mark_near(500, false).map(|m| m.at), Some(100));
+        assert!(p.mark_near(900, true).is_none());
+    }
+
+    #[test]
+    fn volume_automation_follows_its_points_across_block_boundaries() {
+        let mut p = Project::new(48000);
+        let src = Arc::new(Source::new(1, "dc".into(), vec![vec![0.5; 4000]]));
+        let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        p.add_clip(ti, src, 0);
+        p.tracks[0].pan = -1.0;
+        let flat = p.render(0, 4000, None).0;
+        p.tracks[0].auto_set(1000, 0.0);
+        p.tracks[0].auto_set(2000, -20.0);
+        p.tracks[0].auto_set(1000, 0.0);
+        assert_eq!(p.tracks[0].auto.len(), 2);
+        let a = p.render(0, 4000, None).0;
+        assert!((a[500] - flat[500]).abs() < 1e-6, "held before the first point");
+        assert!((a[1500] / flat[1500] - 10f32.powf(-10.0 / 20.0)).abs() < 1e-3, "halfway: -10 dB");
+        assert!((a[3500] / flat[3500] - 0.1).abs() < 1e-3, "held after the last point");
+        // the same result when rendered in small blocks
+        let mut l = vec![0.0f32; 4000];
+        let mut at = 0;
+        for n in [300usize, 777, 1, 1500, 1422] {
+            let (mut bl, mut br) = (vec![0.0f32; n], vec![0.0f32; n]);
+            p.mix(at as i64, &mut bl, &mut br, None, &mut [[0.0; 2]]);
+            l[at..at + n].copy_from_slice(&bl);
+            at += n;
+        }
+        assert!(l.iter().zip(&a).all(|(x, y)| (x - y).abs() < 1e-5));
+        assert!(p.tracks[0].auto_set(5, 99.0).is_some() && p.tracks[0].auto[0].1 == AUTO_RANGE.1);
     }
 
     #[test]

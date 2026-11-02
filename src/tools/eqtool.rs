@@ -281,6 +281,11 @@ impl Tool for EqTool {
             b(ui, 1, "Biquads", "Coefficients for the chosen sample rate", "Export biquad coefficients", "CSV", &["csv"], "eq_biquads.csv", self);
             b(ui, 2, "FIR linear", "Linear-phase FIR WAV (latency of half the taps)", "Export FIR", "WAV", &["wav"], "eq_fir_linear.wav", self);
             b(ui, 3, "FIR min-phase", "Minimum-phase FIR WAV (least delay)", "Export FIR", "WAV", &["wav"], "eq_fir_minphase.wav", self);
+            if cx.graph_on && ui.add_enabled(has, egui::Button::new("Send to routing")).on_hover_text("Put these filters into an equaliser node of the routing graph (the selected one, the first one, or a new one in front of the output) and listen to the correction").clicked() {
+                let bands: Vec<[f32; 3]> = self.filts.iter().map(|f| [f.f, f.gain, f.q]).collect();
+                *crate::graph::bus().eq_send.lock() = Some((bands, -eq::peak_boost(&self.filts, self.design_sr())));
+                cx.req.note = Some("EQ filters sent to the routing graph".into());
+            }
         });
         ui.label(RichText::new("Low frequencies need long FIRs: 8192 taps or more at 48 kHz for filters below 100 Hz. Correct only what the room does at one position of the microphone: cuts of peaks work, boosts of nulls do not.").small().weak());
     }

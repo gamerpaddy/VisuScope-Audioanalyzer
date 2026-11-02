@@ -596,6 +596,25 @@ impl Daw {
         if key(none, Key::L) {
             self.loop_on = !self.loop_on;
         }
+        // K: a marker at the playhead, or a region over the selected range; [ and ]: previous / next marker
+        if key(none, Key::K) {
+            self.checkpoint(p);
+            match self.range.filter(|r| r.1 > r.0) {
+                Some((a, b)) => p.add_mark(a, b - a, None),
+                None => p.add_mark(self.pos(), 0, None),
+            };
+            self.touch();
+        }
+        if key(none, Key::OpenBracket) {
+            if let Some(f) = p.mark_near(self.pos(), false).map(|m| m.at) {
+                self.seek(f);
+            }
+        }
+        if key(none, Key::CloseBracket) {
+            if let Some(f) = p.mark_near(self.pos(), true).map(|m| m.at) {
+                self.seek(f);
+            }
+        }
         if key(none, Key::M) {
             self.act_clip_prop(p, |c| c.muted = !c.muted);
         }
@@ -802,8 +821,13 @@ impl Daw {
         }
         if lane_resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
+                let auto_grab = self.auto_hit(p, &view, &rows, pos);
+                if let Some(g) = auto_grab {
+                    self.checkpoint(p);
+                    self.auto_drag = Some(g);
+                }
                 // a clip has to be selected (clicked) first; dragging an unselected one selects a time range instead
-                match self.hit(p, &view, &rows, pos).filter(|k| self.sel.contains(&p.tracks[k.ti].clips[k.ci].id)) {
+                match self.hit(p, &view, &rows, pos).filter(|k| auto_grab.is_none() && self.sel.contains(&p.tracks[k.ti].clips[k.ci].id)) {
                     Some(h) => {
                         let id = p.tracks[h.ti].clips[h.ci].id;
                         self.sel_track = Some(p.tracks[h.ti].id);
@@ -815,6 +839,7 @@ impl Daw {
                         };
                         self.drag = Some(ClipDrag { kind: h.kind, press_frame: view.frame(pos.x), press_track: h.ti, grab: id, orig });
                     }
+                    None if auto_grab.is_some() => {}
                     None => {
                         let f = view.frame(pos.x);
                         let pts = self.snap_points(p, &[]);
@@ -828,7 +853,18 @@ impl Daw {
         }
         if lane_resp.dragged() {
             if let Some(ptr) = lane_resp.interact_pointer_pos() {
-                if let Some(d) = self.drag.take() {
+                if let Some((ti, pt)) = self.auto_drag {
+                    // a point of the volume automation: along the time axis between its neighbours, and in level
+                    if let Some(t) = p.tracks.get_mut(ti).filter(|t| pt < t.auto.len()) {
+                        let lo = if pt > 0 { t.auto[pt - 1].0 + 1 } else { 0 };
+                        let hi = if pt + 1 < t.auto.len() { t.auto[pt + 1].0 - 1 } else { i64::MAX / 4 };
+                        let fr = self.snap_to(&view, &[], view.frame(ptr.x), alt).clamp(lo, hi.max(lo));
+                        let row = rows[ti];
+                        let u = ((row.bottom() - 4.0 - ptr.y) / (row.height() - 8.0).max(1.0)).clamp(0.0, 1.0);
+                        t.auto[pt] = (fr, (AUTO_RANGE.0 + u * (AUTO_RANGE.1 - AUTO_RANGE.0)).clamp(AUTO_RANGE.0, AUTO_RANGE.1));
+                        self.touch();
+                    }
+                } else if let Some(d) = self.drag.take() {
                     self.update_clip_drag(p, &view, &rows, &d, ptr, alt);
                     self.drag = Some(d);
                 } else if let Some(a) = self.range_anchor {
@@ -845,6 +881,7 @@ impl Daw {
             }
         }
         if lane_resp.drag_stopped() {
+            self.auto_drag = None;
             self.drag = None;
             self.range_anchor = None;
         }
@@ -876,7 +913,18 @@ impl Daw {
         }
         if lane_resp.double_clicked() {
             if let Some(pos) = lane_resp.interact_pointer_pos() {
-                if let Some(h) = self.hit(p, &view, &rows, pos) {
+                // while a track's automation is edited, a double-click on its lane makes a new point
+                let on_auto = self.auto_edit.and_then(|id| p.track_index(id)).filter(|&ti| pos.y >= rows[ti].top() && pos.y < rows[ti].bottom());
+                if let Some(ti) = on_auto {
+                    if self.auto_hit(p, &view, &rows, pos).is_none() {
+                        self.checkpoint(p);
+                        let row = rows[ti];
+                        let u = ((row.bottom() - 4.0 - pos.y) / (row.height() - 8.0).max(1.0)).clamp(0.0, 1.0);
+                        let fr = self.snap_to(&view, &self.snap_points(p, &[]), view.frame(pos.x), alt).max(0);
+                        p.tracks[ti].auto_set(fr, AUTO_RANGE.0 + u * (AUTO_RANGE.1 - AUTO_RANGE.0));
+                        self.touch();
+                    }
+                } else if let Some(h) = self.hit(p, &view, &rows, pos) {
                     let c = &p.tracks[h.ti].clips[h.ci];
                     self.range = Some((c.start, c.end()));
                     self.sel.clear();
@@ -886,7 +934,8 @@ impl Daw {
         }
         if lane_resp.secondary_clicked() {
             if let Some(pos) = lane_resp.interact_pointer_pos() {
-                self.ctx_clip = self.hit(p, &view, &rows, pos).map(|h| p.tracks[h.ti].clips[h.ci].id);
+                self.auto_ctx = self.auto_hit(p, &view, &rows, pos);
+                self.ctx_clip = if self.auto_ctx.is_some() { None } else { self.hit(p, &view, &rows, pos).map(|h| p.tracks[h.ti].clips[h.ci].id) };
                 if let Some(id) = self.ctx_clip {
                     if !self.sel.contains(&id) {
                         self.sel.clear();
@@ -900,7 +949,17 @@ impl Daw {
             }
         }
         lane_resp.context_menu(|ui| {
-            if self.ctx_clip.is_some() {
+            if let Some((ti, pt)) = self.auto_ctx {
+                if ui.button("Delete this automation point").clicked() {
+                    self.checkpoint(p);
+                    if ti < p.tracks.len() && pt < p.tracks[ti].auto.len() {
+                        p.tracks[ti].auto.remove(pt);
+                    }
+                    self.auto_ctx = None;
+                    self.touch();
+                    ui.close();
+                }
+            } else if self.ctx_clip.is_some() {
                 self.edit_menu(ui, p);
                 if let Some(id) = self.ctx_clip {
                     ui.separator();
@@ -943,15 +1002,80 @@ impl Daw {
             }
         });
 
-        // ---- ruler interaction (seek)
+        // ---- ruler interaction (seek, markers)
         let ruler_resp = ui.interact(ruler, ui.scope_id().with("daw_ruler"), Sense::click_and_drag());
-        if ruler_resp.clicked() || ruler_resp.dragged() {
+        let mark_at = |x: f32, y: f32| -> Option<u32> {
+            if y < ruler.center().y - 2.0 {
+                return None;
+            }
+            p.marks.iter().map(|m| (m.id, (view.x(m.at) - x).abs())).filter(|(_, d)| *d <= 7.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(id, _)| id)
+        };
+        if ruler_resp.secondary_clicked() {
+            if let Some(pos) = ruler_resp.interact_pointer_pos() {
+                self.ruler_ctx = (view.frame(pos.x.max(lanes_left)).max(0), mark_at(pos.x, pos.y));
+            }
+        }
+        let on_mark = ruler_resp.interact_pointer_pos().and_then(|pos| mark_at(pos.x, pos.y));
+        if ruler_resp.clicked() && on_mark.is_some() {
+            // a click on a flag selects its region (or moves the playhead to the marker)
+            if let Some(m) = p.marks.iter().find(|m| Some(m.id) == on_mark).cloned() {
+                self.range = if m.len > 0 { Some((m.at, m.at + m.len)) } else { None };
+                self.seek(m.at);
+            }
+        } else if ruler_resp.clicked() || (ruler_resp.dragged() && on_mark.is_none()) {
             if let Some(pos) = ruler_resp.interact_pointer_pos() {
                 let pts = self.snap_points(p, &[]);
                 let f = self.snap_to(&view, &pts, view.frame(pos.x.max(lanes_left)), alt).max(0);
                 self.seek(f);
             }
         }
+        ruler_resp.context_menu(|ui| {
+            let (frame, hit) = self.ruler_ctx;
+            if ui.button("Add a marker here").clicked() {
+                self.checkpoint(p);
+                p.add_mark(frame, 0, None);
+                self.touch();
+                ui.close();
+            }
+            if ui.add_enabled(self.range.is_some_and(|r| r.1 > r.0), egui::Button::new("Add a region from the selection")).clicked() {
+                if let Some((a, b)) = self.range {
+                    self.checkpoint(p);
+                    p.add_mark(a, b - a, None);
+                    self.touch();
+                }
+                ui.close();
+            }
+            if let Some(i) = hit.and_then(|id| p.marks.iter().position(|m| m.id == id)) {
+                ui.separator();
+                let mut name = p.marks[i].name.clone();
+                if ui.add(egui::TextEdit::singleline(&mut name).desired_width(150.0)).changed() {
+                    p.marks[i].name = name.chars().take(60).collect();
+                    self.touch();
+                }
+                let m = p.marks[i].clone();
+                if m.len > 0 {
+                    if ui.button("Select and loop this region").clicked() {
+                        self.range = Some((m.at, m.at + m.len));
+                        self.loop_on = true;
+                        self.seek(m.at);
+                        ui.close();
+                    }
+                    if ui.button("Select this region").clicked() {
+                        self.range = Some((m.at, m.at + m.len));
+                        ui.close();
+                    }
+                } else if ui.button("Move the playhead here").clicked() {
+                    self.seek(m.at);
+                    ui.close();
+                }
+                if ui.button("Delete").clicked() {
+                    self.checkpoint(p);
+                    p.marks.remove(i);
+                    self.touch();
+                    ui.close();
+                }
+            }
+        });
 
         // ---- lanes
         let lane_clip = lanes_area;
@@ -979,6 +1103,9 @@ impl Daw {
             let dimmed = t.mute || (p.tracks.iter().any(|o| o.solo) && !t.solo);
             for c in &t.clips {
                 self.draw_clip(&lp, &view, lane, c, col, selected_ids.contains(&c.id), chans, t.ch_mute, dimmed);
+            }
+            if !t.auto.is_empty() || self.auto_edit == Some(t.id) {
+                self.draw_auto(&lp, &view, lane, row, t);
             }
             if recording {
                 self.draw_rec_preview(&lp, &view, lane, t);
@@ -1073,7 +1200,7 @@ impl Daw {
         }
 
         // ---- ruler (drawn last: it covers the lanes when scrolled)
-        self.draw_ruler(&painter, &view, ruler, rect);
+        self.draw_ruler(&painter, &view, ruler, rect, &p.marks);
         painter.rect_filled(Rect::from_min_max(rect.min, pos2(lanes_left - 1.0, ruler.bottom())), 0.0, Color32::from_rgb(30, 36, 48));
         painter.text(pos2(rect.left() + 8.0, ruler.center().y), Align2::LEFT_CENTER, format!("{} tracks", p.tracks.len()), FontId::proportional(10.0), Color32::from_rgb(130, 142, 160));
         painter.line_segment([pos2(lanes_left - 1.0, rect.top()), pos2(lanes_left - 1.0, rect.bottom())], Stroke::new(1.0, Color32::from_rgb(8, 10, 14)));
@@ -1178,7 +1305,48 @@ impl Daw {
         }
     }
 
-    fn draw_ruler(&self, painter: &Painter, view: &View, ruler: Rect, rect: Rect) {
+    /// The volume automation of a track: a line over its lane, with dots to drag while it is being edited.
+    fn draw_auto(&self, lp: &Painter, view: &View, lane: Rect, row: Rect, t: &Track) {
+        let editing = self.auto_edit == Some(t.id);
+        let y_of = |db: f32| row.bottom() - 4.0 - ((db - AUTO_RANGE.0) / (AUTO_RANGE.1 - AUTO_RANGE.0)).clamp(0.0, 1.0) * (row.height() - 8.0);
+        let col = Color32::from_rgb(250, 140, 200);
+        let stroke = Stroke::new(if editing { 1.8 } else { 1.2 }, col.gamma_multiply(if editing { 1.0 } else { 0.7 }));
+        if editing {
+            let y0 = y_of(0.0);
+            lp.line_segment([pos2(lane.left(), y0), pos2(lane.right(), y0)], Stroke::new(1.0, Color32::from_white_alpha(40)));
+            lp.text(pos2(lane.left() + 4.0, y0 - 2.0), Align2::LEFT_BOTTOM, "0 dB   double-click: new point, drag: move, right-click: delete", FontId::proportional(9.0), Color32::from_white_alpha(110));
+        }
+        let mut pts: Vec<Pos2> = Vec::with_capacity(t.auto.len() + 2);
+        if let Some(first) = t.auto.first() {
+            pts.push(pos2(lane.left(), y_of(first.1)));
+        }
+        for (f, d) in &t.auto {
+            pts.push(pos2(view.x(*f), y_of(*d)));
+        }
+        if let Some(last) = t.auto.last() {
+            pts.push(pos2(lane.right(), y_of(last.1)));
+        }
+        if pts.len() >= 2 {
+            lp.add(Shape::line(pts, stroke));
+        }
+        if editing {
+            for (f, d) in &t.auto {
+                lp.circle_filled(pos2(view.x(*f), y_of(*d)), 4.0, col);
+                lp.circle_stroke(pos2(view.x(*f), y_of(*d)), 4.0, Stroke::new(1.0, Color32::BLACK));
+            }
+        }
+    }
+
+    /// The automation point of the edited track under a position (track index, point index).
+    fn auto_hit(&self, p: &Project, view: &View, rows: &[Rect], pos: Pos2) -> Option<(usize, usize)> {
+        let ti = self.auto_edit.and_then(|id| p.track_index(id))?;
+        let row = *rows.get(ti)?;
+        let t = &p.tracks[ti];
+        let y_of = |db: f32| row.bottom() - 4.0 - ((db - AUTO_RANGE.0) / (AUTO_RANGE.1 - AUTO_RANGE.0)).clamp(0.0, 1.0) * (row.height() - 8.0);
+        t.auto.iter().enumerate().map(|(i, (f, d))| (i, (view.x(*f) - pos.x).hypot(y_of(*d) - pos.y))).filter(|(_, dist)| *dist <= 9.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| (ti, i))
+    }
+
+    fn draw_ruler(&self, painter: &Painter, view: &View, ruler: Rect, rect: Rect, marks: &[Mark]) {
         painter.rect_filled(ruler, 0.0, Color32::from_rgb(26, 31, 42));
         let rp = painter.with_clip_rect(ruler);
         let step = time_step(80.0 / view.pps);
@@ -1204,6 +1372,24 @@ impl Daw {
             let (a, b) = self.range.unwrap_or((0, 0));
             if b > a {
                 rp.rect_filled(Rect::from_min_max(pos2(view.x(a), ruler.top()), pos2(view.x(b), ruler.top() + 3.0)), 0.0, Color32::from_rgb(110, 200, 140));
+            }
+        }
+        for (i, m) in marks.iter().enumerate() {
+            let col = Color32::from_rgb(255, 196, 80);
+            let x = view.x(m.at);
+            if m.len > 0 {
+                let x2 = view.x(m.at + m.len);
+                rp.rect_filled(Rect::from_min_max(pos2(x, ruler.bottom() - 5.0), pos2(x2, ruler.bottom())), 0.0, col.gamma_multiply(0.55));
+                rp.line_segment([pos2(x, ruler.bottom() - 11.0), pos2(x, ruler.bottom())], Stroke::new(1.5, col));
+                rp.line_segment([pos2(x2, ruler.bottom() - 11.0), pos2(x2, ruler.bottom())], Stroke::new(1.0, col.gamma_multiply(0.7)));
+            } else {
+                rp.add(Shape::convex_polygon(vec![pos2(x, ruler.bottom()), pos2(x - 4.0, ruler.bottom() - 8.0), pos2(x + 4.0, ruler.bottom() - 8.0)], col, Stroke::NONE));
+                rp.line_segment([pos2(x, ruler.bottom() - 8.0), pos2(x, ruler.top() + 11.0)], Stroke::new(1.0, col.gamma_multiply(0.6)));
+            }
+            // the name goes where there is room: up to the next mark
+            let next_x = marks.get(i + 1).map(|n| view.x(n.at)).unwrap_or(f32::MAX);
+            if next_x - x > 36.0 {
+                rp.with_clip_rect(Rect::from_min_max(pos2(x + 3.0, ruler.top()), pos2(next_x.min(ruler.right()) - 2.0, ruler.bottom()))).text(pos2(x + 6.0, ruler.bottom() - 11.0), Align2::LEFT_TOP, &m.name, FontId::proportional(9.0), col);
             }
         }
         let px = view.x(self.pos());
@@ -1365,6 +1551,18 @@ impl Daw {
             self.click_track(ui, id);
         }
         bg_resp.context_menu(|ui| {
+            let mut editing = self.auto_edit == Some(id);
+            if ui.checkbox(&mut editing, "Edit volume automation").on_hover_text("Draw level changes over time on this track's lane: double-click adds a point, drag moves it, right-click deletes it. The level is added to the fader.").changed() {
+                self.auto_edit = if editing { Some(id) } else { None };
+                ui.close();
+            }
+            if !p.tracks[ti].auto.is_empty() && ui.button("Clear the automation").clicked() {
+                self.checkpoint(p);
+                p.tracks[ti].auto.clear();
+                self.touch();
+                ui.close();
+            }
+            ui.separator();
             if ui.button("Rename").clicked() {
                 self.renaming = Some((id, p.tracks[ti].name.clone()));
                 ui.close();
@@ -1555,6 +1753,11 @@ impl Daw {
                 if ch1 || ch2 {
                     p.tracks[ti].vol_db = t.vol_db;
                     p.tracks[ti].pan = t.pan;
+                    self.touch();
+                }
+                let inv = p.tracks[ti].invert;
+                if mini_toggle(ui, "Ø", inv, Color32::from_rgb(250, 140, 200), "Invert the waveform (polarity) of this track") {
+                    p.tracks[ti].invert = !inv;
                     self.touch();
                 }
                 if p.tracks[ti].clips.iter().any(|c| c.src.stereo()) {
