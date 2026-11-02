@@ -6,6 +6,8 @@ use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, CursorIcon, FontId,
 
 const HEADER_W: f32 = 178.0;
 const RULER_H: f32 = 22.0;
+/// Height of the upper bar of a track row: a click there selects, a click below it (in the waveform) places the playback cursor.
+const TRACK_BAR_H: f32 = 18.0;
 const ADD_ROW_H: f32 = 34.0;
 const BG_DARK: Color32 = Color32::from_rgb(14, 17, 22);
 const LANE_A: Color32 = Color32::from_rgb(20, 24, 31);
@@ -163,11 +165,11 @@ fn draw_icon(ui: &mut Ui, icon: SliderIcon) {
     });
 }
 
-fn meter_bar(p: &Painter, r: Rect, level: f32) {
+fn meter_bar(p: &Painter, r: Rect, level: f32, red: bool) {
     p.rect_filled(r, 1.0, Color32::from_gray(30));
     let db = 20.0 * level.max(1e-6).log10();
     let t = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-    let col = if db > -1.0 { Color32::from_rgb(235, 70, 70) } else if db > -12.0 { Color32::from_rgb(230, 190, 60) } else { Color32::from_rgb(70, 200, 120) };
+    let col = if db > -1.0 && red { Color32::from_rgb(235, 70, 70) } else if db > -12.0 { Color32::from_rgb(230, 190, 60) } else { Color32::from_rgb(70, 200, 120) };
     p.rect_filled(Rect::from_min_size(pos2(r.left(), r.bottom() - r.height() * t), vec2(r.width(), r.height() * t)), 1.0, col);
 }
 
@@ -289,6 +291,7 @@ impl Daw {
                 self.loop_on = !self.loop_on;
             }
             ui.toggle_value(&mut self.follow, "Follow").on_hover_text("Scroll the view with the playhead");
+            ui.toggle_value(&mut self.show_clip, "Clip").on_hover_text("Show samples above full scale in red on the waveforms and in the track meters (switch off to see the plain waveform)");
             ui.toggle_value(&mut self.snap, "Snap").on_hover_text("Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Shift to move freely)");
             ui.separator();
             if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last timeline edit (Ctrl+Z)").clicked() {
@@ -887,9 +890,20 @@ impl Daw {
         }
         if lane_resp.clicked() {
             if let Some(pos) = lane_resp.interact_pointer_pos() {
+                let on_row = rows.iter().position(|r| pos.y >= r.top() && pos.y < r.bottom());
+                // the upper bar of a track (the clip's name strip) selects; the waveform below it places the playback cursor
+                let in_bar = on_row.is_some_and(|ti| pos.y < rows[ti].top() + TRACK_BAR_H);
                 match self.hit(p, &view, &rows, pos) {
                     // a click on an automation point of the edited track is not a click on the clip below it
                     _ if self.auto_hit(p, &view, &rows, pos).is_some() => {}
+                    _ if on_row.is_some() && !in_bar => {
+                        let pts = self.snap_points(p, &[]);
+                        let f = self.snap_to(&view, &pts, view.frame(pos.x), alt).max(0);
+                        self.seek(f);
+                        if !shift {
+                            self.range = None;
+                        }
+                    }
                     Some(h) => {
                         let id = p.tracks[h.ti].clips[h.ci].id;
                         if shift {
@@ -903,7 +917,7 @@ impl Daw {
                         self.sel_track = Some(p.tracks[h.ti].id);
                     }
                     None => {
-                        // the playback cursor is placed in the ruler above, not by clicking in the tracks
+                        // the upper bar of an empty stretch of a track, or the space below the tracks
                         if !shift {
                             self.sel.clear();
                             self.range = None;
@@ -1217,8 +1231,9 @@ impl Daw {
             );
         }
         // a white guide line where the ruler would put the playback cursor
+        let over_wave = |h: Pos2| rows.iter().any(|r| h.y >= r.top() + TRACK_BAR_H && h.y < r.bottom());
         if let (Some(h), None) = (hover, &self.drag) {
-            if lanes_area.contains(h) && self.range_anchor.is_none() {
+            if lanes_area.contains(h) && self.range_anchor.is_none() && over_wave(h) {
                 let pts = self.snap_points(p, &[]);
                 let f = self.snap_to(&view, &pts, view.frame(h.x), alt).max(0);
                 let x = view.x(f);
@@ -1228,7 +1243,7 @@ impl Daw {
         }
         // hover readout
         if let (Some(h), None) = (hover, &self.drag) {
-            if lanes_area.contains(h) {
+            if lanes_area.contains(h) && over_wave(h) {
                 let t = view.frame(h.x).max(0) as f64 / sr;
                 painter.text(pos2(h.x + 8.0, ruler.bottom() + 2.0), Align2::LEFT_TOP, clock(t as f32), FontId::monospace(9.5), Color32::from_white_alpha(120));
             }
@@ -1449,7 +1464,7 @@ impl Daw {
                     let y1 = (mid - (lo * g).clamp(-1.0, 1.0) * half).max(y0 + 1.0);
                     let over = hi * g > 1.0 || -lo * g > 1.0;
                     let silent = ch.is_some_and(|c| chm[c]);
-                    shapes.push(Shape::line_segment([pos2(x + 0.5, y0), pos2(x + 0.5, y1)], Stroke::new(1.0, if silent { Color32::from_gray(80) } else if over && !off { Color32::from_rgb(255, 90, 90) } else { wave_col })));
+                    shapes.push(Shape::line_segment([pos2(x + 0.5, y0), pos2(x + 0.5, y1)], Stroke::new(1.0, if silent { Color32::from_gray(80) } else if over && !off && self.show_clip { Color32::from_rgb(255, 90, 90) } else { wave_col })));
                 }
             }
             x += 1.0;
@@ -1789,8 +1804,8 @@ impl Daw {
             self.out_level.get(ti).copied().unwrap_or([0.0; 2])
         };
         let mh = hr.height() - 8.0;
-        meter_bar(&painter, Rect::from_min_size(pos2(hr.right() - 10.0, hr.top() + 4.0), vec2(3.0, mh)), lv[0]);
-        meter_bar(&painter, Rect::from_min_size(pos2(hr.right() - 6.0, hr.top() + 4.0), vec2(3.0, mh)), lv[1]);
+        meter_bar(&painter, Rect::from_min_size(pos2(hr.right() - 10.0, hr.top() + 4.0), vec2(3.0, mh)), lv[0], self.show_clip);
+        meter_bar(&painter, Rect::from_min_size(pos2(hr.right() - 6.0, hr.top() + 4.0), vec2(3.0, mh)), lv[1], self.show_clip);
         painter.line_segment([pos2(hr.left(), hr.bottom()), pos2(hr.right(), hr.bottom())], Stroke::new(1.0, Color32::from_rgb(8, 10, 14)));
     }
 

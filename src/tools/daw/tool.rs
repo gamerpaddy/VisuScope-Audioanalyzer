@@ -49,6 +49,7 @@ impl Tool for Daw {
 
     fn save(&self, o: &mut SettingsOut) {
         o.put("snap", self.snap);
+        o.put("show_clip", self.show_clip);
         o.put("follow", self.follow);
         o.put("loop", self.loop_on);
         o.put("analysis", self.an_open);
@@ -63,6 +64,7 @@ impl Tool for Daw {
 
     fn load(&mut self, i: &SettingsIn) {
         i.set("snap", &mut self.snap);
+        i.set("show_clip", &mut self.show_clip);
         i.set("follow", &mut self.follow);
         i.set("loop", &mut self.loop_on);
         i.set("analysis", &mut self.an_open);

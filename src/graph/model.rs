@@ -120,7 +120,7 @@ const P_MIXER: &[ParamDef] = &[
     s("Mute 1", 0.0, 1.0, 0.0, ""), s("Mute 2", 0.0, 1.0, 0.0, ""), s("Mute 3", 0.0, 1.0, 0.0, ""), s("Mute 4", 0.0, 1.0, 0.0, ""),
     s("Mute 5", 0.0, 1.0, 0.0, ""), s("Mute 6", 0.0, 1.0, 0.0, ""), s("Mute 7", 0.0, 1.0, 0.0, ""), s("Mute 8", 0.0, 1.0, 0.0, ""),
 ];
-const P_OUTPUT: &[ParamDef] = &[s("Gain", -60.0, 12.0, 0.0, " dB"), c("Mute", 0, &["on", "muted"])];
+const P_OUTPUT: &[ParamDef] = &[s("Gain", -60.0, 12.0, 0.0, " dB"), c("Mute", 0, &["on", "muted"]), c("Input", 0, &["Stereo pair", "Separate L / R"])];
 
 pub struct KindInfo {
     pub name: &'static str,
@@ -292,6 +292,8 @@ impl Node {
     pub fn inputs(&self) -> usize {
         match self.kind {
             Kind::Mixer => (self.p.first().copied().unwrap_or(4.0).round() as usize).clamp(1, MIX_MAX),
+            // an output can take a stereo pair, or the two channels one by one (each input made mono, like a merge node)
+            Kind::Output if self.param(2).round() as usize == 1 => 2,
             k => k.info().inputs,
         }
     }
@@ -372,6 +374,44 @@ impl Graph {
     pub fn remove(&mut self, id: NodeId) {
         self.nodes.retain(|n| n.id != id);
         self.edges.retain(|e| e.from != id && e.to != id);
+    }
+
+    /// Remove a node; an effect with one input and one output is cut out of its line: whatever fed it is connected straight to
+    /// whatever it fed (where that is possible; the other kinds of node just leave their connections).
+    pub fn remove_bridged(&mut self, id: NodeId) {
+        let one_in_one_out = self.node(id).is_some_and(|n| n.kind.info().inputs == 1 && n.kind.info().outputs == 1);
+        let incoming = if one_in_one_out { self.edge_into(id, 0).copied() } else { None };
+        let outgoing: Vec<Edge> = self.edges.iter().filter(|e| e.from == id).copied().collect();
+        self.remove(id);
+        if let Some(i) = incoming {
+            for o in outgoing {
+                let _ = self.connect_from(i.from, i.from_port, o.to, o.port);
+            }
+        }
+    }
+
+    /// Put a split node into the line that feeds `port` of `to`: the left channel goes on to `to`, the right output is free
+    /// to be connected anywhere. Returns the new node.
+    pub fn split_wire(&mut self, to: NodeId, port: u8, x: f32, y: f32) -> Option<NodeId> {
+        let e = *self.edge_into(to, port)?;
+        let s = self.add(Kind::Split, x, y);
+        if self.connect_from(e.from, e.from_port, s, 0).is_err() || self.connect_from(s, 0, to, port).is_err() {
+            self.remove(s);
+            // the old line is still there if the new one could not be made
+            let _ = self.connect_from(e.from, e.from_port, to, port);
+            return None;
+        }
+        Some(s)
+    }
+
+    /// A split node on an output, next to the lines that already leave it (they stay).
+    pub fn split_output(&mut self, from: NodeId, from_port: u8, x: f32, y: f32) -> Option<NodeId> {
+        let s = self.add(Kind::Split, x, y);
+        if self.connect_from(from, from_port, s, 0).is_err() {
+            self.remove(s);
+            return None;
+        }
+        Some(s)
     }
 
     /// Edge feeding `port` of `to`.
@@ -570,6 +610,88 @@ mod tests {
         // fan-out is fine
         g.connect(b, f2, 0).unwrap();
         assert_eq!(g.edges.iter().filter(|e| e.from == b).count(), 2);
+    }
+
+    #[test]
+    fn deleting_an_effect_joins_what_fed_it_to_what_it_fed() {
+        let mut g = Graph::default();
+        let (a, e1, e2, o1, o2, mx) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Gain, 0.0, 0.0), g.add(Kind::Eq, 0.0, 0.0), g.add(Kind::Output, 0.0, 0.0), g.add(Kind::Analyzer, 0.0, 0.0), g.add(Kind::Mixer, 0.0, 0.0));
+        g.connect(a, e1, 0).unwrap();
+        g.connect(e1, e2, 0).unwrap();
+        g.connect(e2, o1, 0).unwrap();
+        g.connect(e2, o2, 0).unwrap();
+        g.remove_bridged(e2);
+        assert!(g.node(e2).is_none());
+        assert_eq!(g.edge_into(o1, 0).map(|e| e.from), Some(e1));
+        assert_eq!(g.edge_into(o2, 0).map(|e| e.from), Some(e1));
+        g.remove_bridged(e1);
+        assert_eq!(g.edge_into(o1, 0).map(|e| e.from), Some(a));
+        assert_eq!(g.edge_into(o2, 0).map(|e| e.from), Some(a));
+        // the first effect of a chain has nothing to take over: the line just ends
+        let e3 = g.add(Kind::Gain, 0.0, 0.0);
+        g.connect(e3, o1, 0).unwrap();
+        g.remove_bridged(e3);
+        assert!(g.edge_into(o1, 0).is_none());
+        // a source, a sink and a mixer are removed without bridging (a mixer has several inputs)
+        g.connect(a, mx, 0).unwrap();
+        g.connect(mx, o1, 0).unwrap();
+        g.remove_bridged(mx);
+        assert!(g.edge_into(o1, 0).is_none() && g.node(mx).is_none());
+        g.remove_bridged(o2);
+        g.remove_bridged(a);
+        assert!(g.edges.is_empty());
+        // a port that already had another line keeps the line that was bridged in (a port takes one connection)
+        let (s1, f, m2) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Gain, 0.0, 0.0), g.add(Kind::Mixer, 0.0, 0.0));
+        g.connect(s1, f, 0).unwrap();
+        g.connect(f, m2, 2).unwrap();
+        g.remove_bridged(f);
+        assert_eq!(g.edge_into(m2, 2).map(|e| e.from), Some(s1));
+    }
+
+    #[test]
+    fn splitting_a_line_and_an_output_into_channels() {
+        let mut g = Graph::default();
+        let (a, f, o) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Gain, 0.0, 0.0), g.add(Kind::Analyzer, 0.0, 0.0));
+        g.connect(a, f, 0).unwrap();
+        g.connect(f, o, 0).unwrap();
+        // in the middle of a line: source -> split -> (left) -> target, the right output is free
+        let s = g.split_wire(o, 0, 5.0, 5.0).unwrap();
+        assert_eq!(g.node(s).unwrap().kind, Kind::Split);
+        assert_eq!(g.edge_into(s, 0).map(|e| (e.from, e.from_port)), Some((f, 0)));
+        assert_eq!(g.edge_into(o, 0).map(|e| (e.from, e.from_port)), Some((s, 0)));
+        assert!(!g.edges.iter().any(|e| e.from == s && e.from_port == 1));
+        // no line, nothing to split
+        let lone = g.add(Kind::Output, 0.0, 0.0);
+        assert!(g.split_wire(lone, 0, 0.0, 0.0).is_none());
+        let n = g.nodes.len();
+        // an output: the old lines stay
+        let s2 = g.split_output(a, 0, 1.0, 1.0).unwrap();
+        assert_eq!(g.edge_into(s2, 0).map(|e| e.from), Some(a));
+        assert!(g.edges.iter().any(|e| e.from == a && e.to == f));
+        assert_eq!(g.nodes.len(), n + 1);
+        // a node without an output cannot be split
+        assert!(g.split_output(o, 0, 0.0, 0.0).is_none());
+        assert_eq!(g.nodes.len(), n + 1, "the failed attempt leaves no node behind");
+    }
+
+    #[test]
+    fn an_output_takes_a_stereo_pair_or_two_single_channels() {
+        let mut g = Graph::default();
+        let (a, sp, out) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Split, 0.0, 0.0), g.add(Kind::Output, 0.0, 0.0));
+        g.connect(a, sp, 0).unwrap();
+        assert_eq!(g.node(out).unwrap().inputs(), 1);
+        assert!(g.connect_from(sp, 1, out, 1).is_err(), "a stereo output has one input");
+        g.node_mut(out).unwrap().p[2] = 1.0;
+        assert_eq!(g.node(out).unwrap().inputs(), 2);
+        g.connect_from(sp, 0, out, 0).unwrap();
+        g.connect_from(sp, 1, out, 1).unwrap();
+        // it survives the text format, and an old file (two parameters) still loads as a stereo output
+        let h = Graph::decode(&g.encode()).unwrap();
+        assert_eq!(h.node(out).unwrap().inputs(), 2);
+        assert_eq!(h.edges.len(), g.edges.len());
+        let old = Graph::decode("VSGRAPH 1\nnode 1|out|0|0|0||0,0\n").unwrap();
+        assert_eq!(old.node(1).unwrap().inputs(), 1);
+        assert_eq!(old.node(1).unwrap().p.len(), 3);
     }
 
     #[test]

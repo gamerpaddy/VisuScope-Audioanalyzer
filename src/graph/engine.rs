@@ -106,8 +106,21 @@ pub struct Meter {
     pub extra: f32,
 }
 
+/// What the listening probe of the node editor hears: the signal at an input port of a node (the one that feeds it) or at an output port.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Probe {
+    pub node: NodeId,
+    pub input: bool,
+    pub port: u8,
+}
+
 pub struct Engine {
     pub graph: Mutex<Graph>,
+    /// the listening probe: where it listens, its volume (linear gain, shared with the output stream) and whether the normal
+    /// outputs are silent while it listens
+    pub probe: Mutex<Option<Probe>>,
+    pub probe_gain: Arc<AtomicU32>,
+    pub probe_solo: AtomicBool,
     pub rev: AtomicU64,
     pub active: AtomicBool,
     pub quit: AtomicBool,
@@ -130,6 +143,9 @@ impl Engine {
     fn bare(sh: Arc<Shared>, gens: Arc<Mutex<Vec<GenParams>>>) -> Arc<Engine> {
         Arc::new(Engine {
             graph: Mutex::new(Graph::default()),
+            probe: Mutex::new(None),
+            probe_gain: Arc::new(AtomicU32::new(0.5f32.to_bits())),
+            probe_solo: AtomicBool::new(true),
             rev: AtomicU64::new(1),
             active: AtomicBool::new(false),
             quit: AtomicBool::new(false),
@@ -247,6 +263,14 @@ struct Run {
     gen_buf: Vec<f32>,
     /// what the devices delivered since the last pass (kept between passes, see `Capture::tap_drain_into`)
     drain: HashMap<String, Vec<Vec<f32>>>,
+    /// the listening probe: its own output stream (kept open for a few seconds after the last hover), the queue that feeds it,
+    /// where it listened last and when it was last wanted
+    probe_q: Arc<Mutex<Queue>>,
+    probe_out: Option<(monitor::Handle, String)>,
+    probe_last: Option<Probe>,
+    probe_idle: Instant,
+    probe_status: Arc<Mutex<String>>,
+    probe_buf: [Vec<f32>; 2],
 }
 
 fn blank() -> [Vec<f32>; 2] {
@@ -272,6 +296,12 @@ impl Run {
             gens: Vec::new(),
             gen_buf: vec![0.0; CHUNK * 2],
             drain: HashMap::new(),
+            probe_q: Arc::new(Mutex::new(Queue::default())),
+            probe_out: None,
+            probe_last: None,
+            probe_idle: Instant::now(),
+            probe_status: Arc::new(Mutex::new(String::new())),
+            probe_buf: blank(),
         }
     }
 
@@ -324,6 +354,7 @@ impl Run {
     }
 
     fn shutdown(&mut self) {
+        self.probe_out = None;
         self.nodes.clear();
         self.caps.clear();
         self.master = None;
@@ -496,7 +527,16 @@ impl Run {
             self.e.rate.store(rate, Relaxed);
             self.claim_ring();
         }
-        let live = g.live();
+        let mut live = g.live();
+        if let Some(p) = *self.e.probe.lock() {
+            let (mut stack, mut seen) = (vec![p.node], HashSet::new());
+            while let Some(n) = stack.pop() {
+                if seen.insert(n) {
+                    live.insert(n);
+                    stack.extend(g.edges.iter().filter(|e| e.to == n).map(|e| e.from));
+                }
+            }
+        }
         let mut old: HashMap<NodeId, RtNode> = self.nodes.drain(..).map(|n| (n.id, n)).collect();
         let mut idx: HashMap<NodeId, usize> = HashMap::new();
         let mut nodes: Vec<RtNode> = Vec::new();
@@ -598,6 +638,25 @@ impl Run {
         if sh.ring_owner.load(Relaxed) == 3 && sh.sr.load(Relaxed) != self.rate {
             sh.sr.store(self.rate, Relaxed);
             sh.chans.store(2, Relaxed);
+        }
+        // the listening probe: its stream follows the first output node's device and stays open a few seconds after the last hover
+        {
+            let probe = *self.e.probe.lock();
+            if probe != self.probe_last {
+                self.probe_q.lock().flush();
+                self.probe_last = probe;
+            }
+            if probe.is_some() {
+                self.probe_idle = Instant::now();
+                let dev = bus().first_out.lock().clone();
+                if self.probe_out.as_ref().is_none_or(|(_, d)| *d != dev) {
+                    self.probe_q.lock().flush();
+                    let h = monitor::start(self.probe_q.clone(), self.e.probe_gain.clone(), Some(dev.clone()).filter(|d| !d.is_empty()), self.probe_status.clone());
+                    self.probe_out = Some((h, dev));
+                }
+            } else if self.probe_out.is_some() && self.probe_idle.elapsed() > Duration::from_secs(3) {
+                self.probe_out = None;
+            }
         }
         // impulse responses that finished loading
         for n in self.nodes.iter_mut() {
@@ -769,6 +828,9 @@ impl Run {
         let rate = self.rate;
         let safety = crate::prof::safety_ms() as usize;
         let prime = rate as usize * (25 + safety) / 1000;
+        let probe = *self.e.probe.lock();
+        let probe_at = probe.and_then(|p| self.nodes.iter().position(|n| n.id == p.node).map(|i| (i, p)));
+        let mute_outputs = probe_at.is_some() && self.e.probe_solo.load(Relaxed);
         for i in 0..self.nodes.len() {
             let (before, rest) = self.nodes.split_at_mut(i);
             let node = &mut rest[0];
@@ -855,21 +917,20 @@ impl Run {
                     }
                 }
                 Rt::Out { q, gain, mute, band, buf, .. } => {
-                    let (a, b) = inp.map(|b| (&b[0][..n], &b[1][..n])).unwrap_or((&ZERO[..n], &ZERO[..n]));
-                    if inp.is_some() && !*mute {
-                        // scratch buffers of the node: nothing is allocated per block
-                        let [bl, br] = buf;
-                        for (dst, src) in [(&mut *bl, a), (&mut *br, b)] {
-                            for (d, s) in dst[..n].iter_mut().zip(src) {
-                                *d = *s * *gain;
-                            }
-                        }
+                    // scratch buffers of the node: nothing is allocated per block
+                    let [bl, br] = buf;
+                    let separate = node.src.len() == 2;
+                    let port = |k: usize| node.src.get(k).copied().flatten().map(|(s, sp)| outbuf(&before[s], sp));
+                    let have = gather_out(inp, port(0), port(1), separate, n, bl, br);
+                    node.peak = peak2(&bl[..n], &br[..n], node.peak);
+                    if have && !*mute && !mute_outputs {
+                        bl[..n].iter_mut().for_each(|v| *v *= *gain);
+                        br[..n].iter_mut().for_each(|v| *v *= *gain);
                         band.process(&mut bl[..n], &mut br[..n], rate as f32);
                         let mut q = q.lock();
                         q.src_sr = rate;
                         q.push(&bl[..n], &br[..n]);
                     }
-                    node.peak = peak2(a, b, node.peak);
                     continue;
                 }
                 Rt::Rec { id } => {
@@ -946,6 +1007,24 @@ impl Run {
             }
             node.peak = peak2(&o0[..n], &o1[..n], node.peak);
         }
+        if let Some((i, p)) = probe_at {
+            let node = &self.nodes[i];
+            let src: Option<&[Vec<f32>; 2]> = if p.input { node.src.get(p.port as usize).copied().flatten().map(|(s, sp)| outbuf(&self.nodes[s], sp)) } else if node.kind.info().outputs > 0 { Some(outbuf(node, p.port)) } else { None };
+            let [pl, pr] = &mut self.probe_buf;
+            match src {
+                Some(b) => {
+                    pl[..n].copy_from_slice(&b[0][..n]);
+                    pr[..n].copy_from_slice(&b[1][..n]);
+                }
+                None => {
+                    pl[..n].fill(0.0);
+                    pr[..n].fill(0.0);
+                }
+            }
+            let mut q = self.probe_q.lock();
+            q.src_sr = rate;
+            q.push(&pl[..n], &pr[..n]);
+        }
     }
 }
 
@@ -964,6 +1043,32 @@ fn pull(rs: &mut Rs, primed: &mut bool, prime: usize, is_clock: bool, l: &mut [f
         *primed = false;
     }
     got
+}
+
+/// What an output node plays: the stereo pair of its one input, or, with two inputs, each made mono (the first becomes the
+/// left channel, the second the right one). Returns whether anything is connected.
+fn gather_out(stereo: Option<&[Vec<f32>; 2]>, left: Option<&[Vec<f32>; 2]>, right: Option<&[Vec<f32>; 2]>, separate: bool, n: usize, bl: &mut [f32], br: &mut [f32]) -> bool {
+    if separate {
+        for (dst, src) in [(&mut *bl, left), (&mut *br, right)] {
+            match src {
+                Some(b) => (0..n).for_each(|j| dst[j] = 0.5 * (b[0][j] + b[1][j])),
+                None => dst[..n].fill(0.0),
+            }
+        }
+        return left.is_some() || right.is_some();
+    }
+    match stereo {
+        Some(b) => {
+            bl[..n].copy_from_slice(&b[0][..n]);
+            br[..n].copy_from_slice(&b[1][..n]);
+            true
+        }
+        None => {
+            bl[..n].fill(0.0);
+            br[..n].fill(0.0);
+            false
+        }
+    }
 }
 
 /// The buffers of output `port` of a node.
@@ -1122,6 +1227,148 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plus_60_db_and_minus_60_db_again_is_lossless_and_a_parameter_change_leaves_no_gap() {
+        let p = GenParams { on: true, level_db: [-6.0206; 2], ..GenParams::default() };
+        let build = |chain: &[f32]| {
+            let mut g = Graph::default();
+            let gn = g.add(Kind::Generator, 0.0, 0.0);
+            let mut prev = gn;
+            for db in chain {
+                let n = g.add(Kind::Gain, 0.0, 0.0);
+                g.node_mut(n).unwrap().p[0] = *db;
+                g.connect(prev, n, 0).unwrap();
+                prev = n;
+            }
+            let an = g.add(Kind::Analyzer, 0.0, 0.0);
+            g.connect(prev, an, 0).unwrap();
+            g
+        };
+        let run_for = |g: Graph| {
+            let (mut run, sh) = engine_with(g, vec![p.clone()]);
+            for _ in 0..40 {
+                run.tick(Some(1024));
+            }
+            ring_tail(&sh, 8192).0
+        };
+        let direct = run_for(build(&[]));
+        // +24 +24 +12 = +60 dB (the most one node gives is +24), then back down by the same
+        let there_and_back = run_for(build(&[24.0, 24.0, 12.0, -24.0, -24.0, -12.0]));
+        let loud = run_for(build(&[24.0, 24.0, 12.0]));
+        let peak = loud.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 400.0, "no clipping inside the graph: peak {peak}");
+        let err = direct.iter().zip(&there_and_back).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(err < 1e-5, "error after +60 / -60 dB: {err} ({:.0} dB below the signal)", 20.0 * (err / 0.5).max(1e-12).log10());
+        // an equaliser band moved while the sound runs: no gap, no jump
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let eq = g.add(Kind::Eq, 0.0, 0.0);
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.connect(gn, eq, 0).unwrap();
+        g.connect(eq, an, 0).unwrap();
+        let (mut run, sh) = engine_with(g.clone(), vec![p.clone()]);
+        for _ in 0..30 {
+            run.tick(Some(1024));
+        }
+        let mut worst_step = 0f32;
+        let mut silent_run = 0usize;
+        let mut longest_silence = 0usize;
+        for k in 0..60 {
+            let mut g2 = g.clone();
+            {
+                let n = g2.node_mut(eq).unwrap();
+                n.p[0] = 5.0; // a notch
+                n.p[1] = 400.0 + k as f32 * 40.0;
+                n.p[2] = -30.0;
+                n.p[3] = 2.0;
+            }
+            run.e.set_graph(g2.clone());
+            run.rebuild(&g2);
+            run.tick(Some(512));
+            let (l, _) = ring_tail(&sh, 512);
+            for w in l.windows(2) {
+                worst_step = worst_step.max((w[1] - w[0]).abs());
+            }
+            for v in &l {
+                if v.abs() < 1e-7 {
+                    silent_run += 1;
+                    longest_silence = longest_silence.max(silent_run);
+                } else {
+                    silent_run = 0;
+                }
+            }
+        }
+        assert!(longest_silence < 40, "a run of {longest_silence} silent samples after a parameter change");
+        assert!(worst_step < 0.2, "jump of {worst_step} between samples after a parameter change");
+    }
+
+    #[test]
+    fn the_probe_hears_the_signal_at_a_port_even_on_a_branch_that_leads_nowhere() {
+        // generator (-6 dB) -> gain +6 dB -> filter, and nothing connected to a sink at all
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let gain = g.add(Kind::Gain, 0.0, 0.0);
+        g.node_mut(gain).unwrap().p[0] = 6.0206;
+        let fl = g.add(Kind::Filter, 0.0, 0.0);
+        g.connect(gn, gain, 0).unwrap();
+        g.connect(gain, fl, 0).unwrap();
+        let p = GenParams { on: true, level_db: [-6.0206; 2], ..GenParams::default() };
+        let (mut run, _sh) = engine_with(g.clone(), vec![p]);
+        // (the generators are normally copied by `tick`)
+        run.gens = run.e.gens.lock().clone();
+        let peak_of = |run: &mut Run| {
+            run.probe_q.lock().buf.clear();
+            for _ in 0..6 {
+                run.chunk(1024, false);
+            }
+            let q = run.probe_q.lock();
+            (q.buf.len(), q.buf.iter().skip(2048).fold(0f32, |m, v| m.max(v.0.abs())))
+        };
+        // nothing listens: nothing is queued
+        assert_eq!(peak_of(&mut run).0, 0);
+        // the output of the generator: 0.5; the output of the gain: 1.0; the input of the filter is the gain's output again
+        for (probe, want) in [(Probe { node: gn, input: false, port: 0 }, 0.5), (Probe { node: gain, input: false, port: 0 }, 1.0), (Probe { node: fl, input: true, port: 0 }, 1.0), (Probe { node: gain, input: true, port: 0 }, 0.5)] {
+            *run.e.probe.lock() = Some(probe);
+            run.rebuild(&g);
+            let (n, pk) = peak_of(&mut run);
+            assert_eq!(n, 6 * 1024, "{probe:?}");
+            assert!((pk - want).abs() < 0.03, "{probe:?}: peak {pk}, wanted {want}");
+        }
+        // an unconnected input is silence, not a crash
+        let mut g2 = g.clone();
+        g2.disconnect(fl, 0);
+        *run.e.probe.lock() = Some(Probe { node: fl, input: true, port: 0 });
+        run.rebuild(&g2);
+        let (n, pk) = peak_of(&mut run);
+        assert!(n > 0 && pk == 0.0);
+        // a node that was removed while probed does nothing
+        *run.e.probe.lock() = Some(Probe { node: 999, input: false, port: 0 });
+        run.rebuild(&g2);
+        assert_eq!(peak_of(&mut run).0, 0);
+    }
+
+    #[test]
+    fn an_output_plays_a_pair_or_two_single_channels() {
+        let (mut bl, mut br) = (vec![9f32; 4], vec![9f32; 4]);
+        // left channel: 0.5 on both sides, right channel: 0.25 on both sides (what a split node delivers)
+        let l: [Vec<f32>; 2] = [vec![0.5; 4], vec![0.5; 4]];
+        let r: [Vec<f32>; 2] = [vec![0.25; 4], vec![0.25; 4]];
+        let pair: [Vec<f32>; 2] = [vec![0.1; 4], vec![0.2; 4]];
+        assert!(gather_out(Some(&pair), None, None, false, 4, &mut bl, &mut br));
+        assert_eq!((bl[0], br[0]), (0.1, 0.2));
+        assert!(!gather_out(None, None, None, false, 4, &mut bl, &mut br), "nothing connected: nothing to play");
+        assert!(bl.iter().chain(br.iter()).all(|v| *v == 0.0));
+        // separate: the first input is the left channel, the second the right one, each made mono
+        assert!(gather_out(None, Some(&l), Some(&r), true, 4, &mut bl, &mut br));
+        assert_eq!((bl[3], br[3]), (0.5, 0.25));
+        // one of them missing: that side is silent, the other still plays
+        assert!(gather_out(None, None, Some(&r), true, 4, &mut bl, &mut br));
+        assert_eq!((bl[0], br[0]), (0.0, 0.25));
+        // a stereo wire into one of them is averaged
+        assert!(gather_out(None, Some(&pair), None, true, 4, &mut bl, &mut br));
+        assert!((bl[0] - 0.15).abs() < 1e-6 && br[0] == 0.0);
     }
 
     #[test]

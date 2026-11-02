@@ -83,6 +83,17 @@ impl App {
                 }
             });
             ui.separator();
+            ui.label(RichText::new("Interface size").strong());
+            ui.horizontal(|ui| {
+                ui.add(egui::Slider::new(&mut self.ui_scale, 0.7..=3.0).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)).text("text and widgets"));
+                for (label, v) in [("100", 1.0f32), ("150", 1.5), ("200", 2.0), ("250", 2.5)] {
+                    if ui.small_button(label).clicked() {
+                        self.ui_scale = v;
+                    }
+                }
+            });
+            ui.label(RichText::new("Makes everything larger or smaller, for high-resolution screens (Ctrl + plus / Ctrl + minus do the same). The windows keep their arrangement.").small().weak());
+            ui.separator();
             ui.label(RichText::new("Routing").strong());
             ui.checkbox(&mut self.graph_on, "Routing graph (node editor)").on_hover_text("Connect all inputs and outputs in one window, with effects in between. The separate input / output pickers of the other windows are hidden while it is on.");
             ui.label(RichText::new("Off by default. Inputs, generators, the timeline and the output devices become nodes; the analysers read what you connect to the Analyzer node.").small().weak());

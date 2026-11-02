@@ -276,6 +276,8 @@ pub struct Daw {
     clip_buf: Vec<(Clip, i64, usize)>,
     // options
     snap: bool,
+    /// samples above full scale are drawn red (waveforms and track meters)
+    show_clip: bool,
     follow: bool,
     loop_on: bool,
     sound: bool,
@@ -400,6 +402,7 @@ impl Daw {
             sel_tracks: BTreeSet::new(),
             clip_buf: Vec::new(),
             snap: true,
+            show_clip: true,
             follow: true,
             loop_on: false,
             sound: true,

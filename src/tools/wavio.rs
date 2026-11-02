@@ -113,6 +113,17 @@ impl WavData {
 
 /// Most samples (all channels together) that are read into memory: about 1.2 GB of floats.
 pub const MAX_SAMPLES: u64 = 300_000_000;
+
+/// The message for a file over the limit, with the limit in terms people can compare with their file.
+pub fn too_large_msg() -> String {
+    format!(
+        "the file is too large to load: the limit is {} million samples (all channels together), which is about {:.0} minutes of stereo at 48 kHz, {:.0} minutes of stereo at 96 kHz or {:.0} minutes of 8 channels at 48 kHz",
+        MAX_SAMPLES / 1_000_000,
+        MAX_SAMPLES as f64 / 96_000.0 / 60.0,
+        MAX_SAMPLES as f64 / 192_000.0 / 60.0,
+        MAX_SAMPLES as f64 / 384_000.0 / 60.0
+    )
+}
 /// Most channels and the range of sample rates a file may declare.
 pub const MAX_CHANNELS: u16 = 64;
 pub const SR_RANGE: std::ops::RangeInclusive<u32> = 2000..=768_000;
@@ -172,7 +183,7 @@ pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> 
                 let frame_bytes = bytes * ch as usize;
                 let frames = size as usize / frame_bytes;
                 if frames as u64 * ch as u64 > MAX_SAMPLES {
-                    return Err("the file is too large to load".into());
+                    return Err(too_large_msg());
                 }
                 let mut out: Vec<Vec<f32>> = (0..ch).map(|_| Vec::with_capacity(frames)).collect();
                 let mut buf = vec![0u8; frame_bytes * 16384];

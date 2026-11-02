@@ -97,7 +97,7 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<(u32, Vec<Vec<f32>>), Str
                     }
                 }
                 if out.len() as u64 * out[0].len() as u64 > wavio::MAX_SAMPLES {
-                    return Err("the file is too large to load".into());
+                    return Err(wavio::too_large_msg());
                 }
             }
             // a corrupt packet: skip it

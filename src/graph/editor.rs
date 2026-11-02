@@ -3,7 +3,7 @@
 //! insert a node into it. Everything the engine runs comes from the graph edited here.
 
 use super::dsp::{db_to_lin, EqUnit};
-use super::engine::{bus, Engine};
+use super::engine::{bus, Engine, Probe};
 use super::model::*;
 use crate::tools::daw::capture::{short_label, DevEx};
 use crate::tools::{Ctx, SettingsIn, SettingsOut, Tool};
@@ -41,7 +41,7 @@ fn node_w(k: Kind) -> f32 {
 
 /// Position of an input port in canvas coordinates.
 fn in_pos(n: &Node, port: usize) -> Pos2 {
-    if matches!(n.kind, Kind::Mixer | Kind::Merge) {
+    if matches!(n.kind, Kind::Mixer | Kind::Merge) || (n.kind == Kind::Output && n.inputs() == 2) {
         // a mixer has the "Inputs" and "Master" rows above its inputs
         let above = if n.kind == Kind::Mixer { 2.0 } else { 0.0 };
         pos2(n.x, n.y + HDR + 11.0 + (above + port as f32) * ROW + ROW * 0.5)
@@ -123,6 +123,23 @@ fn wire_pts(a: Pos2, b: Pos2) -> [Pos2; 4] {
     [a, a + vec2(dx, 0.0), b - vec2(dx, 0.0), b]
 }
 
+/// Distance from a point to the curve of a wire: to many short pieces of it, as many as its length needs (a long wire has gaps
+/// of a hundred pixels between 21 points, and a click between them found nothing).
+fn wire_distance(pts: &[Pos2; 4], p: Pos2) -> f32 {
+    let len: f32 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
+    let n = ((len / 6.0) as usize).clamp(24, 800);
+    let mut best = f32::MAX;
+    let mut prev = pts[0];
+    for k in 1..=n {
+        let cur = bezier_at(pts, k as f32 / n as f32);
+        let (ab, ap) = (cur - prev, p - prev);
+        let t = if ab.length_sq() > 1e-9 { (ap.dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+        best = best.min((prev + ab * t).distance(p));
+        prev = cur;
+    }
+    best
+}
+
 fn bezier_at(p: &[Pos2; 4], t: f32) -> Pos2 {
     let u = 1.0 - t;
     let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
@@ -189,12 +206,9 @@ pub struct Routing {
     save_name: String,
     cur_name: String,
     del_arm: Option<String>,
-    /// equaliser nodes whose graph is in drawing mode, the band that a drag on empty space is moving, and whether
-    /// the pointer was over such a graph (the wheel then edits the band instead of panning the canvas)
+    /// equaliser nodes whose graph is in drawing mode, and the band that a drag on empty space is moving
     eq_draw: HashSet<NodeId>,
     eq_new: Option<(NodeId, usize)>,
-    eq_over: bool,
-    eq_over_prev: bool,
     /// zoom of the canvas (wheel)
     zoom: f32,
     /// size of every node in model units as drawn last frame, and a request to move overlapping nodes apart
@@ -204,6 +218,12 @@ pub struct Routing {
     ir_dlg: Option<(NodeId, crate::tools::dialogs::Pending)>,
     /// A/B: the active slot and both versions of the patch
     ab: Option<(usize, [Graph; 2])>,
+    /// listening probe: on, its volume (dB), whether the normal outputs go quiet, what it hovers over now and whether that is the body of a node
+    probe_on: bool,
+    probe_db: f32,
+    probe_solo: bool,
+    probe_hover: Option<Probe>,
+    probe_body: bool,
 }
 
 type Vec2 = egui::Vec2;
@@ -296,7 +316,7 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, eq_over: false, eq_over_prev: false, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, probe_on: false, probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     fn push(&mut self) {
@@ -723,6 +743,17 @@ impl Routing {
                 ui.label(RichText::new(if n.kind == Kind::Split { "each output carries one channel on both sides" } else { "each input is made mono; first = left, second = right" }).small().weak());
             }
             Kind::Output => {
+                if n.inputs() == 2 {
+                    // the rows line up with the two input dots: the left channel on top, the right one below
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add_space(6.0 * z);
+                    for (k, name) in ["Left", "Right"].into_iter().enumerate() {
+                        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW * z), Sense::hover());
+                        let col = if k == 0 { Color32::from_rgb(70, 200, 255) } else { Color32::from_rgb(255, 100, 160) };
+                        ui.painter().text(pos2(row.left() + 8.0, row.center().y), Align2::LEFT_CENTER, format!("{name} channel in"), FontId::proportional(11.0 * z), col);
+                    }
+                    ui.spacing_mut().item_spacing.y = 3.0 * z;
+                }
                 let cur = if n.s.is_empty() { cx.out_devs.first().map(|d| format!("{} (default)", d.label)).unwrap_or_else(|| "default output".into()) } else { cx.out_devs.iter().find(|d| d.id == n.s).map(|d| d.label.clone()).unwrap_or_else(|| "device missing".into()) };
                 egui::ComboBox::from_id_salt(("outdev", n.id)).width(ui.available_width() - 6.0).truncate().selected_text(cur).show_ui(ui, |ui| {
                     for (i, d) in cx.out_devs.iter().enumerate() {
@@ -735,8 +766,9 @@ impl Routing {
                 });
                 ch |= Self::param_row(ui, n, 0, 40.0);
                 ch |= Self::param_row(ui, n, 1, 40.0);
+                ch |= Self::param_row(ui, n, 2, 40.0);
                 if let Some(s) = status {
-                    ui.label(RichText::new(s).small().color(Color32::from_gray(120)));
+                    ui.add(egui::Label::new(RichText::new(s).small().color(Color32::from_gray(120))).wrap());
                 }
             }
             Kind::Analyzer => {
@@ -750,7 +782,7 @@ impl Routing {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let mut d = drawing;
-                    if ui.toggle_value(&mut d, "Draw").on_hover_text("Edit with the mouse in the graph: drag a dot (frequency and level), wheel over a dot = width, click empty space = new band, right-click a dot = remove it").changed() {
+                    if ui.toggle_value(&mut d, "Draw").on_hover_text("Edit with the mouse in the graph: drag a dot (frequency and level), click empty space = new band, right-click a dot = remove it").changed() {
                         if d {
                             self.eq_draw.insert(n.id);
                         } else {
@@ -793,10 +825,6 @@ impl Routing {
                 painter.add(Shape::line(curve(n), Stroke::new(1.6, if n.bypass { Color32::from_gray(90) } else { Color32::from_rgb(120, 190, 255) })));
                 let mut remove: Option<usize> = None;
                 if drawing {
-                    if ui.input(|i| i.pointer.hover_pos()).is_some_and(|q| r.contains(q)) {
-                        // the wheel belongs to the graph here, not to the canvas
-                        self.eq_over = true;
-                    }
                     for b in 0..n.p.len() / 4 {
                         let o = b * 4;
                         let t = n.p[o].round() as usize;
@@ -823,12 +851,6 @@ impl Routing {
                             }
                         }
                         if hr.hovered() {
-                            let sc = ui.input(|i| i.smooth_scroll_delta.y);
-                            if sc != 0.0 {
-                                n.p[o + 3] = (n.p[o + 3] * (sc * 0.004).exp()).clamp(0.1, 10.0);
-                                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
-                                ch = true;
-                            }
                             painter.text(pos2(r.right() - 4.0, r.top() + 8.0), Align2::RIGHT_CENTER, format!("{}  {:.0} Hz  {:+.1} dB  Q {:.2}", EQ_TYPES[t], n.p[o + 1], n.p[o + 2], n.p[o + 3]), FontId::proportional(9.5), Color32::from_gray(210));
                         }
                         if hr.secondary_clicked() && n.p.len() / 4 > 1 {
@@ -963,22 +985,23 @@ impl Routing {
             }
             Kind::Convolver => {
                 let name = if n.s.is_empty() { "none".to_string() } else { std::path::Path::new(&n.s).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| n.s.clone()) };
+                // buttons on one row, the file name on its own (cut to the width of the node), the status wraps
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if ui.button("Load IR...").on_hover_text("A room, a cabinet or a measured impulse response (also one saved from the Impulse window)").clicked() {
                         self.ir_dlg = Some((n.id, crate::tools::dialogs::open("Impulse response", "Audio", crate::tools::decode::EXTENSIONS)));
                     }
-                    ui.add(egui::Label::new(RichText::new(name).small().weak()).truncate());
-                    if !n.s.is_empty() && ui.small_button("x").on_hover_text("Remove the impulse response").clicked() {
+                    if !n.s.is_empty() && ui.button("Remove").on_hover_text("Remove the impulse response").clicked() {
                         n.s.clear();
                         ch = true;
                     }
                 });
+                ui.add(egui::Label::new(RichText::new(name).small().weak()).truncate()).on_hover_text(&n.s);
                 for i in 0..2 {
                     ch |= Self::param_row(ui, n, i, 40.0);
                 }
                 if let Some(s) = status {
-                    ui.label(RichText::new(s).small().color(Color32::from_gray(120)));
+                    ui.add(egui::Label::new(RichText::new(s).small().color(Color32::from_gray(120))).wrap());
                 }
             }
             _ => {
@@ -1008,6 +1031,47 @@ impl Routing {
             }
         }
         ch
+    }
+
+    /// The signal under the pointer for the listening probe: an input or output dot, else the body of a node (its output, or its input when it has none).
+    fn probe_target(&self, p: Pos2, sp: &impl Fn(Pos2) -> Pos2, z: f32) -> Option<(Probe, bool)> {
+        let mut best: Option<(f32, Probe)> = None;
+        for n in &self.g.nodes {
+            for port in 0..n.inputs() {
+                let d = sp(in_pos(n, port)).distance(p);
+                if d <= 10.0 * z && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, Probe { node: n.id, input: true, port: port as u8 }));
+                }
+            }
+            for port in 0..n.outputs() {
+                let d = sp(out_pos(n, port)).distance(p);
+                if d <= 10.0 * z && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, Probe { node: n.id, input: false, port: port as u8 }));
+                }
+            }
+        }
+        if let Some((_, pr)) = best {
+            return Some((pr, false));
+        }
+        self.g.nodes.iter().rev().find_map(|n| {
+            let (w, h) = self.sizes.get(&n.id).copied().unwrap_or((node_w(n.kind), 150.0));
+            Rect::from_min_size(sp(pos2(n.x, n.y)), vec2(w * z, h * z)).contains(p).then(|| (Probe { node: n.id, input: n.outputs() == 0, port: 0 }, true))
+        })
+    }
+
+    /// Tell the engine where the probe listens; a new node is made sure to be processed (it may lead nowhere).
+    fn set_probe(&mut self, t: Option<Probe>) {
+        if t == self.probe_hover {
+            return;
+        }
+        let new_node = t.map(|p| p.node) != self.probe_hover.map(|p| p.node);
+        self.probe_hover = t;
+        if let Some(e) = &self.eng {
+            *e.probe.lock() = t;
+            if new_node {
+                e.rev.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 
     /// A / B: two versions of the patch, switched with one click (to hear what a node or a change does).
@@ -1151,7 +1215,6 @@ impl Routing {
 
     fn canvas(&mut self, ui: &mut Ui, cx: &Ctx, canvas: Rect) {
         let origin = canvas.min + self.pan;
-        self.eq_over_prev = std::mem::take(&mut self.eq_over);
         // nodes that were saved on top of each other (or grew over their neighbours) are moved apart once their sizes are known
         if self.tidy_pending && self.g.nodes.iter().all(|n| self.sizes.contains_key(&n.id)) {
             self.tidy_pending = false;
@@ -1187,29 +1250,37 @@ impl Routing {
         if bg.dragged_by(egui::PointerButton::Middle) {
             self.pan += bg.drag_delta();
         }
-        // the wheel zooms about the pointer wherever it is in the node window (also over a node), except over the
-        // graph of an equaliser in drawing mode (there it changes the width of a band) and over popups on top
+        // the wheel only zooms the node window, about the pointer, wherever it is (also over a node and over the graph of an
+        // equaliser); popups on top keep their own wheel. A pinch on a touchpad (or a touch screen) and Ctrl + wheel zoom the same way.
         let over = ui.input(|i| i.pointer.hover_pos()).filter(|p| canvas.contains(*p) && ui.ctx().layer_id_at(*p) == Some(ui.layer_id()));
-        if let (Some(p), false) = (over, self.eq_over_prev) {
-            let (sc, alt) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.alt));
+        if let Some(p) = over {
+            let (sc, alt, pinch) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.alt, i.zoom_delta()));
+            let mut factor = if pinch.is_finite() && pinch > 0.0 { pinch } else { 1.0 };
             if sc != egui::Vec2::ZERO {
                 ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
                 if alt {
                     // Alt + wheel (or a horizontal wheel) moves the view
                     self.pan += sc;
                 } else if sc.y != 0.0 {
-                    // the spot under the pointer stays where it is
-                    let m = (p - origin) / self.zoom;
-                    self.zoom = (self.zoom * (sc.y * 0.0025).exp()).clamp(0.4, 1.8);
-                    self.pan = p - canvas.min - m * self.zoom;
+                    factor *= (sc.y * 0.0025).exp();
                 } else {
                     self.pan += sc;
                 }
+            }
+            if (factor - 1.0).abs() > 1e-4 {
+                // the spot under the pointer stays where it is
+                let m = (p - origin) / self.zoom;
+                self.zoom = (self.zoom * factor).clamp(0.4, 1.8);
+                self.pan = p - canvas.min - m * self.zoom;
             }
         }
         // node coordinates <-> screen
         let (origin, z) = (canvas.min + self.pan, self.zoom);
         let sp = move |m: Pos2| origin + m.to_vec2() * z;
+        // the listening probe follows the pointer (not while a wire, a band or the background is being dragged)
+        let probing = if self.probe_on && self.wire.is_none() && self.band.is_none() && !bg.dragged() { over.and_then(|p| self.probe_target(p, &sp, z)) } else { None };
+        self.probe_body = probing.is_some_and(|t| t.1);
+        self.set_probe(probing.map(|t| t.0));
         let mp = move |s: Pos2| ((s - origin) / z).to_pos2();
         if bg.clicked() {
             self.sel.clear();
@@ -1226,7 +1297,7 @@ impl Routing {
             let lvl = metersum.get(&e.from).copied().unwrap_or(0.0);
             let live = ((20.0 * lvl.max(1e-6).log10() + 60.0) / 60.0).clamp(0.0, 1.0);
             let selected = self.sel_wire == Some((e.to, e.port));
-            let near = pointer.is_some_and(|p| canvas.contains(p) && (0..=20).any(|k| bezier_at(&pts, k as f32 / 20.0).distance(p) < 7.0));
+            let near = pointer.is_some_and(|p| canvas.contains(p) && wire_distance(&pts, p) < 7.0);
             if near && self.wire.is_none() {
                 wire_hit = Some((e.to, e.port));
             }
@@ -1249,6 +1320,17 @@ impl Routing {
             if let Some((to, port)) = self.sel_wire {
                 if ui.button("Insert a node here...").clicked() {
                     self.search = Some(Search { at, text: String::new(), sel: 0, link: Link::Insert(to, port), focused: false });
+                    ui.close();
+                }
+                if ui.button("Split here into left and right channels").on_hover_text("A split node in this line: the left channel goes on to the same place, the right output is free to connect anywhere").clicked() {
+                    let place = self.free_place(at, Kind::Split);
+                    if let Some(s) = self.g.split_wire(to, port, place.x, place.y) {
+                        self.sel.clear();
+                        self.sel.insert(s);
+                        self.sel_wire = None;
+                        changed_graph = true;
+                        self.note = "Split: the left channel goes on to the old target, connect the right output where you want it".into();
+                    }
                     ui.close();
                 }
                 if ui.button("Disconnect").clicked() {
@@ -1398,7 +1480,7 @@ impl Routing {
             for p in 0..n.inputs() {
                 let c = sp(in_pos(&n, p));
                 let wired = self.g.edge_into(id, p as u8).is_some();
-                let lr = if n.kind == Kind::Merge { 1 + p as u8 } else { 0 };
+                let lr = if n.kind == Kind::Merge || (n.kind == Kind::Output && n.inputs() == 2) { 1 + p as u8 } else { 0 };
                 let r = dot(ui, c, (0, id, p as u8), wired, lr);
                 if r.drag_started() {
                     // dragging a connected input moves its wire; an empty one starts a new wire backwards
@@ -1419,6 +1501,17 @@ impl Routing {
                 if r.drag_started() {
                     port_drag = Some((WireDrag::FromOut(id, op as u8), false));
                 }
+                r.context_menu(|ui| {
+                    if ui.button("Split here into left and right channels").on_hover_text("A split node on this output: its two outputs carry the left and the right channel, to route them one by one").clicked() {
+                        let at = self.free_place(pos2(n.x + node_w(n.kind) + 40.0, n.y + 60.0), Kind::Split);
+                        if let Some(s) = self.g.split_output(id, op as u8, at.x, at.y) {
+                            self.sel.clear();
+                            self.sel.insert(s);
+                            changed_graph = true;
+                        }
+                        ui.close();
+                    }
+                });
             }
             if body_changed {
                 let still = n.inputs();
@@ -1460,7 +1553,7 @@ impl Routing {
             self.dirty = true;
         }
         if let Some(id) = remove {
-            self.g.remove(id);
+            self.g.remove_bridged(id);
             self.sel.remove(&id);
             changed_graph = true;
         }
@@ -1559,12 +1652,28 @@ impl Routing {
                 }
                 let gone: Vec<NodeId> = self.sel.drain().collect();
                 for id in gone {
-                    self.g.remove(id);
+                    self.g.remove_bridged(id);
                     changed_graph = true;
                 }
             }
             if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F)) {
                 self.fit_next = true;
+            }
+            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::P)) {
+                self.probe_on = !self.probe_on;
+            }
+        }
+        // where the probe listens: a ring around the dot, or an outline around the node
+        if let Some(pr) = self.probe_hover.filter(|_| self.probe_on) {
+            if let Some(n) = self.g.node(pr.node) {
+                let col = Color32::from_rgb(120, 220, 230);
+                if self.probe_body {
+                    let (w, h) = self.sizes.get(&n.id).copied().unwrap_or((node_w(n.kind), 150.0));
+                    painter.rect_stroke(Rect::from_min_size(sp(pos2(n.x, n.y)), vec2(w * z, h * z)).expand(2.0), 6.0, Stroke::new(2.0, col), egui::StrokeKind::Outside);
+                } else {
+                    let c = sp(if pr.input { in_pos(n, pr.port as usize) } else { out_pos(n, pr.port as usize) });
+                    painter.circle_stroke(c, 9.0 * z, Stroke::new(2.5, col));
+                }
             }
         }
         self.search_ui(ui, cx, canvas);
@@ -1615,6 +1724,13 @@ impl Tool for Routing {
                 self.push();
             }
         }
+        if let Some(e) = &self.eng {
+            e.probe_gain.store(db_to_lin(self.probe_db).to_bits(), Relaxed);
+            e.probe_solo.store(self.probe_solo, Relaxed);
+        }
+        if !self.probe_on {
+            self.set_probe(None);
+        }
         *bus().first_out.lock() = self.g.nodes.iter().find(|n| n.kind == Kind::Output).map(|n| n.s.clone()).unwrap_or_default();
         let restore = bus().graph_restore.lock().take();
         if let Some(g) = restore.and_then(|t| Graph::decode(&t)).filter(|g| !g.nodes.is_empty()) {
@@ -1662,7 +1778,14 @@ impl Tool for Routing {
             }
             self.routings_menu(ui, cx);
             self.ab_buttons(ui);
-            if ui.small_button(format!("{:.0} %", self.zoom * 100.0)).on_hover_text("Zoom of the node window: Shift + mouse wheel (click: back to 100 %)").clicked() {
+            ui.toggle_value(&mut self.probe_on, "Probe").on_hover_text("Listening probe (P): hover over a node, or over one of its input or output dots, to hear the signal there");
+            if self.probe_on {
+                ui.add(egui::DragValue::new(&mut self.probe_db).range(-48.0..=6.0).speed(0.2).suffix(" dB")).on_hover_text("Volume of the probe");
+                ui.checkbox(&mut self.probe_solo, "mute outputs").on_hover_text("The normal output nodes are silent while the probe listens");
+                let name = self.probe_hover.and_then(|p| self.g.node(p.node).map(|n| format!("{} {}", n.kind.name(), if p.input { format!("in {}", p.port + 1) } else { format!("out {}", p.port + 1) })));
+                ui.label(RichText::new(name.map(|n| format!("listening: {n}")).unwrap_or_else(|| "hover a node or a dot".into())).small().color(Color32::from_rgb(120, 220, 230)));
+            }
+            if ui.small_button(format!("{:.0} %", self.zoom * 100.0)).on_hover_text("Zoom of the node window: mouse wheel, or pinch on a touchpad (click: back to 100 %)").clicked() {
                 self.zoom = 1.0;
             }
             ui.label(RichText::new("Rate").small().weak());
@@ -1802,6 +1925,20 @@ mod tests {
     }
 
     #[test]
+    fn a_long_wire_can_be_hit_anywhere_along_its_length() {
+        // 2500 pixels long: the old 21 sample points were 120 pixels apart
+        let pts = wire_pts(pos2(0.0, 0.0), pos2(2500.0, 400.0));
+        for k in 0..=200 {
+            let on = bezier_at(&pts, k as f32 / 200.0);
+            assert!(wire_distance(&pts, on + vec2(0.0, 3.0)) < 4.0, "point {k}");
+        }
+        assert!(wire_distance(&pts, pos2(1250.0, 200.0 + 80.0)) > 20.0, "a point far from the line is not on it");
+        // a degenerate wire does not divide by zero
+        let flat = wire_pts(pos2(5.0, 5.0), pos2(5.0, 5.0));
+        assert!(wire_distance(&flat, pos2(5.0, 5.0)).is_finite());
+    }
+
+    #[test]
     fn split_and_merge_ports_are_per_channel() {
         let mut g = Graph::default();
         let (i, s, m, a) = (g.add(Kind::Input, 0.0, 0.0), g.add(Kind::Split, 0.0, 0.0), g.add(Kind::Merge, 0.0, 0.0), g.add(Kind::Analyzer, 0.0, 0.0));
@@ -1818,6 +1955,18 @@ mod tests {
         let (sn, mn) = (g.node(s).unwrap(), g.node(m).unwrap());
         assert!((out_pos(sn, 1).y - out_pos(sn, 0).y - ROW).abs() < 1e-4);
         assert!((in_pos(mn, 1).y - in_pos(mn, 0).y - ROW).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_two_inputs_of_a_separate_output_sit_on_their_rows() {
+        let mut g = Graph::default();
+        let o = g.add(Kind::Output, 10.0, 20.0);
+        // a stereo output has its one input in the header, like the other effects
+        let hdr = in_pos(g.node(o).unwrap(), 0).y;
+        g.node_mut(o).unwrap().p[2] = 1.0;
+        let n = g.node(o).unwrap();
+        assert!((in_pos(n, 1).y - in_pos(n, 0).y - ROW).abs() < 1e-4);
+        assert!(in_pos(n, 0).y > hdr, "the dots move down to their rows");
     }
 
     #[test]

@@ -155,6 +155,9 @@ pub struct App {
     pub frames: u32,
     pub ui_fps: f32,
     pub fps_cap: f32,
+    /// size of the whole interface (text and widgets): 1.0 = normal, for high-resolution screens
+    pub ui_scale: f32,
+    ui_scale_applied: f32,
     pub rotated: bool,
     pub sm_metrics: [Metrics; 2],
     pub sm_rms: [f32; 2],
@@ -384,6 +387,8 @@ impl App {
             frames: 0,
             ui_fps: 0.0,
             fps_cap: 60.0,
+            ui_scale: 1.0,
+            ui_scale_applied: 1.0,
             rotated: false,
             sm_metrics: Default::default(),
             sm_rms: [0.0; 2],
@@ -494,6 +499,7 @@ impl App {
         kv("meas_ch", &self.meas_ch);
         kv("readout_hz", &self.readout_hz);
         kv("fps_cap", &self.fps_cap);
+        kv("ui_scale", &self.ui_scale);
         kv("snap_peak", &self.snap_peak);
         kv("snap_src", &self.snap_src);
         kv("cal_on", &self.cal.on);
@@ -677,6 +683,9 @@ impl App {
         }
         if let Some(v) = get::<f32>(&m, "readout_hz") {
             self.readout_hz = v.clamp(0.5, 10.0);
+        }
+        if let Some(v) = get::<f32>(&m, "ui_scale") {
+            self.ui_scale = v.clamp(0.7, 3.0);
         }
         if let Some(v) = get::<f32>(&m, "fps_cap") {
             self.fps_cap = v.clamp(15.0, 241.0);
@@ -1441,6 +1450,17 @@ impl eframe::App for App {
         };
         beat(self, 1);
 
+        // interface size: the Options slider, and also Ctrl + / Ctrl - (the toolkit's own zoom): whichever changed wins
+        {
+            let now = ctx.zoom_factor();
+            if (now - self.ui_scale_applied).abs() > 1e-3 {
+                self.ui_scale = now.clamp(0.7, 3.0);
+                self.ui_scale_applied = now;
+            } else if (self.ui_scale - now).abs() > 1e-3 {
+                ctx.set_zoom_factor(self.ui_scale);
+                self.ui_scale_applied = self.ui_scale;
+            }
+        }
         // first frames: open at 75% of the monitor, centred
         if !self.sized {
             self.size_frames += 1;
