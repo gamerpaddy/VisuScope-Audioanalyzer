@@ -158,6 +158,8 @@ pub struct App {
     pub fps_cap: f32,
     /// size of the whole interface (text and widgets): 1.0 = normal, for high-resolution screens
     pub ui_scale: f32,
+    /// the size chosen in Options but not applied yet (applying changes the size of the slider itself)
+    pub ui_scale_edit: Option<f32>,
     /// input mappings (keys, MIDI, controllers) and the list of what can be bound
     pub map: crate::mapping::Mapper,
     pub map_defs: Vec<crate::mapping::ActionDef>,
@@ -395,6 +397,7 @@ impl App {
             ui_fps: 0.0,
             fps_cap: 60.0,
             ui_scale: 1.0,
+            ui_scale_edit: None,
             map: crate::mapping::Mapper::load(),
             map_defs: crate::mapping::actions(),
             import_at_start: false,

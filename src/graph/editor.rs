@@ -575,11 +575,13 @@ impl Routing {
         }
         let mut chosen: Option<Entry> = None;
         let screen = canvas.min + self.pan + s.at.to_vec2() * self.zoom;
-        let pos = pos2(screen.x.clamp(canvas.left() + 4.0, (canvas.right() - 520.0).max(canvas.left() + 4.0)), screen.y.clamp(canvas.top() + 4.0, (canvas.bottom() - 260.0).max(canvas.top() + 4.0)));
+        let pos = pos2(screen.x.clamp(canvas.left() + 4.0, (canvas.right() - 660.0).max(canvas.left() + 4.0)), screen.y.clamp(canvas.top() + 4.0, (canvas.bottom() - 260.0).max(canvas.top() + 4.0)));
         let mut close = esc;
         let area = egui::Area::new(egui::Id::new("routing_search")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                let te = ui.add(egui::TextEdit::singleline(&mut s.text).hint_text("Search nodes: eq, input, compressor ...").desired_width(210.0));
+                // the groups side by side need their room (a popup is otherwise as wide as the widest line it has had so far)
+                ui.set_width(if s.text.trim().is_empty() { 640.0 } else { 260.0 });
+                let te = ui.add(egui::TextEdit::singleline(&mut s.text).hint_text("Search nodes: eq, input, compressor ...").desired_width(240.0));
                 if !s.focused {
                     te.request_focus();
                     s.focused = true;
