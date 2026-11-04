@@ -1,0 +1,14 @@
+C:\Users\MAIN\Desktop\claude projects\visuscope\target_shot\release\deps\thiserror-005d35d3253516aa.d: C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\lib.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\aserror.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\display.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\var.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\private.rs C:\Users\MAIN\Desktop\claude\ projects\visuscope\target_shot\release\build\thiserror-05a6fc1c26292444\out/private.rs
+
+C:\Users\MAIN\Desktop\claude projects\visuscope\target_shot\release\deps\libthiserror-005d35d3253516aa.rlib: C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\lib.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\aserror.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\display.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\var.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\private.rs C:\Users\MAIN\Desktop\claude\ projects\visuscope\target_shot\release\build\thiserror-05a6fc1c26292444\out/private.rs
+
+C:\Users\MAIN\Desktop\claude projects\visuscope\target_shot\release\deps\libthiserror-005d35d3253516aa.rmeta: C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\lib.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\aserror.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\display.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\var.rs C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\private.rs C:\Users\MAIN\Desktop\claude\ projects\visuscope\target_shot\release\build\thiserror-05a6fc1c26292444\out/private.rs
+
+C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\lib.rs:
+C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\aserror.rs:
+C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\display.rs:
+C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\var.rs:
+C:\Users\MAIN\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.21\src\private.rs:
+C:\Users\MAIN\Desktop\claude\ projects\visuscope\target_shot\release\build\thiserror-05a6fc1c26292444\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\MAIN\\Desktop\\claude projects\\visuscope\\target_shot\\release\\build\\thiserror-05a6fc1c26292444\\out

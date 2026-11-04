@@ -1,0 +1,1 @@
+{"rustc":15335473461698482004,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[9704401027663724570,"build_script_build",false,3485631640568862033]],"local":[{"RerunIfChanged":{"output":"release\\build\\visuscope-b32e4565a879c37e\\output","paths":[".git/HEAD",".git/index","src"]}}],"rustflags":[],"config":0,"compile_kind":0}

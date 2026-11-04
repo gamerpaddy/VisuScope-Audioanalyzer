@@ -98,7 +98,7 @@ const P_DIST: &[ParamDef] = &[
     s("Richness", 0.0, 100.0, 50.0, " %"),
 ];
 /// The last type is a series of harmonics instead of a clipper.
-pub const DIST_TYPES: &[&str] = &["Soft (tube-like)", "Hard clip", "Asymmetric (even)", "Fold-back", "Harmonic series (even / odd)"];
+pub const DIST_TYPES: &[&str] = &["Soft (tube-like)", "Hard clip", "Asymmetric (even)", "Fold-back", "Harmonic series"];
 pub const DIST_HARMONIC: usize = 4;
 const P_PHASE: &[ParamDef] = &[
     c("Polarity", 0, &["normal", "inverted"]),
@@ -110,7 +110,7 @@ const P_PHASE: &[ParamDef] = &[
 const P_SHIFT: &[ParamDef] = &[
     c("Direction", 0, &["Down", "Up"]),
     l("Shift", 1.0, 96000.0, 1000.0, " Hz"),
-    c("Quality", 0, &["Low delay (above ~400 Hz)", "Deep (down to ~20 Hz, long delay)"]),
+    c("Quality", 0, &["Low delay", "Deep (to ~20 Hz)"]),
     c("Filter", 0, &["on", "off"]),
     s("Mix", 0.0, 100.0, 100.0, " %"),
 ];

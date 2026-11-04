@@ -140,6 +140,11 @@ fn wire_distance(pts: &[Pos2; 4], p: Pos2) -> f32 {
     best
 }
 
+/// The port nearest to `p` within `radius` (not the first one within it: the rows of a mixer are close together).
+fn pick_port(cands: &[(NodeId, u8, Pos2)], p: Pos2, radius: f32) -> Option<(NodeId, u8)> {
+    cands.iter().map(|(id, k, c)| (c.distance(p), *id, *k)).filter(|(d, _, _)| *d < radius).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, id, k)| (id, k))
+}
+
 fn bezier_at(p: &[Pos2; 4], t: f32) -> Pos2 {
     let u = 1.0 - t;
     let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
@@ -387,7 +392,16 @@ impl Routing {
         if std::env::var("VISUSCOPE_GRAPH").as_deref() == Ok("demo") {
             self.g = demo_graph(&cx.default_in);
         }
-        self.tidy_pending = true;
+        if std::env::var("VISUSCOPE_GRAPH").as_deref() == Ok("all") {
+            // every kind of node once (with VISUSCOPE_NODECHECK=1: the overflow sweep before a release)
+            let mut g = Graph::default();
+            for (i, k) in Kind::ALL.iter().enumerate() {
+                g.add(*k, 40.0 + (i % 6) as f32 * 330.0, 40.0 + (i / 6) as f32 * 360.0);
+            }
+            self.g = g;
+        } else {
+            self.tidy_pending = true;
+        }
         e.set_graph(self.g.clone());
         *bus().graph_text.lock() = self.g.encode();
         self.eng = Some(e);
@@ -691,7 +705,7 @@ impl Routing {
             }
             if !d.choices.is_empty() {
                 let cur = d.choices.get(n.p[i].round() as usize).copied().unwrap_or("?");
-                egui::ComboBox::from_id_salt(("pc", n.id, i)).width(ui.available_width() - 4.0).selected_text(cur).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt(("pc", n.id, i)).width(ui.available_width() - 4.0).truncate().selected_text(cur).show_ui(ui, |ui| {
                     for (k, c) in d.choices.iter().enumerate() {
                         if ui.selectable_label(n.p[i].round() as usize == k, *c).clicked() {
                             n.p[i] = k as f32;
@@ -700,7 +714,10 @@ impl Routing {
                     }
                 });
             } else {
-                ui.spacing_mut().slider_width = (ui.available_width() - 62.0 * z).max(40.0 * z);
+                // the value box next to the slider takes the width of the longest value it will show
+                let digits = if d.unit == " us" { 7 } else { format!("{:.1}", d.max.abs().max(d.min.abs())).len() + usize::from(d.min < 0.0) };
+                let value_w = (digits + d.unit.len()) as f32 * 7.4 + 22.0;
+                ui.spacing_mut().slider_width = (ui.available_width() - value_w * z - 8.0 * z).max(30.0 * z);
                 let int = d.unit.is_empty() && d.max - d.min >= 1.0 && d.min.fract() == 0.0 && d.def.fract() == 0.0;
                 let mut s = egui::Slider::new(&mut n.p[i], d.min..=d.max).logarithmic(d.log).clamping(egui::SliderClamping::Always);
                 if d.unit != " us" {
@@ -1524,6 +1541,10 @@ impl Routing {
                     child.set_clip_rect(canvas);
                     scale_style(child.style_mut(), z);
                     let c = self.body(&mut child, cx, &mut n, loops.contains(&id));
+                    // nothing may reach past the node: (a test hook, VISUSCOPE_NODECHECK=1, logs the kinds that do)
+                    if child.min_rect().width() > w - 8.0 * z && std::env::var_os("VISUSCOPE_NODECHECK").is_some() {
+                        crate::log::log(&format!("node overflow: {:?} is {:.0} wide in a node of {:.0}", n.kind, child.min_rect().width(), w));
+                    }
                     (c, child.min_rect().height() + 10.0 * z)
                 };
                 body_changed = changed;
@@ -1750,10 +1771,12 @@ impl Routing {
             }
             if ui.input(|i| i.pointer.any_released()) {
                 self.wire = None;
-                let near = |c: Pos2| c.distance(p) < 15.0;
+                // the dots of a mixer are a row apart (22 pixels at full size): the radius is smaller than half of that
+                let radius = (15.0 * z.max(0.6)).min(ROW * z * 0.48);
                 match w {
                     WireDrag::FromOut(from, fport) => {
-                        let target = self.g.nodes.iter().find_map(|n| (0..n.inputs()).find(|&k| near(sp(in_pos(n, k)))).map(|k| (n.id, k as u8)));
+                        let cands: Vec<(NodeId, u8, Pos2)> = self.g.nodes.iter().flat_map(|n| (0..n.inputs()).map(move |k| (n.id, k as u8, sp(in_pos(n, k))))).collect();
+                        let target = pick_port(&cands, p, radius);
                         // dropped on a node body: first free input
                         let target = target.or_else(|| {
                             self.g.nodes.iter().find_map(|n| {
@@ -1779,7 +1802,8 @@ impl Routing {
                         }
                     }
                     WireDrag::FromIn(to, port) => {
-                        let src = self.g.nodes.iter().find_map(|n| (0..n.outputs()).find(|&k| near(sp(out_pos(n, k)))).map(|k| (n.id, k as u8)));
+                        let cands: Vec<(NodeId, u8, Pos2)> = self.g.nodes.iter().flat_map(|n| (0..n.outputs()).map(move |k| (n.id, k as u8, sp(out_pos(n, k))))).collect();
+                        let src = pick_port(&cands, p, radius);
                         match src {
                             Some((from, fport)) => {
                                 if let Err(m) = self.g.connect_from(from, fport, to, port) {
@@ -2137,6 +2161,17 @@ mod tests {
         let d = r.g.nodes.last().unwrap().clone();
         let rd = Rect::from_min_size(pos2(d.x, d.y), vec2(node_w(Kind::Delay), 170.0));
         assert!(rects.iter().all(|x| !x.intersects(rd)), "the new node sits on another one");
+    }
+
+    #[test]
+    fn a_wire_dropped_between_two_close_dots_goes_to_the_nearer_one() {
+        // the rows of a mixer at a small zoom: 14 pixels apart, the old radius of 15 reached both and took the first
+        let c = [(1, 0u8, pos2(100.0, 100.0)), (1, 1, pos2(100.0, 114.0)), (1, 2, pos2(100.0, 128.0))];
+        assert_eq!(pick_port(&c, pos2(103.0, 113.0), 7.0), Some((1, 1)));
+        assert_eq!(pick_port(&c, pos2(103.0, 127.0), 7.0), Some((1, 2)));
+        assert_eq!(pick_port(&c, pos2(103.0, 101.0), 7.0), Some((1, 0)));
+        assert_eq!(pick_port(&c, pos2(140.0, 113.0), 7.0), None);
+        assert_eq!(pick_port(&[], pos2(0.0, 0.0), 7.0), None);
     }
 
     #[test]
