@@ -2,3 +2,4 @@
 *.lnk
 *.log
 visuscope_*.png
+/target_shot
