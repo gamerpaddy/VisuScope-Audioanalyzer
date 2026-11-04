@@ -54,6 +54,8 @@ pub struct Bus {
     pub first_out: Mutex<String>,
     /// where the listening probe plays: empty = the device of the first output node, PROBE_DEFAULT = the default output, else a device id
     pub probe_dev: Mutex<String>,
+    /// a generator node that leads to a sink is running (tools that play a sweep need a generator to play it)
+    pub gen_live: AtomicBool,
     /// bands (frequency, gain, Q) the EQ design window wants in an equaliser node, and the preamp it asks for
     pub eq_send: Mutex<Option<(Vec<[f32; 3]>, f32)>>,
     /// the graph as text (for snapshots) and a graph text a snapshot wants put back
@@ -237,7 +239,7 @@ enum Rt {
     Split,
     Merge,
     Dual,
-    Out { dev: String, q: Arc<Mutex<Queue>>, status: Arc<Mutex<String>>, _h: Option<monitor::Handle>, gain: f32, mute: bool, band: BandFilter, buf: [Vec<f32>; 2] },
+    Out { dev: String, q: Arc<Mutex<Queue>>, status: Arc<Mutex<String>>, _h: Option<monitor::Handle>, gain: f32, mute: bool, band: BandFilter, buf: [Vec<f32>; 2], aa: FirLowpass, aa_for: u32 },
     Rec { id: String },
 }
 
@@ -401,6 +403,7 @@ impl Run {
         bus().virt.lock().clear();
         bus().want_tracks.lock().clear();
         bus().on.store(false, Relaxed);
+        bus().gen_live.store(false, Relaxed);
         bus().tl_clear();
         self.e.sh.ring_owner.compare_exchange(3, 0, Relaxed, Relaxed).ok();
         self.e.meters.lock().clear();
@@ -455,7 +458,7 @@ impl Run {
             Kind::Output => {
                 let q = Arc::new(Mutex::new(Queue { buf: VecDeque::new(), src_sr: self.rate, ..Default::default() }));
                 // the sentinel device name makes `apply` open the stream
-                Rt::Out { dev: "\u{1}".into(), q, status: Arc::new(Mutex::new(String::new())), _h: None, gain: 1.0, mute: false, band: BandFilter::default(), buf: blank() }
+                Rt::Out { dev: "\u{1}".into(), q, status: Arc::new(Mutex::new(String::new())), _h: None, gain: 1.0, mute: false, band: BandFilter::default(), buf: blank(), aa: Default::default(), aa_for: 0 }
             }
             Kind::TimelineRec => Rt::Rec { id: String::new() },
             Kind::Gain => Rt::Gain(1.0),
@@ -655,6 +658,7 @@ impl Run {
         *bus().virt_loop.lock() = loops;
         let want: Vec<u32> = g.nodes.iter().filter(|n| n.kind == Kind::TimelineOut).filter_map(|n| n.s.parse().ok()).collect();
         *bus().want_tracks.lock() = want;
+        bus().gen_live.store(self.nodes.iter().any(|n| matches!(n.rt, Rt::Gen { .. })), Relaxed);
         bus().on.store(true, Relaxed);
         if fresh {
             self.carry = 0.0;
@@ -1058,7 +1062,7 @@ impl Run {
                         }
                     }
                 }
-                Rt::Out { q, gain, mute, band, buf, .. } => {
+                Rt::Out { q, gain, mute, band, buf, aa, aa_for, .. } => {
                     // scratch buffers of the node: nothing is allocated per block
                     let [bl, br] = buf;
                     let separate = node.src.len() == 2;
@@ -1073,6 +1077,16 @@ impl Run {
                             let g = g0 + dg * k as f32;
                             bl[k] *= g;
                             br[k] *= g;
+                        }
+                        // a device of a lower rate than the graph: what is above its Nyquist frequency would fold back into the sound
+                        // (49 kHz played on a 48 kHz device is heard as 1 kHz), so it is filtered first
+                        let osr = q.lock().out_sr;
+                        if osr > 0 && osr < rate {
+                            if *aa_for != osr {
+                                *aa_for = osr;
+                                aa.design(rate as f32, osr as f32);
+                            }
+                            aa.process(&mut bl[..n], &mut br[..n]);
                         }
                         band.process(&mut bl[..n], &mut br[..n], rate as f32);
                         let mut q = q.lock();
@@ -1671,6 +1685,41 @@ mod tests {
                 println!("{:28} {:7.2} ms per second of audio", kind.name(), ms);
             }
         }
+    }
+
+    #[test]
+    fn what_a_slower_device_cannot_play_is_filtered_out_before_it_folds_back() {
+        // the filter an output uses for a 48 kHz device at 192 kHz
+        let fs = 192000.0f32;
+        let level = |f: f32| {
+            let mut aa = FirLowpass::default();
+            aa.design(fs, 48000.0);
+            let n = 48000;
+            let mut l: Vec<f32> = (0..n).map(|i| (std::f64::consts::TAU * f as f64 * i as f64 / fs as f64).sin() as f32).collect();
+            let mut r = l.clone();
+            // (in blocks, as the engine does)
+            for (cl, cr) in l.chunks_mut(1024).zip(r.chunks_mut(1024)) {
+                aa.process(cl, cr);
+            }
+            let rms = (l[n / 2..].iter().map(|v| v * v).sum::<f32>() / (n / 2) as f32).sqrt();
+            20.0 * (rms * std::f32::consts::SQRT_2).log10()
+        };
+        assert!(level(1000.0).abs() < 0.05);
+        assert!(level(19000.0).abs() < 0.2, "the audible band stays: {}", level(19000.0));
+        assert!(level(28000.0) < -90.0, "{}", level(28000.0));
+        assert!(level(49000.0) < -90.0, "49 kHz would be heard as 1 kHz: {}", level(49000.0));
+        assert!(level(80000.0) < -90.0, "{}", level(80000.0));
+    }
+
+    #[test]
+    fn a_generator_that_leads_to_a_sink_is_announced_for_the_sweeps() {
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        let (mut run, _sh) = engine_with(g.clone(), vec![GenParams::default()]);
+        g.connect(gn, an, 0).unwrap();
+        run.rebuild(&g);
+        assert!(bus().gen_live.load(Relaxed), "a generator node that feeds a sink is running");
     }
 
     #[test]

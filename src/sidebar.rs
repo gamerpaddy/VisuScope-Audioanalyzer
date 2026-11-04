@@ -365,6 +365,7 @@ impl App {
                 self.p.reset_gen = self.p.reset_gen.wrapping_add(1);
             }
         });
+        ui.checkbox(&mut self.spec_density, "Noise density (per Hz)").on_hover_text("Shows the level of the noise in a bandwidth of 1 Hz instead of in one FFT bin: a noise then reads the same whatever the FFT size (at a larger size the bins are narrower and a noise reads lower in each). A tone reads lower than its level in this mode, by the same amount, and more so at a larger size.");
         if self.an.n > 0 {
             ui.label(RichText::new(format!("bin {:.3} Hz  ENBW {:.2} bins  CG {:.3}", self.an.sr / self.an.n as f32, self.an.enbw_bins, self.an.coherent_gain)).small().weak());
             ui.label(

@@ -13,6 +13,8 @@ use std::time::Duration;
 pub struct Queue {
     pub buf: VecDeque<(f32, f32)>,
     pub src_sr: u32,
+    /// the sample rate of the device that plays it (0 until the stream is up): a source of a higher rate is filtered to it
+    pub out_sr: u32,
     /// the queue was emptied on purpose (a seek): the output starts afresh and does not take the pause for a hiccup
     pub flushed: bool,
 }
@@ -292,6 +294,8 @@ where
     T: SizedSample + FromSample<f32> + Send + 'static,
 {
     let ch = (cfg.channels as usize).max(1);
+    // (the source learns the rate of the device, to filter what the device cannot play)
+    q.lock().out_sr = out_sr;
     let (mut prev, mut next) = ((0f32, 0f32), (0f32, 0f32));
     let mut frac = 1.0f64;
     let key = dev.id().map(|i| i.to_string()).unwrap_or_default();

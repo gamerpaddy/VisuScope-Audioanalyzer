@@ -100,6 +100,8 @@ pub struct App {
     pub band_listen: bool,
     pub cur_b: Option<f32>,
     pub snap_peak: bool,
+    /// the spectrum shows noise density (per Hz): a noise reads the same at every FFT size
+    pub spec_density: bool,
     pub snaps: Vec<Snapshot>,
     pub snap_src: usize,
     pub wins: [WinState; WIN_COUNT],
@@ -350,6 +352,7 @@ impl App {
             band_listen: false,
             cur_b: None,
             snap_peak: true,
+            spec_density: false,
             snaps: Vec::new(),
             snap_src: 0,
             wins: std::array::from_fn(WinState::new),
@@ -520,6 +523,7 @@ impl App {
         kv("ui_scale", &self.ui_scale);
         kv("import_at_start", &self.import_at_start);
         kv("snap_peak", &self.snap_peak);
+        kv("spec_density", &self.spec_density);
         kv("snap_src", &self.snap_src);
         kv("cal_on", &self.cal.on);
         kv("cal_vpk_l", &self.cal.vpk[0]);
@@ -664,6 +668,7 @@ impl App {
         self.safety_ms = self.safety_ms.min(1000);
         crate::prof::set_safety_ms(self.safety_ms);
         set!(self.snap_peak, "snap_peak");
+        set!(self.spec_density, "spec_density");
         if let Some(v) = get::<usize>(&m, "smooth_oct") {
             self.smooth_oct = v.min(SMOOTH_OCT.len() - 1);
         }
@@ -1076,6 +1081,25 @@ impl App {
             Unit::Dbfs => 0.0,
             Unit::Dbv => dbv,
             Unit::Dbu => dbv - 20.0 * DBU_REF_V.log10(),
+        }
+    }
+
+    /// What the spectrum adds to its values to show a noise density: minus the level of one Hz of the window's noise bandwidth.
+    pub fn density_off(&self) -> f32 {
+        if !self.spec_density || self.an.n == 0 {
+            return 0.0;
+        }
+        let enbw_hz = (self.an.enbw_bins * self.an.sr / self.an.n as f32).max(1e-6);
+        -10.0 * enbw_hz.log10()
+    }
+
+    /// The unit of the spectrum's axis.
+    pub fn spec_unit_name(&self) -> &'static str {
+        match (self.spec_density, self.unit_name()) {
+            (false, u) => u,
+            (true, "dBV") => "dBV/Hz",
+            (true, "dBu") => "dBu/Hz",
+            (true, _) => "dBFS/Hz",
         }
     }
 

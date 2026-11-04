@@ -216,6 +216,83 @@ impl FilterUnit {
     }
 }
 
+// ---------------------------------------------------------------------- anti-alias filter
+
+/// A linear-phase low-pass (Kaiser windowed sinc, about 100 dB of stop band) for a sound that is played at a lower sample rate:
+/// what the slower device cannot play is taken out before it folds back into the audible band. Recursive filters of this
+/// steepness are noisy in single precision, a FIR is not.
+#[derive(Clone, Default)]
+pub struct FirLowpass {
+    taps: Vec<f32>,
+    hist: [Vec<f32>; 2],
+    work: Vec<f32>,
+    key: (u32, u32),
+}
+
+impl FirLowpass {
+    /// Pass band up to 0.4167 x `out_rate` (20 kHz at 48 kHz), stop band from 0.5833 x `out_rate`; what lies between is
+    /// whatever folds into the first and last 4 kHz, which are not audible.
+    pub fn design(&mut self, fs: f32, out_rate: f32) {
+        let key = (fs as u32, out_rate as u32);
+        if key == self.key {
+            return;
+        }
+        self.key = key;
+        let (pass, stop) = (out_rate * 0.4167, out_rate * 0.5833);
+        let a = 100.0f32;
+        let n = (((a - 7.95) / (14.36 * (stop - pass).max(100.0) / fs)).ceil() as usize + 1).clamp(31, 801) | 1;
+        let beta = 0.1102 * (a - 8.7);
+        let fc = 0.5 * (pass + stop) / fs;
+        let m = (n - 1) as f32 / 2.0;
+        let i0 = |x: f32| {
+            // modified Bessel function of order 0
+            let (mut s, mut t) = (1.0f32, 1.0f32);
+            for k in 1..40 {
+                t *= (x / (2.0 * k as f32)).powi(2);
+                s += t;
+            }
+            s
+        };
+        let mut taps: Vec<f32> = (0..n)
+            .map(|k| {
+                let x = k as f32 - m;
+                let sinc = if x == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * x).sin() / (PI * x) };
+                let r = (x / m).clamp(-1.0, 1.0);
+                sinc * i0(beta * (1.0 - r * r).max(0.0).sqrt()) / i0(beta)
+            })
+            .collect();
+        let sum: f32 = taps.iter().sum();
+        taps.iter_mut().for_each(|t| *t /= sum);
+        self.taps = taps;
+        self.hist = [vec![0.0; n - 1], vec![0.0; n - 1]];
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        let nt = self.taps.len();
+        if nt == 0 {
+            return;
+        }
+        for (ch, x) in [l, r].into_iter().enumerate() {
+            let hist = &mut self.hist[ch];
+            self.work.clear();
+            self.work.extend_from_slice(hist);
+            self.work.extend_from_slice(x);
+            for (i, o) in x.iter_mut().enumerate() {
+                let w = &self.work[i..i + nt];
+                *o = w.iter().zip(&self.taps).map(|(a, b)| a * b).sum();
+            }
+            // the last nt - 1 samples are the history of the next block
+            let tail = self.work.len() - (nt - 1);
+            hist.copy_from_slice(&self.work[tail..]);
+        }
+    }
+
+    /// The delay of the filter in frames.
+    pub fn latency(&self) -> usize {
+        self.taps.len().saturating_sub(1) / 2
+    }
+}
+
 // ---------------------------------------------------------------------- dynamics
 
 #[inline]

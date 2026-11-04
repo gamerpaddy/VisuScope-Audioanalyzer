@@ -111,17 +111,44 @@ impl WavData {
     }
 }
 
-/// Most samples (all channels together) that are read into memory: about 1.2 GB of floats.
-pub const MAX_SAMPLES: u64 = 300_000_000;
+/// The least samples (all channels together) a file may have, whatever the memory: about 1.2 GB of floats.
+pub const MIN_MAX_SAMPLES: u64 = 300_000_000;
+
+/// Free physical memory right now (bytes), if the system says.
+pub fn free_memory() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        // SAFETY: the structure is zeroed and its size is set, as the call requires
+        unsafe {
+            let mut m: MEMORYSTATUSEX = std::mem::zeroed();
+            m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+            (GlobalMemoryStatusEx(&mut m) != 0).then_some(m.ullAvailPhys)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Most samples (all channels together) a file may have: what fits into the free memory right now. A file needs 4 bytes a
+/// sample, and about twice that while it is decoded and handed over; of the free memory 70 % may be used for it. Never less than
+/// `MIN_MAX_SAMPLES`.
+pub fn max_samples() -> u64 {
+    let by_memory = free_memory().map_or(0, |b| (b as f64 * 0.7 / 8.0) as u64);
+    by_memory.clamp(MIN_MAX_SAMPLES, 4_000_000_000)
+}
 
 /// The message for a file over the limit, with the limit in terms people can compare with their file.
 pub fn too_large_msg() -> String {
+    let m = max_samples();
     format!(
-        "the file is too large to load: the limit is {} million samples (all channels together), which is about {:.0} minutes of stereo at 48 kHz, {:.0} minutes of stereo at 96 kHz or {:.0} minutes of 8 channels at 48 kHz",
-        MAX_SAMPLES / 1_000_000,
-        MAX_SAMPLES as f64 / 96_000.0 / 60.0,
-        MAX_SAMPLES as f64 / 192_000.0 / 60.0,
-        MAX_SAMPLES as f64 / 384_000.0 / 60.0
+        "the file is too large to load with the memory that is free now: the limit is {} million samples (all channels together), which is about {:.0} minutes of stereo at 48 kHz, {:.0} minutes of stereo at 96 kHz or {:.0} minutes of 8 channels at 48 kHz. Close other programs to make more room",
+        m / 1_000_000,
+        m as f64 / 96_000.0 / 60.0,
+        m as f64 / 192_000.0 / 60.0,
+        m as f64 / 384_000.0 / 60.0
     )
 }
 /// Most channels and the range of sample rates a file may declare.
@@ -182,7 +209,7 @@ pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> 
                 let size = size.min(avail);
                 let frame_bytes = bytes * ch as usize;
                 let frames = size as usize / frame_bytes;
-                if frames as u64 * ch as u64 > MAX_SAMPLES {
+                if frames as u64 * ch as u64 > max_samples() {
                     return Err(too_large_msg());
                 }
                 let mut out: Vec<Vec<f32>> = (0..ch).map(|_| Vec::with_capacity(frames)).collect();
@@ -226,6 +253,19 @@ pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_size_limit_follows_the_free_memory_but_never_goes_below_the_old_one() {
+        let m = max_samples();
+        assert!((MIN_MAX_SAMPLES..=4_000_000_000).contains(&m), "{m}");
+        if let Some(free) = free_memory() {
+            assert!(free > 0);
+            // (at most 70 % of the free memory, at 8 bytes a sample, unless the floor applies)
+            assert!(m <= ((free as f64 * 0.7 / 8.0) as u64).max(MIN_MAX_SAMPLES) + 1_000_000);
+        }
+        let msg = too_large_msg();
+        assert!(msg.contains("million samples") && msg.contains("free now"));
+    }
 
     #[test]
     fn roundtrip_all_formats() {

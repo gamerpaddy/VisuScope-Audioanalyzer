@@ -25,6 +25,8 @@ pub struct Response {
     y_lo: f32,
     y_hi: f32,
     normalize: bool,
+    /// show the level (the gain plus the level of the sweep) instead of the gain
+    dbfs: bool,
     curve: Option<Curve>,
     key: (u64, usize),
     held: Option<(String, Vec<f32>, Vec<f32>)>,
@@ -52,7 +54,7 @@ pub fn smooth_log(v: &[f32], pts_per_oct: f32, n: f32) -> Vec<f32> {
 
 impl Response {
     pub fn new() -> Self {
-        Self { smooth: 3, lower: 0, y_lo: -40.0, y_hi: 20.0, normalize: false, curve: None, key: (0, usize::MAX), held: None, save: None }
+        Self { smooth: 3, lower: 0, y_lo: -40.0, y_hi: 20.0, normalize: false, dbfs: false, curve: None, key: (0, usize::MAX), held: None, save: None }
     }
 
     fn build(&mut self, r: &SweepResult) {
@@ -63,7 +65,10 @@ impl Response {
     fn make_curve(r: &SweepResult, smooth: usize) -> Curve {
         let h = &r.h;
         let nyq = r.sr * 0.5;
-        let (f0, f1) = (10.0f32.max(h.df * 2.0), nyq.min(r.params.f1 * 1.2).min(24000.0).max(100.0));
+        // only what the sweep covered: outside it there is nothing but the noise of the deconvolution (the curve is cut at the
+        // start and the end frequency of the sweep, in the magnitude and in the phase, delay and coherence under it)
+        let f0 = r.params.f0.max(h.df * 2.0).max(1.0);
+        let f1 = nyq.min(r.params.f1).max(f0 * 2.0);
         let ppo = LOG_N as f32 / (f1 / f0).log2();
         let at = |data: &[f32], f: f32| -> f32 {
             let b = f / h.df;
@@ -126,16 +131,19 @@ impl Response {
                     ui.end_row();
                     ui.label("Range");
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut p.f0).range(5.0..=2000.0).speed(1.0).suffix(" Hz"));
-                        ui.label("to");
-                        ui.add(egui::DragValue::new(&mut p.f1).range(1000.0..=96000.0).speed(10.0).suffix(" Hz"));
+                        ui.checkbox(&mut p.full, "Full").on_hover_text("From 5 Hz to the top of the sample rate (the graph rate with the routing graph: 96 kHz at 192 kHz). Outside the sweep nothing is measured: the curve falls off there.");
+                        ui.add_enabled_ui(!p.full, |ui| {
+                            ui.add(egui::DragValue::new(&mut p.f0).range(5.0..=2000.0).speed(1.0).suffix(" Hz"));
+                            ui.label("to");
+                            ui.add(egui::DragValue::new(&mut p.f1).range(1000.0..=96000.0).speed(10.0).suffix(" Hz"));
+                        });
                     });
                     ui.end_row();
                     ui.label("Length");
-                    ui.add(egui::Slider::new(&mut p.secs, 0.5..=12.0).suffix(" s"));
+                    ui.add(egui::Slider::new(&mut p.secs, 0.5..=60.0).logarithmic(true).suffix(" s")).on_hover_text("A longer sweep lowers the noise and gives the low frequencies more time. The limit is the memory of the analysis: at 192 kHz about 40 s");
                     ui.end_row();
                     ui.label("Tail");
-                    ui.add(egui::Slider::new(&mut p.tail, 0.3..=4.0).suffix(" s")).on_hover_text("Recording time after the sweep ends: must cover latency and the decay of the room");
+                    ui.add(egui::Slider::new(&mut p.tail, 0.3..=10.0).suffix(" s")).on_hover_text("Recording time after the sweep ends: must cover latency and the decay of the room");
                     ui.end_row();
                     ui.label("Averages");
                     ui.add(egui::Slider::new(&mut p.averages, 1..=16)).on_hover_text("More runs lower the noise; 2 or more also give the coherence");
@@ -202,6 +210,7 @@ impl Tool for Response {
                 }
             });
             ui.checkbox(&mut self.normalize, "Normalise").on_hover_text("Shift the magnitude so the 1 kHz value reads 0 dB");
+            ui.checkbox(&mut self.dbfs, "dBFS").on_hover_text("Show the level in dBFS (the gain plus the level of the sweep: a loopback of a -12 dBFS sweep reads -12) instead of the gain in dB (a loopback reads 0)");
             if crate::mapping::btn(ui, "Hold").on_hover_text("Keep the current magnitude trace as a comparison").clicked() {
                 self.held = self.curve.as_ref().map(|c| ("held".to_string(), c.f.clone(), c.mag.clone()));
             }
@@ -231,6 +240,9 @@ impl Tool for Response {
         let (layers, rel) = cx.lib.layers(&c.f, ppo, SMOOTH[self.smooth].0);
         let rel_v = rel.clone();
         let norm = if self.normalize { -c.f.iter().zip(&c.mag).min_by(|a, b| (a.0 - 1000.0).abs().total_cmp(&(b.0 - 1000.0).abs())).map(|x| *x.1).unwrap_or(0.0) } else { 0.0 };
+        // the level of the sweep, when the scale is dBFS (not for the difference to a reference trace: that is a gain)
+        let lvl = if self.dbfs && rel_v.is_none() { cx.sweep.result.as_ref().map(|r| r.params.amp_db).unwrap_or(0.0) } else { 0.0 };
+        let norm = norm + lvl;
         let has_lower = self.lower < 3 && !(self.lower == 2 && c.coh.is_none());
 
         let (resp, painter, rect) = canvas(ui, 140.0);
@@ -241,12 +253,12 @@ impl Tool for Response {
             return;
         }
         let (fa, fb) = (c.f[0], *c.f.last().unwrap());
-        let plot = Plot::new(pr, fa.max(10.0), fb, self.y_lo, self.y_hi, true);
+        let plot = Plot::new(pr, fa.max(1.0), fb, self.y_lo, self.y_hi, true);
         plot.grid_y(&painter, &|v| format!("{v:.0}"));
         plot.grid_x(&painter, &|f| crate::app::fmt_hz_short(f));
         plot.frame(&painter);
         if let Some((_, f, m)) = &self.held {
-            plot.line(&painter, f.iter().copied().zip(m.iter().copied()), Stroke::new(1.0, Color32::from_rgb(150, 150, 160)));
+            plot.line(&painter, f.iter().copied().zip(m.iter().map(|v| v + lvl)), Stroke::new(1.0, Color32::from_rgb(150, 150, 160)));
         }
         for (_, col, v) in &layers {
             plot.line(&painter, c.f.iter().copied().zip(v.iter().copied()), Stroke::new(1.2, *col));
@@ -256,7 +268,7 @@ impl Tool for Response {
         for (i, (name, col, _)) in layers.iter().enumerate() {
             painter.text(Pos2::new(pr.right() - 6.0, pr.bottom() - 6.0 - i as f32 * 12.0), Align2::RIGHT_BOTTOM, name, FontId::proportional(10.0), *col);
         }
-        painter.text(Pos2::new(rect.left() + 2.0, pr.top()), Align2::LEFT_TOP, "dB", FontId::proportional(9.0), crate::views::TXT);
+        painter.text(Pos2::new(rect.left() + 2.0, pr.top()), Align2::LEFT_TOP, if self.dbfs { "dBFS" } else { "dB" }, FontId::proportional(9.0), crate::views::TXT);
 
         let mut lower_plot: Option<Plot> = None;
         if has_lower {
@@ -282,7 +294,7 @@ impl Tool for Response {
         if let Some(h) = resp.hover_pos().filter(|p| p.x >= pr.left() && p.x <= pr.right() && p.y >= rect.top()) {
             let f = plot.fx(h.x);
             let i = c.f.partition_point(|&x| x < f).min(c.f.len() - 1);
-            let mut txt = format!("{}   {:.2} dB", crate::app::fmt_hz(f), c.mag[i] + norm);
+            let mut txt = format!("{}   {:.2} {}", crate::app::fmt_hz(f), c.mag[i] + norm, if self.dbfs { "dBFS" } else { "dB" });
             if self.lower == 0 {
                 txt += &format!("   {:.0}°", c.phase_deg[i]);
             }
@@ -336,6 +348,7 @@ impl Tool for Response {
         o.put("y_lo", self.y_lo);
         o.put("y_hi", self.y_hi);
         o.put("norm", self.normalize);
+        o.put("dbfs", self.dbfs);
     }
 
     fn load(&mut self, i: &SettingsIn) {
@@ -348,6 +361,7 @@ impl Tool for Response {
         i.set("y_lo", &mut self.y_lo);
         i.set("y_hi", &mut self.y_hi);
         i.set("norm", &mut self.normalize);
+        i.set("dbfs", &mut self.dbfs);
         self.y_hi = self.y_hi.clamp(-50.0, 100.0);
         self.y_lo = self.y_lo.clamp(-200.0, self.y_hi - 5.0);
     }

@@ -69,7 +69,11 @@ pub struct Distortion {
     avg_s: f32,
     y_lo: f32,
     y_hi: f32,
+    /// the scale of the plot in percent instead of dB (click the "dB" at its corner)
+    pct_scale: bool,
     show: [bool; 4],
+    /// swept harmonics: which curves are drawn (0 = THD, then H2 ...)
+    sw_show: [bool; HARM_K],
     // run state
     phase: Phase,
     plan: Vec<f32>,
@@ -86,6 +90,13 @@ pub struct Distortion {
 
 fn db_of(lin: f64) -> f32 {
     (10.0 * lin.max(1e-30).log10()) as f32
+}
+
+/// A level in dB as a percentage for the axis: "100 %", "10 %", "0.01 %".
+fn pct_axis(db: f32) -> String {
+    let p = 100.0 * 10f32.powf(db / 20.0);
+    let s = if p >= 10.0 { format!("{p:.0}") } else if p >= 1.0 { format!("{p:.1}") } else if p >= 0.1 { format!("{p:.2}") } else if p >= 0.01 { format!("{p:.3}") } else { format!("{p:.0e}") };
+    format!("{s} %")
 }
 
 fn pct(db: f32) -> String {
@@ -170,7 +181,9 @@ impl Distortion {
             avg_s: 0.8,
             y_lo: -130.0,
             y_hi: 0.0,
+            pct_scale: false,
             show: [true, true, false, false],
+            sw_show: [true; HARM_K],
             phase: Phase::Idle,
             plan: Vec::new(),
             idx: 0,
@@ -438,6 +451,13 @@ impl Tool for Distortion {
         self.controls(ui, cx);
         let swept = self.mode == 3;
         ui.horizontal_wrapped(|ui| {
+            if swept {
+                // (every curve can be hidden)
+                ui.checkbox(&mut self.sw_show[0], RichText::new("THD").color(C_THD));
+                for k in 0..HARM_K - 1 {
+                    ui.checkbox(&mut self.sw_show[k + 1], RichText::new(format!("H{}", k + 2)).color(HARM_COLS[k]));
+                }
+            }
             if !swept {
                 ui.checkbox(&mut self.show[0], RichText::new("THD+N").color(C_THDN));
                 ui.checkbox(&mut self.show[1], RichText::new("THD").color(C_THD));
@@ -457,9 +477,13 @@ impl Tool for Distortion {
         if swept {
             if let Some(h) = cx.sweep.result.as_ref().and_then(|r| r.harm.as_ref()) {
                 xs = h.f.clone();
-                curves.push(("THD".into(), C_THD, h.thd_db.clone()));
+                if self.sw_show[0] {
+                    curves.push(("THD".into(), C_THD, h.thd_db.clone()));
+                }
                 for k in 0..HARM_K - 1 {
-                    curves.push((format!("H{}", k + 2), HARM_COLS[k], h.hd_db[k].clone()));
+                    if self.sw_show[k + 1] {
+                        curves.push((format!("H{}", k + 2), HARM_COLS[k], h.hd_db[k].clone()));
+                    }
                 }
             }
         } else {
@@ -508,7 +532,8 @@ impl Tool for Distortion {
             _ => (self.l_lo - 1.0, self.l_hi + 1.0, false),
         };
         let plot = Plot::new(pr, x0, x1.max(x0 * 1.5 + 1.0), self.y_lo, self.y_hi, xlog);
-        plot.grid_y(&painter, &|v| format!("{v:.0}"));
+        let as_pct = self.pct_scale;
+        plot.grid_y(&painter, &|v| if as_pct { pct_axis(v) } else { format!("{v:.0}") });
         if xlog {
             plot.grid_x(&painter, &|f| crate::app::fmt_hz_short(f));
         } else {
@@ -537,20 +562,46 @@ impl Tool for Distortion {
             _ => "dBFS",
         };
         painter.text(Pos2::new(pr.right(), rect.bottom() - 1.0), Align2::RIGHT_BOTTOM, xl, FontId::proportional(9.0), crate::views::TXT);
-        painter.text(Pos2::new(rect.left() + 2.0, pr.top()), Align2::LEFT_TOP, "dB", FontId::proportional(9.0), crate::views::TXT);
+        // the unit of the scale: click it to switch between dB and percent
+        {
+            let r = Rect::from_min_size(Pos2::new(rect.left() + 1.0, pr.top() - 1.0), egui::vec2(26.0, 14.0));
+            let hit = ui.interact(r, ui.id().with("dist_unit"), egui::Sense::click());
+            if hit.hovered() {
+                painter.rect_filled(r, 3.0, Color32::from_white_alpha(24));
+            }
+            painter.text(Pos2::new(rect.left() + 3.0, pr.top()), Align2::LEFT_TOP, if self.pct_scale { "%" } else { "dB" }, FontId::proportional(9.5), if hit.hovered() { Color32::WHITE } else { crate::views::TXT });
+            if hit.on_hover_text("Click: show the scale in dB or in percent").clicked() {
+                self.pct_scale = !self.pct_scale;
+            }
+        }
         if xs.is_empty() {
             painter.text(pr.center(), Align2::CENTER_CENTER, if swept { "press Measure" } else { "press Start" }, FontId::proportional(13.0), crate::views::TXT);
         }
         if let Some(h) = resp.hover_pos().filter(|p| pr.contains(*p)).filter(|_| !xs.is_empty()) {
             let x = plot.fx(h.x);
             let i = xs.iter().enumerate().min_by(|a, b| (plot.tx(*a.1) - plot.tx(x)).abs().total_cmp(&(plot.tx(*b.1) - plot.tx(x)).abs())).map(|a| a.0).unwrap_or(0);
-            let mut txt = if xlog { crate::app::fmt_hz(xs[i]) } else { format!("{:.1} dBFS", xs[i]) };
-            for (name, _, v) in &curves {
+            // one line for the position, one for each curve, in a box: a single long line was cut off at the edge of the plot
+            let head = if xlog { crate::app::fmt_hz(xs[i]) } else { format!("{:.1} dBFS", xs[i]) };
+            let mut lines: Vec<(String, Color32)> = vec![(head, Color32::WHITE)];
+            for (name, col, v) in &curves {
                 if v[i].is_finite() {
-                    txt += &format!("   {name} {:.1} dB ({})", v[i], pct(v[i]));
+                    lines.push((if as_pct { format!("{name}  {} ({:.1} dB)", pct(v[i]), v[i]) } else { format!("{name}  {:.1} dB ({})", v[i], pct(v[i])) }, *col));
                 }
             }
-            plot.label(&painter, Pos2::new(pr.right() - 4.0, pr.top() + 18.0), txt, Color32::WHITE, Align2::RIGHT_TOP);
+            let g: Vec<_> = lines.iter().map(|(t, c)| painter.layout_no_wrap(t.clone(), FontId::proportional(11.0), *c)).collect();
+            let w = g.iter().map(|g| g.size().x).fold(0.0, f32::max) + 8.0;
+            let hh: f32 = g.iter().map(|g| g.size().y).sum::<f32>() + 6.0;
+            let mut at = Pos2::new(pr.right() - w - 4.0, pr.top() + 18.0);
+            if h.x > at.x - 10.0 {
+                at.x = pr.left() + 4.0;
+            }
+            painter.rect_filled(Rect::from_min_size(at, egui::vec2(w, hh)), 3.0, Color32::from_black_alpha(190));
+            let mut y = at.y + 3.0;
+            for (g, (_, c)) in g.into_iter().zip(&lines) {
+                let hgt = g.size().y;
+                painter.galley(Pos2::new(at.x + 4.0, y), g, *c);
+                y += hgt;
+            }
         }
     }
 
@@ -603,6 +654,7 @@ impl Tool for Distortion {
         o.put("smpte", self.smpte);
         o.put("settle", self.settle);
         o.put("y_lo", self.y_lo);
+        o.put("pct_scale", self.pct_scale);
         o.put("y_hi", self.y_hi);
     }
 
@@ -621,6 +673,7 @@ impl Tool for Distortion {
         i.set("smpte", &mut self.smpte);
         i.set("settle", &mut self.settle);
         i.set("y_lo", &mut self.y_lo);
+        i.set("pct_scale", &mut self.pct_scale);
         i.set("y_hi", &mut self.y_hi);
         self.f_lo = self.f_lo.clamp(10.0, 2000.0);
         self.f_hi = self.f_hi.clamp(self.f_lo * 2.0, 96000.0);

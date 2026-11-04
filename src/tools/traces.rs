@@ -47,6 +47,8 @@ pub struct Library {
     /// show everything relative to this trace
     pub rel: Option<usize>,
     pub dirty: bool,
+    /// what the traces were before the last changes (Ctrl+Z)
+    undo: Vec<(Vec<Meas>, Option<usize>)>,
     counter: usize,
     save_dlg: Option<dialogs::Pending>,
     load_dlg: Option<dialogs::Pending>,
@@ -73,7 +75,37 @@ pub fn smooth_db(v: &[f32], ppo: f32, n: f32) -> Vec<f32> {
 }
 
 impl Library {
+    /// Remember the traces as they are, before something changes them.
+    fn checkpoint(&mut self) {
+        self.undo.push((self.items.clone(), self.rel));
+        if self.undo.len() > 20 {
+            self.undo.remove(0);
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// Take the last change back.
+    pub fn undo(&mut self) {
+        if let Some((items, rel)) = self.undo.pop() {
+            self.items = items;
+            self.rel = rel;
+            self.dirty = true;
+        }
+    }
+
+    /// Ctrl+Z while the pointer is over this part of a window.
+    fn undo_key(&mut self, ui: &mut Ui) {
+        let hot = ui.rect_contains_pointer(ui.max_rect()) && !ui.ctx().egui_wants_keyboard_input();
+        if hot && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+            self.undo();
+        }
+    }
+
     pub fn add(&mut self, name: Option<String>, f: Vec<f32>, mag: Vec<f32>, phase: Vec<f32>) {
+        self.checkpoint();
         self.counter += 1;
         let id = self.counter;
         self.items.push(Meas { name: name.unwrap_or_else(|| format!("Trace {id}")), color: PALETTE[(id - 1) % PALETTE.len()], visible: true, f, mag, phase });
@@ -115,6 +147,7 @@ impl Library {
             })
             .collect();
         let name = format!("Average of {}", vis.len());
+        // (`add` remembers the traces for the undo)
         self.add(Some(name), f, mag, Vec::new());
     }
 
@@ -144,11 +177,16 @@ impl Library {
         for line in text.lines() {
             if let Some(h) = line.strip_prefix("#trace;") {
                 let p: Vec<&str> = h.split(';').collect();
-                let c = p.get(2).and_then(|c| u32::from_str_radix(c, 16).ok()).unwrap_or(0xffffff);
+                // (name; colour; visible. An older version read the colour from the visible flag: traces it saved have the colour
+                // 000001, which is repaired with a palette colour)
+                let c = p.get(1).and_then(|c| u32::from_str_radix(c, 16).ok()).filter(|c| *c > 0x00ff).unwrap_or_else(|| {
+                    let k = PALETTE[out.len() % PALETTE.len()];
+                    ((k.r() as u32) << 16) | ((k.g() as u32) << 8) | k.b() as u32
+                });
                 out.push(Meas {
                     name: p.first().unwrap_or(&"Trace").to_string(),
                     color: Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8),
-                    visible: p.get(3).map(|v| *v != "0").unwrap_or(true),
+                    visible: p.get(2).map(|v| *v != "0").unwrap_or(true),
                     f: Vec::new(),
                     mag: Vec::new(),
                     phase: Vec::new(),
@@ -209,6 +247,7 @@ impl Library {
                     let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     let new = std::fs::read(&path).map(|b| Self::parse(&String::from_utf8_lossy(&b), &name)).unwrap_or_default();
                     note = Some(if new.is_empty() { format!("{}: no curves found", path.display()) } else { format!("Loaded {} trace(s)", new.len()) });
+                    self.checkpoint();
                     for m in new {
                         self.counter += 1;
                         self.items.push(m);
@@ -238,43 +277,53 @@ impl Library {
                 }
             }
         });
-        egui::CollapsingHeader::new(title).default_open(false).id_salt("traces_header").show(ui, |ui| {
-            let mut del = None;
-            let mut dirty = false;
-            for (i, m) in self.items.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    dirty |= ui.checkbox(&mut m.visible, "").changed();
-                    dirty |= ui.color_edit_button_srgba(&mut m.color).changed();
-                    dirty |= ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(120.0).text_color(m.color)).changed();
-                    if ui.selectable_label(self.rel == Some(i), "ref").on_hover_text("Show every curve relative to this one (A - B)").clicked() {
-                        self.rel = if self.rel == Some(i) { None } else { Some(i) };
-                    }
-                    if crate::mapping::small_btn(ui, "x").clicked() {
-                        del = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = del {
-                self.items.remove(i);
-                self.rel = match self.rel {
-                    Some(r) if r == i => None,
-                    Some(r) if r > i => Some(r - 1),
-                    r => r,
-                };
-                dirty = true;
-            }
-            self.dirty |= dirty;
+        egui::CollapsingHeader::new(title).default_open(false).id_salt("traces_header").show(ui, |ui| self.manage(ui));
+    }
+
+    /// The list of traces (visible, colour, name, reference, delete) and the buttons under it: in the compact manager of the
+    /// measurement windows and in the Traces window.
+    pub fn manage(&mut self, ui: &mut Ui) {
+        self.undo_key(ui);
+        let n = self.items.len();
+        let mut del = None;
+        let mut dirty = false;
+        for (i, m) in self.items.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                if ui.add_enabled(self.items.iter().filter(|m| m.visible).count() >= 2, egui::Button::new("Average visible")).on_hover_text("New trace: power average of the visible traces").clicked() {
-                    self.average_visible();
+                dirty |= ui.checkbox(&mut m.visible, "").changed();
+                dirty |= ui.color_edit_button_srgba(&mut m.color).changed();
+                dirty |= ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(120.0).text_color(m.color)).changed();
+                if ui.selectable_label(self.rel == Some(i), "ref").on_hover_text("Show every curve relative to this one (A - B)").clicked() {
+                    self.rel = if self.rel == Some(i) { None } else { Some(i) };
                 }
-                if ui.add_enabled(self.save_dlg.is_none() && n > 0, egui::Button::new("Save...")).clicked() {
-                    self.save_dlg = Some(dialogs::save("Save traces", "Traces", &["txt"], "traces.txt".into()));
-                }
-                if ui.add_enabled(self.load_dlg.is_none(), egui::Button::new("Load...")).on_hover_text("Traces file, or any text table of frequency and dB (REW export, microphone calibration ...)").clicked() {
-                    self.load_dlg = Some(dialogs::open("Load traces", "Traces", &["txt", "cal", "csv", "frd"]));
+                if crate::mapping::small_btn(ui, "x").on_hover_text("Delete this trace (Ctrl+Z brings it back)").clicked() {
+                    del = Some(i);
                 }
             });
+        }
+        if let Some(i) = del {
+            self.checkpoint();
+            self.items.remove(i);
+            self.rel = match self.rel {
+                Some(r) if r == i => None,
+                Some(r) if r > i => Some(r - 1),
+                r => r,
+            };
+            dirty = true;
+        }
+        self.dirty |= dirty;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(self.can_undo(), egui::Button::new("Undo")).on_hover_text("Take the last change of the traces back (Ctrl+Z)").clicked() {
+                self.undo();
+            }
+            if ui.add_enabled(self.items.iter().filter(|m| m.visible).count() >= 2, egui::Button::new("Average visible")).on_hover_text("New trace: power average of the visible traces").clicked() {
+                self.average_visible();
+            }
+            if ui.add_enabled(self.save_dlg.is_none() && n > 0, egui::Button::new("Save...")).clicked() {
+                self.save_dlg = Some(dialogs::save("Save traces", "Traces", &["txt"], "traces.txt".into()));
+            }
+            if ui.add_enabled(self.load_dlg.is_none(), egui::Button::new("Load...")).on_hover_text("Traces file, or any text table of frequency and dB (REW export, microphone calibration ...)").clicked() {
+                self.load_dlg = Some(dialogs::open("Load traces", "Traces", &["txt", "cal", "csv", "frd"]));
+            }
         });
     }
 }
@@ -287,6 +336,29 @@ mod tests {
         let f: Vec<f32> = (0..100).map(|i| 20.0 * 1000f32.powf(i as f32 / 99.0)).collect();
         let m = f.iter().map(|x| gain + (x.log10() - 2.0)).collect();
         (f, m)
+    }
+
+    #[test]
+    fn colours_survive_a_save_and_a_delete_can_be_taken_back() {
+        let mut l = Library::default();
+        let (f, m) = curve(0.0);
+        l.add(Some("a".into()), f.clone(), m.clone(), vec![]);
+        l.add(Some("b".into()), f.clone(), m.clone(), vec![]);
+        l.items[1].color = Color32::from_rgb(10, 200, 90);
+        l.items[1].visible = false;
+        let back = Library::parse(&l.to_text(), "x");
+        assert_eq!(back[1].color, Color32::from_rgb(10, 200, 90));
+        assert!(!back[1].visible && back[0].visible);
+        // a file of the old version has 000001 as the colour: a palette colour instead of black
+        let old = "#trace;t;000001;1\n100,0,\n200,1,\n";
+        let t = Library::parse(old, "x");
+        assert_ne!(t[0].color, Color32::from_rgb(0, 0, 1));
+        // delete and undo
+        l.checkpoint();
+        l.items.remove(0);
+        assert_eq!(l.items.len(), 1);
+        l.undo();
+        assert_eq!(l.items.len(), 2);
     }
 
     #[test]

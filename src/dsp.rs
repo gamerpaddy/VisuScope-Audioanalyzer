@@ -269,6 +269,9 @@ impl State {
     fn rebuild(&mut self, planner: &mut FftPlanner<f32>, p: &Params, sr: u32) {
         let n = p.fft_size;
         let size_changed = n != self.n;
+        // the average, maximum and minimum belong to the bins: only another size, window or rate makes them meaningless (the
+        // log / linear axis changes how the spectrogram rows map to the bins, not the spectrum)
+        let keep_traces = !size_changed && p.window == self.win && sr == self.sr;
         if self.sr != sr || self.log != p.log_freq {
             self.epoch += 1;
         }
@@ -303,7 +306,9 @@ impl State {
             self.scallop_db = (20.0 * (w0 / (re * re + im * im).sqrt().max(1e-30)).log10()) as f32;
             self.peak_tab = peak_table(p.window);
         }
-        self.reset_traces();
+        if !keep_traces {
+            self.reset_traces();
+        }
         let _ = size_changed;
 
         // Spectrogram row -> bin mapping.

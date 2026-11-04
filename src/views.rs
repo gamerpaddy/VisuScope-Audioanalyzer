@@ -344,7 +344,7 @@ impl App {
             }
         }
         painter.rect_stroke(plot, 0.0, Stroke::new(1.0, GRID_MAJOR), egui::StrokeKind::Inside);
-        painter.text(Pos2::new(rect.left() + 2.0, plot.top()), Align2::LEFT_TOP, self.unit_name(), FontId::proportional(9.0), TXT);
+        painter.text(Pos2::new(rect.left() + 2.0, plot.top()), Align2::LEFT_TOP, self.spec_unit_name(), FontId::proportional(9.0), TXT);
 
         if self.an.n == 0 {
             painter.text(plot.center(), Align2::CENTER_CENTER, "waiting for audio...", FontId::proportional(14.0), TXT);
@@ -360,7 +360,8 @@ impl App {
                 self.u_to_f(u) / bin_hz
             })
             .collect();
-        let offs = [self.unit_off(0), self.unit_off(1)];
+        let dens = self.density_off();
+        let offs = [self.unit_off(0) + dens, self.unit_off(1) + dens];
         let sm = crate::app::SMOOTH_OCT[self.smooth_oct].0;
         let trace = |data: &[f32], off: f32| -> Vec<Pos2> {
             let mut pts = Vec::with_capacity(w);
@@ -464,7 +465,7 @@ impl App {
                 clip.line_segment([Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())], Stroke::new(1.0, c));
                 let lv = self.level_at(f, self.meas_ch).map(|v| v + offs[self.meas_ch.min(1)]);
                 let txt = match lv {
-                    Some(v) => format!("{name} {}  {v:.1} {}", fmt_hz(f), self.unit_name()),
+                    Some(v) => format!("{name} {}  {v:.1} {}", fmt_hz(f), self.spec_unit_name()),
                     None => format!("{name} {}", fmt_hz(f)),
                 };
                 let ty = fclamp(lv.map(|v| y_of_db(v)).unwrap_or(plot.top() + 20.0), plot.top() + 20.0, plot.bottom() - 10.0);
@@ -485,7 +486,7 @@ impl App {
             let f = self.u_to_f(u);
             let l = self.level_at(f, 0).map(|v| format!("{:.1}", v + offs[0])).unwrap_or("-".into());
             let r = self.level_at(f, 1).map(|v| format!("{:.1}", v + offs[1])).unwrap_or("-".into());
-            self.draw_cursor_label(&painter, plot.right_top() + vec2(-4.0, 4.0), format!("{}   L {l}  R {r} {}", fmt_hz(f), self.unit_name()), Color32::WHITE, Align2::RIGHT_TOP);
+            self.draw_cursor_label(&painter, plot.right_top() + vec2(-4.0, 4.0), format!("{}   L {l}  R {r} {}", fmt_hz(f), self.spec_unit_name()), Color32::WHITE, Align2::RIGHT_TOP);
         }
     }
 

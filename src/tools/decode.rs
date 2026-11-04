@@ -57,6 +57,8 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<(u32, Vec<Vec<f32>>), Str
     let mut dec = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).map_err(|e| format!("unsupported codec ({e})"))?;
     let (mut sr, mut chans) = (track.codec_params.sample_rate.unwrap_or(0), track.codec_params.channels.map(|c| c.count()).unwrap_or(0));
     let mut out: Vec<Vec<f32>> = Vec::new();
+    // what fits into the memory that is free now (taken at the start: the file itself uses it up as it is read)
+    let limit = wavio::max_samples();
     let mut buf: Option<SampleBuffer<f32>> = None;
     loop {
         let packet = match format.next_packet() {
@@ -96,7 +98,7 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<(u32, Vec<Vec<f32>>), Str
                         o.push(fr[c]);
                     }
                 }
-                if out.len() as u64 * out[0].len() as u64 > wavio::MAX_SAMPLES {
+                if out.len() as u64 * out[0].len() as u64 > limit {
                     return Err(wavio::too_large_msg());
                 }
             }

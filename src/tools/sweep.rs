@@ -70,11 +70,20 @@ pub struct SweepParams {
     /// R input carries the reference (loopback of the output); L is the device under test
     pub loopback: bool,
     pub dut_ch: usize,
+    /// sweep from 5 Hz to the top of the sample rate (the range below is not used)
+    pub full: bool,
+}
+
+impl SweepParams {
+    /// The sweep range at a sample rate: (start, end) in Hz.
+    pub fn span(&self, sr: f32) -> (f32, f32) {
+        if self.full { (5.0, (sr * 0.49).max(1000.0)) } else { (self.f0, self.f1.min(sr * 0.5 * 0.98)) }
+    }
 }
 
 impl Default for SweepParams {
     fn default() -> Self {
-        Self { f0: 20.0, f1: 20000.0, secs: 3.0, amp_db: -12.0, tail: 1.5, averages: 1, ir_ms: 1500.0, resp_ms: 250.0, loopback: false, dut_ch: 0 }
+        Self { f0: 20.0, f1: 20000.0, secs: 3.0, amp_db: -12.0, tail: 1.5, averages: 1, ir_ms: 1500.0, resp_ms: 250.0, loopback: false, dut_ch: 0, full: false }
     }
 }
 
@@ -159,11 +168,30 @@ pub struct Sweep {
     slot: Arc<Mutex<Option<Result<RunOut, String>>>>,
     acc: Option<Acc>,
     next_id: u64,
+    /// what was captured so far (the analysers' ring holds only a few seconds: the sweep takes what it needs from it as it goes)
+    cap: [Vec<f32>; 2],
+}
+
+/// Shift an unwrapped phase curve by whole turns so that bin `k` lies within half a turn of zero.
+pub fn anchor_phase(phase: &mut [f32], k: usize) {
+    let Some(&at) = phase.get(k.min(phase.len().saturating_sub(1))) else { return };
+    let turns = (at / TAU as f32).round() * TAU as f32;
+    if turns != 0.0 {
+        phase.iter_mut().for_each(|p| *p -= turns);
+    }
+}
+
+/// The deconvolution works on blocks of this many frames at most (memory: about 80 bytes for each).
+pub const MAX_FFT: usize = 1 << 24;
+
+/// The longest sweep + tail (seconds, sweep counted twice) the deconvolution can do at a rate.
+pub fn max_total_secs(sr: f32) -> f32 {
+    MAX_FFT as f32 / sr.max(1.0)
 }
 
 impl Sweep {
     pub fn new() -> Self {
-        Self { p: SweepParams::default(), state: State::Idle, result: None, slot: Arc::new(Mutex::new(None)), acc: None, next_id: 1 }
+        Self { p: SweepParams::default(), state: State::Idle, result: None, slot: Arc::new(Mutex::new(None)), acc: None, next_id: 1, cap: [Vec::new(), Vec::new()] }
     }
 
     pub fn busy(&self) -> bool {
@@ -200,12 +228,15 @@ impl Sweep {
         let sr = sh.sr.load(Relaxed) as f32;
         let secs = self.p.secs as f64;
         let need = ((self.p.secs + self.p.tail) * sr) as u64;
-        if need as usize + 16384 > RING_CAP {
-            self.state = State::Failed("capture too long for the sample buffer at this rate: reduce sweep time or tail".into());
+        // the length is limited by the memory of the deconvolution (the sweep and the capture are transformed together)
+        let nfft = (need as usize + (secs * sr as f64) as usize).next_power_of_two();
+        if nfft > MAX_FFT {
+            self.state = State::Failed(format!("sweep and tail too long for the memory of the analysis at {sr:.0} Hz: at most {:.0} s of tail plus twice the sweep length", max_total_secs(sr)));
             return;
         }
+        self.cap = [Vec::new(), Vec::new()];
         let t0 = sh.ring.lock().total;
-        *PLAYER.lock() = Some(PlayJob { f0: self.p.f0 as f64, f1: (self.p.f1.min(sr * 0.5 * 0.98)) as f64, secs, amp: 10f32.powf(self.p.amp_db / 20.0), pos: 0 });
+        *PLAYER.lock() = Some(PlayJob { f0: self.p.span(sr).0 as f64, f1: self.p.span(sr).1 as f64, secs, amp: 10f32.powf(self.p.amp_db / 20.0), pos: 0 });
         PLAY_ACTIVE.store(true, Relaxed);
         self.state = State::Capturing { t0, need, since: Instant::now(), run };
     }
@@ -221,7 +252,7 @@ impl Sweep {
                     req.start_gen = true;
                     // wait for the output stream to come up
                     if t.elapsed() > Duration::from_secs(6) {
-                        self.state = State::Failed("generator output did not start".into());
+                        self.state = State::Failed("generator output did not start (with the routing graph: connect a Generator node to an Output node)".into());
                     }
                 } else if t.elapsed() > Duration::from_millis(900) {
                     self.post_job(sh, 0);
@@ -234,11 +265,29 @@ impl Sweep {
                     self.state = State::Failed("input restarted during the measurement".into());
                     return;
                 }
-                if total >= t0 + need {
-                    let n = need as usize;
-                    let (mut l, mut r) = (vec![0f32; n], vec![0f32; n]);
-                    sh.ring.lock().copy_abs(t0 as usize, &mut l, &mut r);
-                    let (p, slot) = (self.p.clone(), self.slot.clone());
+                // take over what arrived since the last frame (the ring holds only a few seconds: a stall of the program longer than
+                // that would lose some)
+                let have = self.cap[0].len();
+                let upto = total.min(t0 + need) as usize;
+                let from = t0 as usize + have;
+                if upto > from {
+                    if upto - from > RING_CAP - 8192 {
+                        self.cancel();
+                        self.state = State::Failed("the program stalled for too long during the measurement: try again".into());
+                        return;
+                    }
+                    let k = upto - from;
+                    for c in &mut self.cap {
+                        c.resize(have + k, 0.0);
+                    }
+                    let [cl, cr] = &mut self.cap;
+                    sh.ring.lock().copy_abs(from, &mut cl[have..], &mut cr[have..]);
+                }
+                if self.cap[0].len() as u64 >= need {
+                    let [l, r] = std::mem::take(&mut self.cap);
+                    let mut p = self.p.clone();
+                    (p.f0, p.f1) = p.span(sr);
+                    let slot = self.slot.clone();
                     self.state = State::Computing { run };
                     std::thread::Builder::new()
                         .name("sweep-fft".into())
@@ -328,6 +377,10 @@ impl Sweep {
             phase.push(prev);
             coh.push((acc.a[i].norm_sqr() / (acc.b[i] * acc.c[i]).max(1e-30)).min(1.0) as f32);
         }
+        // the unwrapping started at the lowest bin, whose phase is noise: the whole curve could end up a turn (or half a turn) off.
+        // Put the curve into the range of one turn around zero where the sweep is (at its geometric middle)
+        let (sf0, sf1) = self.p.span(sr);
+        anchor_phase(&mut phase, ((sf0 * sf1).sqrt() / df) as usize);
         let ir: Vec<f32> = acc.ir.iter().map(|v| v / n).collect();
         let id = self.next_id;
         self.next_id += 1;
@@ -351,7 +404,11 @@ impl Sweep {
             h: Transfer { df, mag_db: mag, phase, coh: (acc.n >= 2).then_some(coh) },
             runs: acc.n,
             capture_peak_db: acc.peak_db,
-            params: self.p.clone(),
+            params: {
+                let mut p = self.p.clone();
+                (p.f0, p.f1) = p.span(sr);
+                p
+            },
             id,
         });
         self.state = State::Done;
@@ -367,7 +424,9 @@ fn gated_spectrum(planner: &mut FftPlanner<f64>, h: &[f32], pk: usize, lo: f64, 
         return None;
     }
     let len = (b - a) as usize;
-    let edge = (len as f64 * 0.2) as usize;
+    // (a Hann window over the whole gate: the skirts of the neighbouring responses leak less into the reading, which matters most
+    // at low frequencies, where a gate holds only a few periods)
+    let edge = (len as f64 * 0.5) as usize;
     let x: Vec<f32> = (0..len)
         .map(|i| {
             let d = i.min(len - 1 - i);
@@ -399,7 +458,8 @@ fn harmonics(h: &[f32], pk: usize, srf: f64, secs: f64, lr: f64, f0: f64, f1: f6
             .iter()
             .map(|&fi| {
                 let nu = fi as f64 * k as f64;
-                if nu > top {
+                // (the start of the sweep: the band edge and the abrupt start of the sweep read as distortion there)
+                if nu > top || (fi as f64) < f0 * 1.4 {
                     return f64::NAN;
                 }
                 spec[((nu / srf * n as f64).round() as usize).min(n / 2)].norm_sqr()
@@ -526,6 +586,69 @@ mod tests {
             out[i + delay] = gain * y;
         }
         out
+    }
+
+    #[test]
+    fn a_capture_longer_than_the_ring_is_taken_over_piece_by_piece() {
+        // the ring holds 2^20 frames; the capture is one and a half times that, delivered in pieces between the frames of the UI
+        let sh = Arc::new(Shared::new());
+        sh.sr.store(48000, Relaxed);
+        let mut sw = Sweep::new();
+        let need = (RING_CAP * 3 / 2) as u64;
+        sw.state = State::Capturing { t0: 0, need, since: Instant::now(), run: 0 };
+        let mut req = Requests::default();
+        let mut pushed = 0u64;
+        while pushed < need + 4000 {
+            {
+                let mut ring = sh.ring.lock();
+                for _ in 0..100_000 {
+                    // a tone, so that something is captured
+                    ring.push((pushed as f32 * 0.05).sin() * 0.3, 0.0);
+                    pushed += 1;
+                }
+            }
+            sw.tick(&sh, true, &mut req);
+            assert!(!matches!(sw.state, State::Failed(_)), "failed while capturing");
+        }
+        // everything was taken: the analysis is running (or has finished with a verdict on this made-up signal)
+        assert!(matches!(sw.state, State::Computing { .. } | State::Failed(_) | State::Done), "{:?}", matches!(sw.state, State::Capturing { .. }));
+    }
+
+    #[test]
+    fn the_phase_curve_is_put_within_a_turn_of_zero() {
+        // a flat curve that was unwrapped from a start a turn and a half off
+        let mut p = vec![3.0 * std::f32::consts::PI + 0.1; 50];
+        anchor_phase(&mut p, 25);
+        assert!(p.iter().all(|v| v.abs() <= std::f32::consts::PI + 0.2), "{:?}", &p[..3]);
+        let mut q = vec![0.2f32; 10];
+        anchor_phase(&mut q, 3);
+        assert_eq!(q, vec![0.2f32; 10]);
+        anchor_phase(&mut [], 5);
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_thd_of_an_ideal_loopback() {
+        for (secs, f0) in [(3.0f32, 20.0f32), (10.0, 20.0), (3.0, 5.0)] {
+            let sr = 48000.0;
+            let p = SweepParams { secs, tail: 1.0, amp_db: -12.0, f0, f1: 20000.0, ..Default::default() };
+            let amp = 10f32.powf(p.amp_db / 20.0);
+            let n = (p.secs as f64 * sr as f64) as usize;
+            let play: Vec<f32> = (0..n).map(|i| ess(i as f64 / sr as f64, f0 as f64, 20000.0, secs as f64) as f32 * amp).collect();
+            let mut cap = vec![0f32; 240];
+            cap.extend(&play);
+            cap.extend(vec![0f32; sr as usize]);
+            let silent = vec![0f32; cap.len()];
+            let out = process_run(&cap, &silent, sr, &p).expect("process");
+            let hp = out.harm.expect("harmonics");
+            print!("secs {secs} f0 {f0}: ");
+            for f in [f0 * 1.0, f0 * 1.5, f0 * 2.0, f0 * 4.0, 200.0, 1000.0] {
+                let i = hp.f.iter().position(|&x| x >= f).unwrap_or(0);
+                let thd: f64 = (1..HARM_K).map(|k| hp.p[k][i]).filter(|v| v.is_finite()).sum();
+                print!("{:.0}Hz {:.1} dB  ", hp.f[i], 10.0 * (thd / hp.p[0][i]).log10());
+            }
+            println!();
+        }
     }
 
     #[test]
