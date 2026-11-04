@@ -150,6 +150,7 @@ pub struct KindInfo {
 const SRC: (u8, u8, u8) = (70, 140, 100);
 const FX: (u8, u8, u8) = (90, 110, 170);
 const SNK: (u8, u8, u8) = (170, 100, 80);
+const CTL: (u8, u8, u8) = (190, 130, 60);
 
 impl Kind {
     pub const ALL: [Kind; 29] = [
@@ -201,7 +202,7 @@ impl Kind {
             Kind::Fuzz => k("Fuzz", "Effect", "fuzz box guitar clip sputter", 1, 1, P_FUZZ, FX),
             Kind::Crusher => k("Bit crusher", "Effect", "bitcrusher bit depth sample rate reduce lofi quantise", 1, 1, P_CRUSH, FX),
             Kind::Jitter => k("Jitter / wow & flutter", "Effect", "jitter clock timing wow flutter vibrato modulation", 1, 1, P_JITTER, FX),
-            Kind::ControlLp => k("Control low-pass", "Effect", "smooth lowpass slew control signal lfo modulation filter eases", 1, 1, P_CLP, FX),
+            Kind::ControlLp => k("Control low-pass", "Control", "smooth lowpass low-pass slew control signal lfo modulation filter eases", 1, 1, P_CLP, CTL),
             Kind::Tremolo => k("Tremolo", "Effect", "tremolo amplitude modulation lfo", 1, 1, P_TREM, FX),
             Kind::Stereo => k("Stereo width", "Effect", "width balance pan mid side", 1, 1, P_STEREO, FX),
             Kind::Utility => k("Channel utility", "Effect", "mono swap invert left right channel phase", 1, 1, P_UTIL, FX),

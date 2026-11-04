@@ -384,6 +384,8 @@ pub struct Routing {
     cmds: Vec<String>,
     /// listening probe: on, its volume (dB), whether the normal outputs go quiet, what it hovers over now and whether that is the body of a node
     probe_on: bool,
+    /// counts the opened search windows (each gets its own area, so that it does not keep the size of the one before)
+    search_n: u32,
     /// where the probe plays (see `Bus::probe_dev`)
     probe_dev: String,
     probe_db: f32,
@@ -485,7 +487,7 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, search_n: 0, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     /// Values and mutes that input bindings set (a knob moves many times a frame: only the last value counts).
@@ -711,6 +713,9 @@ impl Routing {
 
     fn search_ui(&mut self, ui: &mut Ui, cx: &Ctx, canvas: Rect) {
         let Some(mut s) = self.search.take() else { return };
+        if !s.focused {
+            self.search_n = self.search_n.wrapping_add(1);
+        }
         let entries = self.entries(cx);
         let words: Vec<String> = s.text.to_lowercase().split_whitespace().map(|w| w.to_string()).collect();
         let want_in = matches!(s.link, Link::FromOut(..) | Link::Insert(..));
@@ -740,7 +745,7 @@ impl Routing {
         let screen = canvas.min + self.pan + s.at.to_vec2() * self.zoom;
         let pos = pos2(screen.x.clamp(canvas.left() + 4.0, (canvas.right() - 660.0).max(canvas.left() + 4.0)), screen.y.clamp(canvas.top() + 4.0, (canvas.bottom() - 260.0).max(canvas.top() + 4.0)));
         let mut close = esc;
-        let area = egui::Area::new(egui::Id::new("routing_search")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+        let area = egui::Area::new(egui::Id::new(("routing_search", self.search_n))).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 // the groups side by side need their room (a popup is otherwise as wide as the widest line it has had so far)
                 ui.set_width(if s.text.trim().is_empty() { 640.0 } else { 260.0 });
@@ -1249,7 +1254,8 @@ impl Routing {
                                 ch |= crate::slider::bound(ui, &mut n.p[2 + k], -60.0, 12.0, false, 0.0, &t, crate::slider::Fmt::new(" dB", 1), |_| {});
                             }
                         });
-                        param_port(ui, z, pos2(ui.max_rect().left() - 10.0 * z, ui.min_rect().center().y), nid, 2 + k, (-60.0, 12.0, false, " dB"));
+                        // (at the right edge: the left edge has the input dot of the row)
+                        param_port(ui, z, pos2(ui.max_rect().right() + 10.0 * z, ui.min_rect().center().y), nid, 2 + k, (-60.0, 12.0, false, " dB"));
                         let mb = ui.selectable_label(muted, "M").on_hover_text("Mute this input");
                         crate::mapping::button_menu(&mb, &crate::mapping::Target::toggle(format!("mixm:{}:{}", n.id, k), format!("Mixer #{}: mute input {}", n.id, k + 1), true));
                         if mb.clicked() {
