@@ -39,6 +39,13 @@ pub fn list_devices() -> Vec<DevInfo> {
             out.push(DevInfo { id, label });
         }
     }
+    // ASIO drivers with inputs
+    for (name, info) in crate::asio::usable() {
+        if info.as_ref().is_some_and(|i| i.n_in == 0) {
+            continue;
+        }
+        out.push(DevInfo { id: format!("{}{name}", crate::asio::PREFIX), label: format!("[ASIO] {name}") });
+    }
     out.sort_by_key(|d| {
         let default = d.label.contains("(default)");
         let input = d.label.starts_with("[Input]");
@@ -138,7 +145,7 @@ pub fn start(sh: Arc<Shared>, id: String) -> AudioHandle {
                             // `dead` also silences the old callback. An invalidated stream can block forever
                             // when dropped, so leak it instead.
                             crate::log::log("audio: abandoning old stream (not dropping it)");
-                            std::mem::forget(stream);
+                            stream.abandon();
                             *sh.status.lock() = "Device format changed - reconnecting...".into();
                             sleep_unless_stopped(&stop2, 400);
                         } else {
@@ -164,6 +171,9 @@ pub fn start(sh: Arc<Shared>, id: String) -> AudioHandle {
 
 /// (sample rate, channels, format) the device currently offers; `None` if it cannot be queried.
 fn current_key(id: &str) -> Option<(u32, u16, SampleFormat)> {
+    if crate::asio::is_asio(id) {
+        return crate::asio::probe(crate::asio::name_of(id)).map(|i| (i.sr, i.n_in as u16, SampleFormat::F32));
+    }
     let host = cpal::default_host();
     let did: cpal::DeviceId = id.parse().ok()?;
     let dev = host.device_by_id(&did)?;
@@ -171,7 +181,27 @@ fn current_key(id: &str) -> Option<(u32, u16, SampleFormat)> {
     Some((cfg.sample_rate(), cfg.channels(), cfg.sample_format()))
 }
 
-fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<(cpal::Stream, String, (u32, u16, SampleFormat)), String> {
+fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<(crate::asio::Held, String, (u32, u16, SampleFormat)), String> {
+    if crate::asio::is_asio(id) {
+        // an ASIO driver: all its input channels, at the rate the driver runs at
+        let (sh2, d2) = (sh.clone(), dead.clone());
+        let mut got = (0u32, 0usize);
+        let (port, info) = crate::asio::open_input(crate::asio::name_of(id), dead.clone(), |i| {
+            got = (i.sr, i.n_in);
+            {
+                let mut r = sh2.ring.lock();
+                r.total = 0;
+                r.l.fill(0.0);
+                r.r.fill(0.0);
+            }
+            sh2.sr.store(i.sr, Relaxed);
+            sh2.chans.store(i.n_in as u32, Relaxed);
+            Box::new(input_body::<f32>(sh2.clone(), gid, d2.clone(), i.n_in, i.sr))
+        })?;
+        sh.xruns.store(0, Relaxed);
+        let _ = got;
+        return Ok((crate::asio::Held::Asio(port), format!("ASIO {} Hz, {} ch, {} frames", info.sr, info.n_in, info.buf), (info.sr, info.n_in as u16, SampleFormat::F32)));
+    }
     let host = cpal::default_host();
     let did: cpal::DeviceId = id.parse().map_err(|e| format!("bad device id: {e:?}"))?;
     let dev = host.device_by_id(&did).ok_or_else(|| "device not found".to_string())?;
@@ -221,7 +251,7 @@ fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<
     let stream = build_with(sc).or_else(|_| build_with(sc_default)).map_err(|e| format!("{e} (format {fmt:?}, {sr} Hz)"))?;
     sh.xruns.store(0, Relaxed);
     stream.play().map_err(|e| format!("{e}"))?;
-    Ok((stream, format!("{sr} Hz, {ch} ch, {fmt:?}"), (sr, ch, fmt)))
+    Ok((crate::asio::Held::Cpal(stream), format!("{sr} Hz, {ch} ch, {fmt:?}"), (sr, ch, fmt)))
 }
 
 fn make<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, sh: Arc<Shared>, gid: u32, dead: Arc<AtomicBool>) -> Result<cpal::Stream, cpal::Error>
@@ -231,14 +261,38 @@ where
 {
     let ch = cfg.channels as usize;
     let in_sr = cfg.sample_rate;
-    let (mut ml, mut mr): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
-    let mut band = crate::graph::dsp::BandFilter::default();
     let sh_err = sh.clone();
-    let dead_cb = dead.clone();
-    let mut timer = crate::prof::CbTimer::new();
+    let mut f = input_body::<T>(sh, gid, dead.clone(), ch, in_sr);
     dev.build_input_stream(
         cfg,
-        move |data: &[T], _: &_| {
+        move |data: &[T], _: &_| f(data),
+        move |e| match e.kind() {
+            cpal::ErrorKind::Xrun => {
+                sh_err.xruns.fetch_add(1, Relaxed);
+                crate::prof::C.xruns.fetch_add(1, Relaxed);
+            }
+            // harmless: stream is still running
+            cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
+            // anything else means the stream is gone (format changed, device removed): rebuild it
+            _ => {
+                crate::log::log(&format!("audio: stream error {:?}: {e} -> rebuilding", e.kind()));
+                dead.store(true, Relaxed)
+            }
+        },
+        None,
+    )
+}
+
+/// What happens with a block of the input (the same for cpal and for ASIO).
+fn input_body<T>(sh: Arc<Shared>, gid: u32, dead_cb: Arc<AtomicBool>, ch: usize, in_sr: u32) -> impl FnMut(&[T]) + Send + 'static
+where
+    T: Copy + Send + 'static,
+    f32: FromSample<T>,
+{
+    let (mut ml, mut mr): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
+    let mut band = crate::graph::dsp::BandFilter::default();
+    let mut timer = crate::prof::CbTimer::new();
+    move |data: &[T]| {
             timer.begin();
             // a stream that has been replaced or abandoned must not feed the ring any more
             if sh.audio_gen.load(Relaxed) != gid || dead_cb.load(Relaxed) {
@@ -282,20 +336,5 @@ where
             sh.last_data_ms.store(sh.t0.elapsed().as_millis() as u64, Relaxed);
             sh.cv.notify_one();
             timer.done(data.len() / ch.max(1), in_sr);
-        },
-        move |e| match e.kind() {
-            cpal::ErrorKind::Xrun => {
-                sh_err.xruns.fetch_add(1, Relaxed);
-                crate::prof::C.xruns.fetch_add(1, Relaxed);
-            }
-            // harmless: stream is still running
-            cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
-            // anything else means the stream is gone (format changed, device removed): rebuild it
-            _ => {
-                crate::log::log(&format!("audio: stream error {:?}: {e} -> rebuilding", e.kind()));
-                dead.store(true, Relaxed)
-            }
-        },
-        None,
-    )
+    }
 }

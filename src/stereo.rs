@@ -216,13 +216,16 @@ impl App {
         let avail = ui.available_size();
         if avail.x < 620.0 {
             // narrow cell: scope on top, meters underneath, scrollable
-            let side = (avail.x - 16.0).min(avail.y * 0.62).max(100.0);
+            // with the meters too, the scope gives up room so that both fit without scrolling (as far as the window allows)
+            let below = if self.stereo.show[4] { 110.0 } else { 8.0 };
+            let side = if xy && meters { (avail.x - 16.0).min((avail.y - below) * 0.42).max(90.0) } else { (avail.x - 16.0).min(avail.y * 0.62).max(100.0) };
+            let meters_h = if xy { (avail.y - side - below - 14.0).max(150.0) } else { (avail.y - 8.0).max(150.0) };
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 if xy {
                     self.gonio_ui(ui, side);
                 }
                 if meters {
-                    self.meters_ui(ui, Some(190.0));
+                    self.meters_ui(ui, Some(meters_h));
                 }
             });
             return;
@@ -321,8 +324,13 @@ impl App {
 
     fn meters_ui(&mut self, ui: &mut Ui, fixed: Option<f32>) {
         let gs = Stroke::new(1.0, GRID_MAJOR);
-        let rest = fixed.unwrap_or_else(|| (ui.available_height() - 76.0).clamp(120.0, 600.0));
         let [_, show_meter, show_hist, show_freq, _] = self.stereo.show;
+        // what the meter and its text take, plus the gaps between the blocks, comes off the room for the plots
+        let sp = ui.spacing().item_spacing.y;
+        let items = show_meter as usize * 2 + show_hist as usize + show_freq as usize;
+        let overhead = if show_meter { 34.0 + 16.0 } else { 0.0 } + sp * items.saturating_sub(1) as f32 + 12.0;
+        // a given height is for the whole block, meter included
+        let rest = fixed.map(|f| (f - overhead).clamp(60.0, 600.0)).unwrap_or_else(|| (ui.available_height() - overhead).clamp(60.0, 600.0));
         let (hist_h, band_h) = match (show_hist, show_freq) {
             (true, true) => (rest * 0.36, rest * 0.64 - 10.0),
             (true, false) => (rest - 10.0, 0.0),

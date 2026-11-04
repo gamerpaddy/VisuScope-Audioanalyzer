@@ -282,6 +282,9 @@ struct RtMod {
     m: Modulation,
     /// the value after the low-pass (what is applied)
     last: f32,
+    /// a two-entry setting (on / off): the state it is in, and whether this is one
+    on: Option<bool>,
+    sw: bool,
 }
 
 struct Run {
@@ -515,6 +518,7 @@ impl Run {
             }
             Rt::Phase(u) => {
                 u.set(&pv, fs);
+                u.set_curve(&n.s, fs);
                 let ms = u.latency() as f32 * 1000.0 / fs;
                 let st = if ms > 0.0 { format!("delays the signal by {ms:.1} ms") } else { String::new() };
                 e.node_status.lock().insert(n.id, st);
@@ -620,7 +624,7 @@ impl Run {
         }
         drop(old);
         self.nodes = nodes;
-        self.mods = g.mods.iter().filter_map(|m| Some(RtMod { dst: *idx.get(&m.node)?, src: *idx.get(&m.src)?, node: g.node(m.node)?.clone(), m: *m, last: f32::NAN })).collect();
+        self.mods = g.mods.iter().filter_map(|m| Some(RtMod { dst: *idx.get(&m.node)?, src: *idx.get(&m.src)?, node: g.node(m.node)?.clone(), m: *m, last: f32::NAN, on: None, sw: g.node(m.node)?.kind.info().params.get(m.param).is_some_and(|d| d.choices.len() == 2) })).collect();
         // the longest delay the nodes add between an input and an output (for the display of the total delay)
         {
             let fs = self.rate as f32;
@@ -939,7 +943,15 @@ impl Run {
                 let b = &self.nodes[rm.src].out;
                 let len = n.min(b[0].len());
                 let mean = if len == 0 { 0.0 } else { (0..len).map(|k| 0.5 * (b[0][k] + b[1][k])).sum::<f32>() / len as f32 };
-                let v = rm.m.map(mean);
+                let v = if rm.sw {
+                    // a switch: on above the upper threshold, off below the lower one, in between it stays as it was
+                    let (lo, hi) = (rm.m.in_lo.min(rm.m.in_hi), rm.m.in_lo.max(rm.m.in_hi));
+                    let on = if mean >= hi && mean.is_finite() { true } else if mean <= lo { false } else { rm.on.unwrap_or(mean >= 0.5 * (lo + hi)) };
+                    rm.on = Some(on);
+                    if on { rm.m.out_hi } else { rm.m.out_lo }
+                } else {
+                    rm.m.map(mean)
+                };
                 if rm.last.is_nan() || (v - rm.last).abs() > 1e-6 * (rm.m.out_hi - rm.m.out_lo).abs().max(1e-6) {
                     rm.last = v;
                     if let Some(slot) = rm.node.p.get_mut(rm.m.param) {
@@ -1590,6 +1602,44 @@ mod tests {
         run.mods[0].m.in_hi = 6.0;
         run.chunk(CHUNK, false);
         assert_eq!(run.mods[0].node.p[0], -40.0);
+    }
+
+    #[test]
+    fn a_signal_switches_an_on_off_setting_with_hysteresis() {
+        let mut g = Graph::default();
+        let a = g.add(Kind::Generator, 0.0, 0.0);
+        let b = g.add(Kind::Generator, 0.0, 0.0);
+        let gain = g.add(Kind::Gain, 0.0, 0.0);
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.node_mut(a).unwrap().p[0] = 1.0;
+        g.node_mut(b).unwrap().p[0] = 2.0;
+        g.connect(b, gain, 0).unwrap();
+        g.connect(gain, an, 0).unwrap();
+        // param 1 of a gain node is its polarity (two entries); the signal's mean is about 0
+        assert!(g.set_modulation(Modulation { node: gain, param: 1, src: a, in_lo: -0.2, in_hi: -0.1, out_lo: 0.0, out_hi: 1.0, log: false }));
+        let mut ga = GenParams::default();
+        ga.wave = crate::tonegen::Wave::Sine;
+        let (mut run, _sh) = engine_with(g, vec![ga, GenParams::default()]);
+        for _ in 0..6 {
+            run.chunk(CHUNK, false);
+        }
+        assert!(run.mods[0].sw);
+        // above the upper threshold: on
+        assert_eq!(run.mods[0].node.p[1], 1.0);
+        // between the thresholds it keeps its state
+        run.mods[0].m.in_lo = -1.0;
+        run.mods[0].m.in_hi = 1.0;
+        run.chunk(CHUNK, false);
+        assert_eq!(run.mods[0].node.p[1], 1.0);
+        // below the lower threshold: off, and again it stays when the thresholds widen
+        run.mods[0].m.in_lo = 0.5;
+        run.mods[0].m.in_hi = 0.6;
+        run.chunk(CHUNK, false);
+        assert_eq!(run.mods[0].node.p[1], 0.0);
+        run.mods[0].m.in_lo = -1.0;
+        run.mods[0].m.in_hi = 1.0;
+        run.chunk(CHUNK, false);
+        assert_eq!(run.mods[0].node.p[1], 0.0);
     }
 
     #[test]

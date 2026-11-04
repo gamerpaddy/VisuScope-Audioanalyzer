@@ -3,7 +3,7 @@
 
 use crate::audio::DevInfo;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, SampleFormat, SizedSample};
+use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
@@ -520,6 +520,12 @@ pub fn list_output_devices() -> Vec<DevInfo> {
             out.push(DevInfo { id, label: format!("{name}{star}") });
         }
     }
+    for (name, info) in crate::asio::usable() {
+        if info.as_ref().is_some_and(|i| i.n_out == 0) {
+            continue;
+        }
+        out.push(DevInfo { id: format!("{}{name}", crate::asio::PREFIX), label: format!("[ASIO] {name}") });
+    }
     out.sort_by_key(|d| (!d.label.contains("(default)"), d.label.clone()));
     out
 }
@@ -581,7 +587,7 @@ pub fn start(params: Arc<Mutex<GenParams>>, id: String, status: Arc<Mutex<String
                             }
                         }
                         if dead.load(Relaxed) && !stop2.load(Relaxed) {
-                            std::mem::forget(stream);
+                            stream.abandon();
                             *status.lock() = "Device format changed - reconnecting...".into();
                             sleep_unless_stopped(&stop2, 400);
                         } else {
@@ -603,6 +609,9 @@ pub fn start(params: Arc<Mutex<GenParams>>, id: String, status: Arc<Mutex<String
 
 /// (sample rate, channels, format) the output device currently offers; `None` if it cannot be queried.
 fn current_key(id: &str) -> Option<(u32, u16, SampleFormat)> {
+    if crate::asio::is_asio(id) {
+        return crate::asio::probe(crate::asio::name_of(id)).map(|i| (i.sr, i.n_out as u16, SampleFormat::F32));
+    }
     let host = cpal::default_host();
     let did: cpal::DeviceId = id.parse().ok()?;
     let dev = host.device_by_id(&did)?;
@@ -610,7 +619,12 @@ fn current_key(id: &str) -> Option<(u32, u16, SampleFormat)> {
     Some((cfg.sample_rate(), cfg.channels(), cfg.sample_format()))
 }
 
-fn build(params: &Arc<Mutex<GenParams>>, id: &str, dead: Arc<AtomicBool>) -> Result<(cpal::Stream, String, (u32, u16, SampleFormat)), String> {
+fn build(params: &Arc<Mutex<GenParams>>, id: &str, dead: Arc<AtomicBool>) -> Result<(crate::asio::Held, String, (u32, u16, SampleFormat)), String> {
+    if crate::asio::is_asio(id) {
+        let (p, d2) = (params.clone(), dead.clone());
+        let (port, info) = crate::asio::open_output(crate::asio::name_of(id), dead.clone(), move |i| Box::new(out_body::<f32>(p, i.sr, i.n_out, d2)))?;
+        return Ok((crate::asio::Held::Asio(port), format!("ASIO {} Hz, {} ch, {} frames", info.sr, info.n_out, info.buf), (info.sr, info.n_out as u16, SampleFormat::F32)));
+    }
     let host = cpal::default_host();
     let did: cpal::DeviceId = id.parse().map_err(|e| format!("bad device id: {e:?}"))?;
     let dev = host.device_by_id(&did).ok_or_else(|| "device not found".to_string())?;
@@ -635,7 +649,7 @@ fn build(params: &Arc<Mutex<GenParams>>, id: &str, dead: Arc<AtomicBool>) -> Res
     }
     .map_err(|e| format!("{e}"))?;
     stream.play().map_err(|e| format!("{e}"))?;
-    Ok((stream, format!("{sr} Hz, {ch} ch, {fmt:?}"), (sr, ch, fmt)))
+    Ok((crate::asio::Held::Cpal(stream), format!("{sr} Hz, {ch} ch, {fmt:?}"), (sr, ch, fmt)))
 }
 
 fn make<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, params: Arc<Mutex<GenParams>>, sr: u32, dead: Arc<AtomicBool>) -> Result<cpal::Stream, cpal::Error>
@@ -643,13 +657,30 @@ where
     T: SizedSample + FromSample<f32> + Send + 'static,
 {
     let ch = cfg.channels as usize;
+    let mut f = out_body::<T>(params, sr, ch, dead.clone());
+    dev.build_output_stream(
+        cfg,
+        move |data: &mut [T], _: &_| f(data),
+        move |e| match e.kind() {
+            cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
+            _ => {
+                crate::log::log(&format!("generator: stream error {:?}: {e} -> rebuilding", e.kind()));
+                dead.store(true, Relaxed)
+            }
+        },
+        None,
+    )
+}
+
+/// What the generator does with a block of the output (the same for cpal and for ASIO).
+fn out_body<T>(params: Arc<Mutex<GenParams>>, sr: u32, ch: usize, dead_cb: Arc<AtomicBool>) -> impl FnMut(&mut [T]) + Send + 'static
+where
+    T: Copy + Sample + FromSample<f32> + Send + 'static,
+{
     let mut st = GenState::new(sr as f64);
     let mut last = params.lock().clone();
     let mut scratch: Vec<f32> = Vec::new();
-    let dead_cb = dead.clone();
-    dev.build_output_stream(
-        cfg,
-        move |data: &mut [T], _: &_| {
+    move |data: &mut [T]| {
             // an abandoned stream (device changed) must go silent
             if dead_cb.load(Relaxed) {
                 data.iter_mut().for_each(|d| *d = T::from_sample(0.0));
@@ -665,16 +696,7 @@ where
             for (d, s) in data.iter_mut().zip(scratch.iter()) {
                 *d = T::from_sample(*s);
             }
-        },
-        move |e| match e.kind() {
-            cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
-            _ => {
-                crate::log::log(&format!("generator: stream error {:?}: {e} -> rebuilding", e.kind()));
-                dead.store(true, Relaxed)
-            }
-        },
-        None,
-    )
+    }
 }
 
 #[cfg(test)]

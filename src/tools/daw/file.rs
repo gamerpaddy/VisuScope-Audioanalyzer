@@ -74,7 +74,7 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
     for t in &proj.tracks {
         let _ = writeln!(
             out,
-            "track {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "track {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             t.id,
             esc(&t.name),
             t.color,
@@ -92,7 +92,8 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
             t.ch_mute[1] as u8,
             t.in_db,
             t.in_ms,
-            t.invert as u8
+            t.invert as u8,
+            t.beats as u8
         );
         if t.draw {
             let _ = writeln!(out, "drawtrack {}", t.id);
@@ -216,6 +217,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 arm: false,
                 auto: Vec::new(),
                 invert: f.get(17) == Some(&"1"),
+                beats: f.get(18) == Some(&"1"),
                 input: Input { dev: unesc(f[8]), mode: mode_parse(f[9]) },
                 h: f[7].parse::<u8>().unwrap_or(1).min(2),
                 draw: false,

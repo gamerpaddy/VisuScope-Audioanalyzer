@@ -24,10 +24,16 @@ pub struct DevEx {
 
 /// Probe channel count and rate of every capture device. Can take a while with some drivers: call from a worker.
 pub fn probe_all() -> Vec<DevEx> {
+    crate::asio::forget_failed();
     let host = cpal::default_host();
     let mut out: Vec<DevEx> = crate::audio::list_devices()
         .into_iter()
         .filter_map(|d| {
+            if crate::asio::is_asio(&d.id) {
+                // an ASIO driver is opened once to find out what it has (the answer is kept)
+                let i = crate::asio::probe(crate::asio::name_of(&d.id))?;
+                return (i.n_in > 0).then(|| DevEx { id: d.id, label: d.label, ch: i.n_in, sr: i.sr });
+            }
             let did: cpal::DeviceId = d.id.parse().ok()?;
             let dev = host.device_by_id(&did)?;
             let cfg = if dev.supports_input() { dev.default_input_config() } else { dev.default_output_config() }.ok()?;
@@ -39,9 +45,15 @@ pub fn probe_all() -> Vec<DevEx> {
 }
 
 pub fn short_label(label: &str) -> String {
-    let s = label.trim_start_matches("[Input] ").trim_start_matches("[Loopback] ");
+    let s = label.trim_start_matches("[Input] ").trim_start_matches("[Loopback] ").trim_start_matches("[ASIO] ");
     let s = s.trim_end_matches(" (default)");
-    if label.starts_with("[Loopback]") { format!("{s} (loopback)") } else { s.to_string() }
+    if label.starts_with("[Loopback]") {
+        format!("{s} (loopback)")
+    } else if label.starts_with("[ASIO]") {
+        format!("{s} (ASIO)")
+    } else {
+        s.to_string()
+    }
 }
 
 struct Buf {
@@ -263,7 +275,7 @@ fn run(id: String, buf: Arc<Buf>, stop: Arc<AtomicBool>, info: Arc<Mutex<Option<
                     *info.lock() = None;
                     *status.lock() = "device changed, reconnecting...".into();
                     // an invalidated stream can hang when dropped: leak it (see audio.rs)
-                    std::mem::forget(stream);
+                    stream.abandon();
                     std::thread::sleep(Duration::from_millis(500));
                 } else {
                     dead.store(true, Relaxed);
@@ -284,7 +296,12 @@ fn run(id: String, buf: Arc<Buf>, stop: Arc<AtomicBool>, info: Arc<Mutex<Option<
     }
 }
 
-fn build(id: &str, buf: &Arc<Buf>, dead: Arc<AtomicBool>) -> Result<(cpal::Stream, u32, usize, String), String> {
+fn build(id: &str, buf: &Arc<Buf>, dead: Arc<AtomicBool>) -> Result<(crate::asio::Held, u32, usize, String), String> {
+    if crate::asio::is_asio(id) {
+        let (b2, d2) = (buf.clone(), dead.clone());
+        let (port, info) = crate::asio::open_input(crate::asio::name_of(id), dead.clone(), move |i| Box::new(in_body::<f32>(b2, i.n_in, i.sr, d2)))?;
+        return Ok((crate::asio::Held::Asio(port), info.sr, info.n_in, format!("ASIO {} Hz, {} ch, {} frames", info.sr, info.n_in, info.buf)));
+    }
     let host = cpal::default_host();
     let did: cpal::DeviceId = id.parse().map_err(|e| format!("bad device id: {e:?}"))?;
     let dev = host.device_by_id(&did).ok_or_else(|| "device not found".to_string())?;
@@ -306,7 +323,7 @@ fn build(id: &str, buf: &Arc<Buf>, dead: Arc<AtomicBool>) -> Result<(cpal::Strea
     }
     .map_err(|e| format!("{e} ({sr} Hz, {fmt:?})"))?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok((stream, sr, ch, format!("{sr} Hz, {ch} ch")))
+    Ok((crate::asio::Held::Cpal(stream), sr, ch, format!("{sr} Hz, {ch} ch")))
 }
 
 fn make<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, buf: Arc<Buf>, dead: Arc<AtomicBool>) -> Result<cpal::Stream, cpal::Error>
@@ -315,17 +332,38 @@ where
     f32: FromSample<T>,
 {
     let ch = (cfg.channels as usize).max(1);
+    let mut f = in_body::<T>(buf, ch, cfg.sample_rate, dead.clone());
+    dev.build_input_stream(
+        cfg,
+        move |data: &[T], _: &_| f(data),
+        move |e| match e.kind() {
+            cpal::ErrorKind::Xrun => {
+                crate::prof::C.xruns.fetch_add(1, Relaxed);
+            }
+            cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
+            _ => {
+                crate::log::log(&format!("daw capture: stream error {:?}: {e}", e.kind()));
+                dead.store(true, Relaxed)
+            }
+        },
+        None,
+    )
+}
+
+/// What the capture does with a block of the input (the same for cpal and for ASIO).
+fn in_body<T>(buf: Arc<Buf>, ch: usize, in_sr: u32, dead_cb: Arc<AtomicBool>) -> impl FnMut(&[T]) + Send + 'static
+where
+    T: Copy + Send + 'static,
+    f32: FromSample<T>,
+{
+    let ch = ch.max(1);
     let lanes = ch.min(MAX_LANES);
-    let dead_cb = dead.clone();
     let mut peak = vec![0f32; lanes + 1];
     let mut need: Vec<usize> = Vec::new();
     let mut tneed: Vec<bool> = Vec::new();
-    let tap_cap = cfg.sample_rate as usize * TAP_SECS;
-    let in_sr = cfg.sample_rate;
+    let tap_cap = in_sr as usize * TAP_SECS;
     let mut timer = crate::prof::CbTimer::new();
-    dev.build_input_stream(
-        cfg,
-        move |data: &[T], _: &_| {
+    move |data: &[T]| {
             if dead_cb.load(Relaxed) {
                 return;
             }
@@ -398,17 +436,5 @@ where
                 buf.peak[i].fetch_max(p.to_bits(), Relaxed);
             }
             timer.done(data.len() / ch, in_sr);
-        },
-        move |e| match e.kind() {
-            cpal::ErrorKind::Xrun => {
-                crate::prof::C.xruns.fetch_add(1, Relaxed);
-            }
-            cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
-            _ => {
-                crate::log::log(&format!("daw capture: stream error {:?}: {e}", e.kind()));
-                dead.store(true, Relaxed)
-            }
-        },
-        None,
-    )
+    }
 }

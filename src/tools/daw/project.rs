@@ -21,6 +21,162 @@ pub struct Source {
     pub ov: Vec<Vec<(f32, f32)>>,
     /// file this source was written to (project media folder or a recorded take)
     pub saved: Mutex<Option<PathBuf>>,
+    /// the beat, found on a thread when first asked for
+    grid: Arc<Mutex<Option<Arc<BeatGrid>>>>,
+    grid_started: std::sync::atomic::AtomicBool,
+}
+
+/// The beat of a source: where the beats fall (source frames) and the tempo.
+pub struct BeatGrid {
+    pub beats: Vec<usize>,
+    pub bpm: f32,
+}
+
+/// Hop of the onset analysis (frames).
+const BEAT_HOP: usize = 512;
+
+/// Find the beat of audio: an onset strength from the spectral flux (the rises of the spectrum, below about 6 kHz), the tempo from its
+/// autocorrelation (60 to 200 bpm, 120 preferred where it is a toss-up), then a path through the onsets that keeps the tempo (dynamic
+/// programming). `None` when nothing in it repeats (noise, a held tone, speech).
+pub fn find_beat_grid(ch: &[Vec<f32>], sr: u32) -> Option<BeatGrid> {
+    use rustfft::{num_complex::Complex32, FftPlanner};
+    const WIN: usize = 1024;
+    let len = ch.first().map_or(0, |c| c.len());
+    let rate = sr as f32 / BEAT_HOP as f32;
+    let n = len.saturating_sub(WIN) / BEAT_HOP;
+    if n < (rate * 4.0) as usize {
+        return None;
+    }
+    let fft = FftPlanner::<f32>::new().plan_fft_forward(WIN);
+    let win: Vec<f32> = (0..WIN).map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / WIN as f32).cos()).collect();
+    let top = (6000.0 * WIN as f32 / sr as f32) as usize;
+    let mut buf = vec![Complex32::new(0.0, 0.0); WIN];
+    let mut prev = vec![0f32; top];
+    let mut o = vec![0f32; n];
+    let mut env = vec![0f32; n];
+    for t in 0..n {
+        let mut e = 0f32;
+        for i in 0..WIN {
+            let k = t * BEAT_HOP + i;
+            let v = if ch.len() > 1 { 0.5 * (ch[0][k] + ch[1][k]) } else { ch[0][k] };
+            e += v * v;
+            buf[i] = Complex32::new(v * win[i], 0.0);
+        }
+        env[t] = (e / WIN as f32).sqrt();
+        fft.process(&mut buf);
+        let mut flux = 0f32;
+        for k in 1..top {
+            let m = (1.0 + 400.0 * buf[k].norm() / WIN as f32 * 4.0).ln();
+            flux += (m - prev[k]).max(0.0);
+            prev[k] = m;
+        }
+        o[t] = flux;
+    }
+    let peak = env.iter().copied().fold(0.0, f32::max);
+    if peak < 1e-3 {
+        return None;
+    }
+    // what the spectrum rose by, minus the slow trend (the loudness of the passage)
+    let slow: Vec<f32> = {
+        let w = (rate * 0.5) as usize;
+        let mut acc = 0f32;
+        (0..n)
+            .map(|i| {
+                acc += o[i];
+                if i >= 2 * w + 1 {
+                    acc -= o[i - 2 * w - 1];
+                }
+                acc / (i + 1).min(2 * w + 1) as f32
+            })
+            .collect()
+    };
+    for i in 0..n {
+        o[i] = (o[i] - slow[i]).max(0.0);
+    }
+    let mean = o.iter().sum::<f32>() / n as f32;
+    let sd = (o.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n as f32).sqrt();
+    if sd < 1e-4 {
+        return None;
+    }
+    for v in o.iter_mut() {
+        *v = (*v - mean) / sd;
+    }
+    let o_pos: Vec<f32> = o.iter().map(|v| v.max(0.0)).collect();
+    // tempo: the lag with the strongest repetition, with a mild preference for the usual tempi
+    let (lag_lo, lag_hi) = ((rate * 60.0 / 200.0).floor() as usize, (rate * 60.0 / 60.0).ceil() as usize);
+    let acn = |lag: usize| -> f32 { (0..n - lag).map(|i| o_pos[i] * o_pos[i + lag]).sum::<f32>() / (n - lag) as f32 };
+    let ac0 = acn(0).max(1e-9);
+    let mut ac = vec![0f32; lag_hi + 2];
+    for lag in lag_lo.saturating_sub(1)..=lag_hi + 1 {
+        ac[lag] = acn(lag);
+    }
+    let weight = |lag: f32| -> f32 {
+        let bpm = 60.0 * rate / lag;
+        (-0.5 * (bpm / 120.0).log2().powi(2) / 0.8f32.powi(2)).exp()
+    };
+    let mut best = (0.0f32, 0usize);
+    for lag in lag_lo.max(1)..=lag_hi {
+        // a beat also repeats one bar (two and four beats) later: count that in
+        let s = (ac[lag] + 0.5 * ac.get(lag * 2).copied().unwrap_or(0.0)) * weight(lag as f32);
+        if s > best.0 {
+            best = (s, lag);
+        }
+    }
+    let lag = best.1;
+    // the repetition has to stand out from the lags around it (noise and held tones repeat evenly everywhere)
+    let span = &ac[lag_lo.max(1)..=lag_hi];
+    let avg = span.iter().sum::<f32>() / span.len() as f32;
+    if lag == 0 || ac[lag] / ac0 < 0.04 || ac[lag] < 1.8 * avg {
+        return None;
+    }
+    // a fractional period from the shape of the peak
+    let period = {
+        let (a, b, c2) = (ac[lag - 1], ac[lag], ac[lag + 1]);
+        let d = a - 2.0 * b + c2;
+        lag as f32 + if d.abs() > 1e-9 { (0.5 * (a - c2) / d).clamp(-0.5, 0.5) } else { 0.0 }
+    };
+    // beat path
+    const TIGHT: f32 = 40.0;
+    let mut score = o.clone();
+    let mut from = vec![usize::MAX; n];
+    let (lo_off, hi_off) = ((period * 0.5) as usize, (period * 2.0) as usize);
+    for t in 0..n {
+        let mut best_prev = (f32::MIN, usize::MAX);
+        let (a, b) = (t.saturating_sub(hi_off), t.saturating_sub(lo_off.max(1)));
+        if t >= lo_off.max(1) {
+            for pv in a..=b {
+                let d = ((t - pv) as f32 / period).ln();
+                let s = score[pv] - TIGHT * d * d;
+                if s > best_prev.0 {
+                    best_prev = (s, pv);
+                }
+            }
+        }
+        if best_prev.1 != usize::MAX && best_prev.0 > 0.0 {
+            score[t] = o[t] + best_prev.0;
+            from[t] = best_prev.1;
+        }
+    }
+    let tail = n.saturating_sub(period as usize * 2);
+    let mut t = (tail..n).max_by(|a, b| score[*a].total_cmp(&score[*b]))?;
+    let mut idx = vec![t];
+    while from[t] != usize::MAX {
+        t = from[t];
+        idx.push(t);
+    }
+    idx.reverse();
+    // not where it is quiet (the path runs on through silence)
+    let gate = peak * 0.02;
+    let near = (period * 0.5) as usize;
+    let beats: Vec<usize> = idx
+        .into_iter()
+        .filter(|&i| env[i.saturating_sub(near)..(i + near + 1).min(n)].iter().copied().fold(0.0, f32::max) > gate)
+        .map(|i| i * BEAT_HOP + BEAT_HOP / 2)
+        .collect();
+    if beats.len() < 4 {
+        return None;
+    }
+    Some(BeatGrid { beats, bpm: 60.0 * rate / period })
 }
 
 impl Source {
@@ -30,7 +186,26 @@ impl Source {
             ch.push(Vec::new());
         }
         let ov = ch.iter().map(|c| c.chunks(OV_BLOCK).map(|b| b.iter().fold((0f32, 0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)))).collect()).collect();
-        Self { id, name, ch, ov, saved: Mutex::new(None) }
+        Self { id, name, ch, ov, saved: Mutex::new(None), grid: Arc::new(Mutex::new(None)), grid_started: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// The beat of this source, once it is found (the search runs on a thread of its own the first time it is asked for).
+    pub fn grid(self: &Arc<Self>, sr: u32) -> Option<Arc<BeatGrid>> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.grid_started.compare_exchange(false, true, Relaxed, Relaxed).is_ok() {
+            let (src, slot) = (self.clone(), self.grid.clone());
+            let _ = std::thread::Builder::new().name("daw-beats".into()).spawn(move || {
+                let g = find_beat_grid(&src.ch, sr);
+                crate::log::log(&format!("beat of {}: {}", src.name, g.as_ref().map_or("none found".to_string(), |g| format!("{:.1} bpm, {} beats", g.bpm, g.beats.len()))));
+                *slot.lock() = Some(Arc::new(g.unwrap_or(BeatGrid { beats: Vec::new(), bpm: 0.0 })));
+            });
+        }
+        self.grid.lock().clone().filter(|g| !g.beats.is_empty())
+    }
+
+    /// False until the search for the beat has finished (for a repaint later).
+    pub fn grid_pending(&self) -> bool {
+        self.grid_started.load(std::sync::atomic::Ordering::Relaxed) && self.grid.lock().is_none()
     }
 
     pub fn len(&self) -> usize {
@@ -273,6 +448,8 @@ pub struct Track {
     pub arm: bool,
     /// polarity: the whole track is turned upside down (null tests, phase checks)
     pub invert: bool,
+    /// show the beat of the audio on this track and snap to it (Shift while selecting)
+    pub beats: bool,
     /// volume automation: (frame, dB) points, sorted; the level is added to the fader and held beyond the ends
     pub auto: Vec<(i64, f32)>,
     pub input: Input,
@@ -446,7 +623,7 @@ impl Project {
     pub fn add_track(&mut self, name: Option<String>, input: Input) -> usize {
         let id = self.next();
         let n = self.tracks.len();
-        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, invert: false, auto: Vec::new(), input, h: 1, draw: false, curve: Vec::new() });
+        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, invert: false, beats: false, auto: Vec::new(), input, h: 1, draw: false, curve: Vec::new() });
         n
     }
 
@@ -822,6 +999,61 @@ pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_beat_of_dense_music_is_found() {
+        use super::*;
+        let sr = 44100u32;
+        // 100 bpm: a kick on every beat, a hat on the off-beats, over a loud steady pad and some noise
+        let mut x = 777u32;
+        let mut rnd = move || { x = x.wrapping_mul(1664525).wrapping_add(1013904223); (x >> 8) as f32 / 8388608.0 - 1.0 };
+        let beat = (sr as f32 * 0.6) as usize;
+        let mut v = vec![0f32; sr as usize * 30];
+        for (i, s) in v.iter_mut().enumerate() {
+            let t = i as f32 / sr as f32;
+            *s = 0.25 * (2.0 * std::f32::consts::PI * 220.0 * t).sin() + 0.2 * (2.0 * std::f32::consts::PI * 330.0 * t).sin() + 0.1 * rnd();
+        }
+        for k in 0..48 {
+            let at = k * beat + 5000;
+            for i in 0..6000 {
+                if at + i < v.len() {
+                    v[at + i] += 0.6 * (-(i as f32) / 1500.0).exp() * (2.0 * std::f32::consts::PI * 60.0 * i as f32 / sr as f32).sin();
+                }
+            }
+            let h = at + beat / 2;
+            for i in 0..1500 {
+                if h + i < v.len() {
+                    v[h + i] += 0.25 * (-(i as f32) / 300.0).exp() * rnd();
+                }
+            }
+        }
+        let g = find_beat_grid(&[v], sr).expect("music with a kick has a beat");
+        assert!((g.bpm - 100.0).abs() < 3.0 || (g.bpm - 200.0).abs() < 4.0, "{}", g.bpm);
+        assert!(g.beats.len() > 25);
+    }
+
+    #[test]
+    fn the_beat_of_a_click_track_is_found_and_noise_has_none() {
+        use super::*;
+        let sr = 48000u32;
+        // 120 bpm: a short decaying burst every half second, 20 s long
+        let mut v = vec![0f32; sr as usize * 20];
+        let beat = sr as usize / 2;
+        for k in 0..40 {
+            for i in 0..2400 {
+                v[k * beat + 3000 + i] = 0.7 * (-(i as f32) / 500.0).exp() * (i as f32 * 0.4).sin();
+            }
+        }
+        let s = Source::new(1, "t".into(), vec![v]);
+        let g = find_beat_grid(&s.ch, sr).expect("a click track has a beat");
+        assert!((g.bpm - 120.0).abs() < 2.0, "{}", g.bpm);
+        let hit = g.beats.iter().filter(|&&b| (0..40).any(|k| (b as i64 - (k * beat + 3000) as i64).abs() < 1500)).count();
+        assert!(hit as f32 >= 0.9 * g.beats.len() as f32 && g.beats.len() >= 30, "{} of {}", hit, g.beats.len());
+        // a steady noise has no beat
+        let mut x = 12345u32;
+        let noise: Vec<f32> = (0..sr as usize * 20).map(|_| { x = x.wrapping_mul(1664525).wrapping_add(1013904223); (x >> 8) as f32 / 8388608.0 - 1.0 }).map(|v| v * 0.3).collect();
+        assert!(find_beat_grid(&[noise], sr).is_none());
+    }
+
     use super::*;
 
     fn src(n: usize) -> Arc<Source> {

@@ -234,6 +234,10 @@ pub fn bind_menu(ui: &mut eframe::egui::Ui, t: &Target) {
             TKind::Toggle { stateful: true } => {
                 ch |= ui.radio_value(&mut s.momentary, false, "Toggle: each press switches").changed();
                 ch |= ui.radio_value(&mut s.momentary, true, "Momentary: on while held").changed();
+                // (a setting of a node: the other way round, off while held)
+                if t.id.starts_with("nodet:") && s.momentary {
+                    ch |= ui.checkbox(&mut s.invert, "Inverted: off while held, on when let go").changed();
+                }
             }
             TKind::Toggle { stateful: false } => {}
         }
@@ -520,11 +524,13 @@ impl Mapper {
                         // a press: the moment the value passes one half (releases and the way back do nothing)
                         let down = v >= 0.5;
                         let was = self.held.insert(i, down).unwrap_or(false);
+                        // (inverted, the held state is "off": only the switches of node settings are made so)
+                        let flip = b.invert && b.momentary && b.action.starts_with("nodet:");
                         if down && !was {
-                            out.push(Fire { action: b.action.clone(), value: 1.0 });
+                            out.push(Fire { action: b.action.clone(), value: if flip { 0.0 } else { 1.0 } });
                         } else if !down && was && b.momentary {
                             // momentary: the release is an event as well
-                            out.push(Fire { action: b.action.clone(), value: 0.0 });
+                            out.push(Fire { action: b.action.clone(), value: if flip { 1.0 } else { 0.0 } });
                         }
                     }
                 }
@@ -798,8 +804,16 @@ mod tests {
         let f = m.process(vec![(mute.clone(), 1.0), (mute.clone(), 0.0), (mute.clone(), 1.0)], &d);
         assert_eq!(f.iter().map(|f| f.value).collect::<Vec<_>>(), vec![1.0, 0.0, 1.0]);
         m.bindings.last_mut().unwrap().momentary = false;
-        let f = m.process(vec![(mute.clone(), 0.0), (mute, 1.0)], &d);
+        let f = m.process(vec![(mute.clone(), 0.0), (mute.clone(), 1.0)], &d);
         assert_eq!(f.len(), 1);
+        // a node's on / off setting, momentary and inverted: off while held, on when let go
+        let mut m = Mapper::default();
+        m.assign("nodet:4:1", mute.clone(), (0.0, 1.0));
+        let b = m.bindings.last_mut().unwrap();
+        b.momentary = true;
+        b.invert = true;
+        let f = m.process(vec![(mute.clone(), 0.0), (mute.clone(), 1.0), (mute, 0.0)], &d);
+        assert_eq!(f.iter().filter(|f| f.action == "nodet:4:1").map(|f| f.value).collect::<Vec<_>>(), vec![0.0, 1.0]);
     }
 
     #[test]

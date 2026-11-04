@@ -281,11 +281,15 @@ impl Daw {
 
     fn handle_drops(&mut self, ui: &mut Ui, whole: Rect) {
         let (hover, dropped) = ui.input(|i| (!i.raw.hovered_files.is_empty(), i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect::<Vec<_>>()));
-        if hover && ui.rect_contains_pointer(whole) {
+        // (while files are dragged over the window the system does not report the mouse: its last position says nothing about where
+        // the files are, so a drop counts wherever it is, as long as no other window has the pointer)
+        let elsewhere = ui.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|p| !whole.contains(p)) && ui.ctx().layer_id_at(ui.ctx().input(|i| i.pointer.hover_pos()).unwrap_or_default()).is_some_and(|l| l != ui.layer_id() && l.order != egui::Order::Background);
+        if hover && !elsewhere {
             ui.painter().rect_stroke(whole.shrink(2.0), 6.0, Stroke::new(2.0, Color32::from_rgb(110, 170, 255)), egui::StrokeKind::Inside);
             ui.painter().text(whole.center(), Align2::CENTER_CENTER, "Drop audio files to add them as tracks", FontId::proportional(16.0), Color32::from_rgb(160, 200, 255));
         }
-        if !dropped.is_empty() && ui.rect_contains_pointer(whole) {
+        if !dropped.is_empty() && !elsewhere {
+            crate::log::log(&format!("timeline: {} file(s) dropped", dropped.len()));
             self.import(dropped);
         }
     }
@@ -316,7 +320,10 @@ impl Daw {
             }
             ui.toggle_value(&mut self.follow, "Follow").on_hover_text("Scroll the view with the playhead");
             ui.toggle_value(&mut self.show_clip, "Clip").on_hover_text("Show samples above full scale in red on the waveforms and in the track meters (switch off to see the plain waveform)");
-            ui.toggle_value(&mut self.snap, "Snap").on_hover_text("Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Shift to move freely)");
+            ui.toggle_value(&mut self.snap, "Snap").on_hover_text("Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Alt to move freely, hold Shift while selecting to snap to the beat of the tracks that show it)");
+            if ui.add_enabled_ui(self.range.is_some(), |ui| crate::mapping::small_btn(ui, "Selection to new track")).inner.on_hover_text("A new track with the selected time range: the clips of the selected track cut to it (the originals stay), or with no track selected the whole mix over that range").clicked() {
+                self.act_track_from_range(p);
+            }
             ui.separator();
             let ub = ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last timeline edit (Ctrl+Z)");
             crate::mapping::button_menu(&ub, &crate::mapping::Target::toggle("daw_undo", "Timeline: undo", false));
@@ -554,6 +561,10 @@ impl Daw {
             ui.close();
         }
         ui.separator();
+        if item(ui, "New track from the selection", "", self.range.is_some()) {
+            self.act_track_from_range(p);
+            ui.close();
+        }
         if item(ui, "Trim clips to the selection", "", self.range.is_some()) {
             self.act_trim_to_range(p);
             ui.close();
@@ -728,6 +739,30 @@ impl Daw {
         v
     }
 
+    /// The nearest start / stop of sound (the beat markers of the waveforms) within reach of frame `f`.
+    fn beat_snap(&self, p: &Project, view: &View, f: i64) -> Option<i64> {
+        let tol = (14.0 / view.pps * view.sr) as i64;
+        let mut best: Option<(i64, i64)> = None;
+        for c in p.tracks.iter().filter(|t| !t.draw && t.beats).flat_map(|t| t.clips.iter()) {
+            if c.end() < f - tol || c.start > f + tol {
+                continue;
+            }
+            let Some(g) = c.src.grid(view.sr as u32) else { continue };
+            for &b in &g.beats {
+                if b < c.off || b >= c.off + c.len {
+                    continue;
+                }
+                let rel = b - c.off;
+                let t = c.start + if c.reverse { (c.len - 1 - rel) as i64 } else { rel as i64 };
+                let d = (t - f).abs();
+                if d <= tol && best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, t));
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+
     fn snap_to(&self, view: &View, pts: &[i64], f: i64, alt: bool) -> i64 {
         if !self.snap || alt {
             return f;
@@ -841,11 +876,26 @@ impl Daw {
 
         // ---- interaction on the lanes
         let lane_resp = ui.interact(lanes_area, ui.scope_id().with("daw_lanes"), Sense::click_and_drag());
-        // clips snap to each other, the playhead and the grid; holding Shift (or Alt) moves them freely
-        let alt = ui.input(|i| i.modifiers.alt || i.modifiers.shift);
+        // clips snap to each other, the playhead and the grid; holding Alt moves them freely
+        let alt = ui.input(|i| i.modifiers.alt);
         let shift = ui.input(|i| i.modifiers.shift);
         let hover = lane_resp.hover_pos();
-        if let Some(h) = hover {
+        // the two edges of the selected time range can be grabbed (gizmos at its top and bottom)
+        let edge_near = |x: f32, range: Option<(i64, i64)>| -> Option<i64> {
+            let (a, b) = range?;
+            let (da, db) = ((x - view.x(a)).abs(), (x - view.x(b)).abs());
+            if da.min(db) > 7.0 {
+                None
+            } else if da <= db {
+                Some(b)
+            } else {
+                Some(a)
+            }
+        };
+        if let Some(h) = hover.filter(|h| edge_near(h.x, self.range).is_some()) {
+            let _ = h;
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        } else if let Some(h) = hover {
             if self.drag.is_none() {
                 // only a clip that is selected can be moved, trimmed or faded: the others just show where a selection starts
                 match self.hit(p, &view, &rows, h).filter(|k| self.sel.contains(&p.tracks[k.ti].clips[k.ci].id)) {
@@ -862,6 +912,9 @@ impl Daw {
                 self.checkpoint(p);
                 self.draw_drag = Some((ti, None));
                 self.sel_track = Some(p.tracks[ti].id);
+            } else if let Some(anchor) = ui.input(|i| i.pointer.press_origin()).and_then(|pos| edge_near(pos.x, self.range)) {
+                // an edge of the range: the opposite one stays, this one follows the mouse
+                self.range_anchor = Some(anchor);
             } else if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
                 let auto_grab = self.auto_hit(p, &view, &rows, pos);
                 if let Some(g) = auto_grab {
@@ -885,7 +938,8 @@ impl Daw {
                     None => {
                         let f = view.frame(pos.x);
                         let pts = self.snap_points(p, &[]);
-                        self.range_anchor = Some(self.snap_to(&view, &pts, f, alt).max(0));
+                        let f = if shift { self.beat_snap(p, &view, f) } else { None }.unwrap_or_else(|| self.snap_to(&view, &pts, f, alt));
+                        self.range_anchor = Some(f.max(0));
                         if let Some(ti) = rows.iter().position(|r| pos.y >= r.top() && pos.y < r.bottom()) {
                             self.sel_track = Some(p.tracks[ti].id);
                         }
@@ -931,7 +985,8 @@ impl Daw {
                     self.drag = Some(d);
                 } else if let Some(a) = self.range_anchor {
                     let pts = self.snap_points(p, &[]);
-                    let f = self.snap_to(&view, &pts, view.frame(ptr.x), alt).max(0);
+                    let raw = view.frame(ptr.x);
+                    let f = if shift { self.beat_snap(p, &view, raw) } else { None }.unwrap_or_else(|| self.snap_to(&view, &pts, raw, alt)).max(0);
                     self.range = if (f - a).abs() as f64 / sr * self.pps >= 3.0 { Some((a.min(f), a.max(f))) } else { None };
                     // keep the pointer in reach: scroll when dragging past the edges
                     if ptr.x > rect.right() - 12.0 {
@@ -943,6 +998,20 @@ impl Daw {
             }
         }
         if lane_resp.drag_stopped() {
+            // a selection made during playback with the loop on: the playhead goes into it (it would only
+            // reach the loop after playing up to its end, or never when it is further on)
+            if self.range_anchor.is_some() && self.loop_on && self.play.is_some() {
+                if let Some((a, b)) = self.range.filter(|r| r.1 > r.0 + 64) {
+                    if let Some(pl) = &self.play {
+                        pl.loop_a.store(a, Relaxed);
+                        pl.loop_b.store(b, Relaxed);
+                    }
+                    let pos = self.pos();
+                    if pos < a || pos >= b {
+                        self.seek(a);
+                    }
+                }
+            }
             self.auto_drag = None;
             self.drag = None;
             self.range_anchor = None;
@@ -1095,6 +1164,10 @@ impl Daw {
                     self.act_delete(p);
                     ui.close();
                 }
+                if ui.add_enabled(self.range.is_some(), egui::Button::new("New track from the selection")).on_hover_text("The selected time range on a new track: the clips of the selected track cut to it, or with no track selected the mix of everything").clicked() {
+                    self.act_track_from_range(p);
+                    ui.close();
+                }
                 if crate::mapping::btn(ui, "Select all (Ctrl+A)").clicked() {
                     self.act_select_all(p);
                     ui.close();
@@ -1126,8 +1199,19 @@ impl Daw {
             if let Some(pos) = ruler_resp.interact_pointer_pos() {
                 let pts = self.snap_points(p, &[]);
                 let f = self.snap_to(&view, &pts, view.frame(pos.x.max(lanes_left)), alt).max(0);
-                self.seek(f);
+                // while the mouse rests on one spot during playback, the sound goes on from there: seeking again on every
+                // frame would replay the same few milliseconds over and over
+                let id = ui.scope_id().with("daw_scrub_last");
+                let last: Option<i64> = ui.data(|d| d.get_temp(id));
+                if ruler_resp.clicked() || last != Some(f) {
+                    self.seek(f);
+                    ui.data_mut(|d| d.insert_temp(id, f));
+                }
             }
+        }
+        if ruler_resp.drag_stopped() {
+            let id = ui.scope_id().with("daw_scrub_last");
+            ui.data_mut(|d| d.remove::<i64>(id));
         }
         egui::Popup::context_menu(&ruler_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             let (frame, hit) = self.ruler_ctx;
@@ -1202,7 +1286,7 @@ impl Daw {
             };
             let dimmed = t.mute || (p.tracks.iter().any(|o| o.solo) && !t.solo);
             for c in &t.clips {
-                self.draw_clip(&lp, &view, lane, c, col, selected_ids.contains(&c.id), chans, t.ch_mute, dimmed);
+                self.draw_clip(&lp, &view, lane, c, col, selected_ids.contains(&c.id), chans, t.ch_mute, dimmed, t.beats);
             }
             if t.draw {
                 self.draw_curve(&lp, &view, lane, row, t);
@@ -1229,6 +1313,14 @@ impl Daw {
             pl.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(110, 160, 255, 34));
             pl.line_segment([pos2(xa, lanes_area.top()), pos2(xa, lanes_area.bottom())], Stroke::new(1.0, Color32::from_rgba_unmultiplied(140, 185, 255, 160)));
             pl.line_segment([pos2(xb, lanes_area.top()), pos2(xb, lanes_area.bottom())], Stroke::new(1.0, Color32::from_rgba_unmultiplied(140, 185, 255, 160)));
+            // the gizmos: a tab at the top and the bottom of each edge
+            for x in [xa, xb] {
+                for (y, up) in [(lanes_area.top(), true), (lanes_area.bottom(), false)] {
+                    let (w, h) = (7.0, 9.0);
+                    let t = Rect::from_min_max(pos2(x - w * 0.5, if up { y } else { y - h }), pos2(x + w * 0.5, if up { y + h } else { y }));
+                    pl.rect_filled(t, 2.0, Color32::from_rgb(120, 170, 255));
+                }
+            }
         }
         let px = view.x(self.pos());
         if px >= lanes_left - 1.0 && px <= rect.right() + 1.0 {
@@ -1536,7 +1628,7 @@ impl Daw {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_clip(&self, lp: &Painter, view: &View, lane: Rect, c: &Clip, col: Color32, selected: bool, chans: &[Option<usize>], chm: [bool; 2], dimmed: bool) {
+    fn draw_clip(&self, lp: &Painter, view: &View, lane: Rect, c: &Clip, col: Color32, selected: bool, chans: &[Option<usize>], chm: [bool; 2], dimmed: bool, show_beats: bool) {
         let (x0, x1) = (view.x(c.start), view.x(c.end()));
         if x1 < lane.left() || x0 > lane.right() {
             return;
@@ -1591,6 +1683,34 @@ impl Daw {
             x += 1.0;
         }
         cp.extend(shapes);
+        // the beat of the music (when this track shows it)
+        let mut bpm = 0.0;
+        if show_beats {
+            let sr = view.sr as u32;
+            if let Some(g) = c.src.grid(sr) {
+                bpm = g.bpm;
+                let mut last_x = f32::MIN;
+                for &b in &g.beats {
+                    if b < c.off || b >= c.off + c.len {
+                        continue;
+                    }
+                    let rel = b - c.off;
+                    let x = view.x(c.start + if c.reverse { (c.len - 1 - rel) as i64 } else { rel as i64 });
+                    if x < vis.left() - 1.0 || x > vis.right() + 1.0 || (x - last_x).abs() < 3.0 {
+                        continue;
+                    }
+                    last_x = x;
+                    let col = Color32::from_rgba_unmultiplied(255, 220, 120, 200);
+                    cp.line_segment([pos2(x, inner.top()), pos2(x, inner.bottom())], Stroke::new(1.0, col.gamma_multiply(0.7)));
+                    cp.add(Shape::convex_polygon(vec![pos2(x - 3.5, strip.bottom() + 1.0), pos2(x + 3.5, strip.bottom() + 1.0), pos2(x, strip.bottom() + 6.0)], col, Stroke::NONE));
+                }
+            } else if c.src.grid_pending() {
+                lp.ctx().request_repaint_after(std::time::Duration::from_millis(400));
+            }
+        }
+        if bpm > 0.0 {
+            cp.text(pos2(strip.right() - 5.0, strip.min.y + 1.5), Align2::RIGHT_TOP, format!("{bpm:.0} bpm"), FontId::proportional(10.0), Color32::from_rgb(10, 12, 16));
+        }
         for k in 0..n_ch {
             let y = inner.top() + (k as f32 + 0.5) * lane_h;
             cp.line_segment([pos2(inner.left(), y), pos2(inner.right(), y)], Stroke::new(1.0, Color32::from_white_alpha(14)));
@@ -1697,6 +1817,12 @@ impl Daw {
             if !p.tracks[ti].auto.is_empty() && crate::mapping::btn(ui, "Clear the automation").clicked() {
                 self.checkpoint(p);
                 p.tracks[ti].auto.clear();
+                self.touch();
+                ui.close();
+            }
+            let mut bt = p.tracks[ti].beats;
+            if ui.checkbox(&mut bt, "Beatmarkers").on_hover_text("Finds the beat of the music on this track and marks it on the waveform. Hold Shift while selecting to snap to the beat. Off by default.").changed() {
+                p.tracks[ti].beats = bt;
                 self.touch();
                 ui.close();
             }

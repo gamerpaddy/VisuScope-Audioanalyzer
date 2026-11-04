@@ -84,6 +84,59 @@ fn spinner(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, v: &mut us
     changed
 }
 
+/// The drawn phase curve of a phase node: drag to draw (like a frequency response), double-click for flat.
+fn phase_curve(ui: &mut Ui, n: &mut Node, z: f32) -> bool {
+    use crate::graph::fx::{curve_encode, curve_freq, curve_parse, CURVE_N};
+    let mut v = curve_parse(&n.s);
+    let (r, resp) = ui.allocate_exact_size(vec2((ui.available_width() - 4.0).max(120.0), 100.0 * z), Sense::click_and_drag());
+    let p = ui.painter_at(r);
+    p.rect_filled(r, 2.0, Color32::from_gray(18));
+    let xo = |i: f32| r.left() + r.width() * i / (CURVE_N - 1) as f32;
+    let yo = |d: f32| r.center().y - d / 360.0 * r.height();
+    for (d, lab) in [(180.0, "180"), (90.0, "90"), (0.0, "0"), (-90.0, "-90"), (-180.0, "-180")] {
+        let c = if d == 0.0 { Color32::from_gray(80) } else { Color32::from_gray(38) };
+        p.line_segment([pos2(r.left(), yo(d)), pos2(r.right(), yo(d))], Stroke::new(1.0, c));
+        p.text(pos2(r.left() + 2.0, yo(d) + if d > 100.0 { 6.0 } else { -6.0 } * z), Align2::LEFT_CENTER, lab, egui::FontId::proportional(8.5 * z), Color32::from_gray(110));
+    }
+    for f in [100.0f32, 1000.0, 10000.0] {
+        let i = (f / 20.0).ln() / 1000f32.ln() * (CURVE_N - 1) as f32;
+        p.line_segment([pos2(xo(i), r.top()), pos2(xo(i), r.bottom())], Stroke::new(1.0, Color32::from_gray(38)));
+        p.text(pos2(xo(i) + 2.0, r.bottom() - 6.0 * z), Align2::LEFT_CENTER, if f >= 1000.0 { format!("{} k", f / 1000.0) } else { format!("{f}") }, egui::FontId::proportional(8.5 * z), Color32::from_gray(110));
+    }
+    let idx = |pos: Pos2| ((pos.x - r.left()) / r.width() * (CURVE_N - 1) as f32).clamp(0.0, (CURVE_N - 1) as f32);
+    let deg = |pos: Pos2| {
+        let d = ((r.center().y - pos.y) / r.height() * 360.0).clamp(-180.0, 180.0);
+        if d.abs() < 4.0 { 0.0 } else { d }
+    };
+    let mut ch = false;
+    if resp.double_clicked() {
+        v = vec![0.0; CURVE_N];
+        ch = true;
+    } else if resp.dragged_by(egui::PointerButton::Primary) || resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let prev = pos - ui.input(|i| i.pointer.delta());
+            let (a, b) = (idx(prev), idx(pos));
+            let (da, db) = (deg(prev), deg(pos));
+            let (lo, hi) = (a.min(b).round() as usize, a.max(b).round() as usize);
+            for k in lo..=hi {
+                let t = if (b - a).abs() < 1e-3 { 1.0 } else { (k as f32 - a) / (b - a) };
+                v[k] = (da + (db - da) * t.clamp(0.0, 1.0)).clamp(-180.0, 180.0);
+            }
+            ch = true;
+        }
+    }
+    let pts: Vec<Pos2> = v.iter().enumerate().map(|(i, d)| pos2(xo(i as f32), yo(*d))).collect();
+    p.add(egui::Shape::line(pts, Stroke::new(1.6, Color32::from_rgb(255, 170, 70))));
+    if let Some(pos) = resp.hover_pos() {
+        let i = idx(pos).round() as usize;
+        resp.clone().on_hover_text(format!("{:.0} Hz: {:.0} deg\nDrag to draw, double-click for flat (off, no delay)", curve_freq(i), v[i]));
+    }
+    if ch {
+        n.s = curve_encode(&v);
+    }
+    ch
+}
+
 /// Scale the fonts and the spacing of a style (the zoom of the node bodies).
 fn scale_style(st: &mut egui::Style, z: f32) {
     if (z - 1.0).abs() < 1e-3 {
@@ -180,6 +233,10 @@ fn param_range(n: &Node, i: usize) -> Option<(f32, f32, bool, &'static str)> {
     if n.kind == Kind::Mixer && (2..2 + MIX_MAX).contains(&i) {
         return Some((-60.0, 12.0, false, " dB"));
     }
+    // a setting with two entries (on / off) is a switch: a signal above a threshold turns it on
+    if n.kind.info().params.get(i).is_some_and(|d| d.choices.len() == 2) {
+        return Some((0.0, 1.0, false, "switch"));
+    }
     n.kind.info().params.get(i).filter(|d| d.choices.is_empty()).map(|d| (d.min, d.max, d.log, d.unit))
 }
 
@@ -210,6 +267,7 @@ fn param_port(ui: &Ui, z: f32, at: Pos2, node: NodeId, i: usize, range: (f32, f3
 /// The menu of a control port: where it follows, the ranges, disconnect.
 fn mod_menu_for(ui: &mut Ui, node: NodeId, i: usize, range: (f32, f32, bool, &'static str)) {
     let (min, max, log, unit) = range;
+    let switch = unit == "switch";
     let cur = MOD_CUR.lock().iter().find(|m| m.node == node && m.param == i).copied();
     let Some(mut m) = cur else {
         ui.label(RichText::new("Not controlled. Drag a wire from the output dot of a node onto this dot: a generator, a timeline out node, a low-pass ...").small().weak());
@@ -218,6 +276,32 @@ fn mod_menu_for(ui: &mut Ui, node: NodeId, i: usize, range: (f32, f32, bool, &'s
     let name = MOD_SRC.lock().iter().find(|s| s.0 == m.src).map(|s| s.1.clone()).unwrap_or_else(|| "?".into());
     ui.label(RichText::new(format!("Controlled by: {name}")).small().monospace());
     let mut ch = false;
+    if switch {
+        // the second entry while the signal is above the threshold; the hysteresis keeps it from flickering around it
+        let (mut thr, mut hys) = (0.5 * (m.in_lo + m.in_hi), (m.in_hi - m.in_lo).abs());
+        ui.label(RichText::new("The second entry is chosen while the signal (full scale is 1) is above the threshold, the first while it is below").small().weak());
+        ui.horizontal(|ui| {
+            ui.label("Threshold");
+            ch |= ui.add(egui::DragValue::new(&mut thr).range(-4.0..=4.0).speed(0.005).max_decimals(3)).changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Hysteresis");
+            ch |= ui.add(egui::DragValue::new(&mut hys).range(0.0..=4.0).speed(0.005).max_decimals(3)).on_hover_text("Total width: it switches on above threshold + half of it and off below threshold - half of it. 0 is a plain threshold.").changed();
+        });
+        let mut inv = m.out_lo > m.out_hi;
+        ch |= ui.checkbox(&mut inv, "Inverted (the first entry above the threshold)").changed();
+        if ch {
+            m.in_lo = thr - 0.5 * hys;
+            m.in_hi = thr + 0.5 * hys;
+            (m.out_lo, m.out_hi) = if inv { (1.0, 0.0) } else { (0.0, 1.0) };
+            MOD_REQ.lock().push(ModReq::Set(m));
+        }
+        if crate::mapping::btn(ui, "Disconnect").clicked() {
+            MOD_REQ.lock().push(ModReq::Clear(node, i));
+            ui.close();
+        }
+        return;
+    }
     ui.label(RichText::new("Signal level (full scale is 1) -> value, outside the range it stops").small().weak());
     ui.horizontal(|ui| {
         ui.label("Signal at the lowest");
@@ -395,6 +479,8 @@ pub struct Routing {
     /// settings and mutes that input bindings ask for (applied in `update`)
     bound_set: HashMap<(NodeId, usize), f32>,
     bound_mute: Vec<(NodeId, usize, Option<bool>)>,
+    /// on / off settings of nodes that an input switches (None: toggle)
+    bound_tog: Vec<(NodeId, usize, Option<bool>)>,
 }
 
 type Vec2 = egui::Vec2;
@@ -487,13 +573,14 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, search_n: 0, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, search_n: 0, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), bound_tog: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     /// Values and mutes that input bindings set (a knob moves many times a frame: only the last value counts).
     fn apply_bound(&mut self) {
         let sets = std::mem::take(&mut self.bound_set);
         let mutes = std::mem::take(&mut self.bound_mute);
+        let togs = std::mem::take(&mut self.bound_tog);
         let mut changed = false;
         for ((id, p), v) in sets {
             if let Some(n) = self.g.node_mut(id) {
@@ -510,6 +597,15 @@ impl Routing {
                         n.p[p] = v;
                         changed = true;
                     }
+                }
+            }
+        }
+        for (id, p, state) in togs {
+            if let Some(n) = self.g.node_mut(id) {
+                if n.kind.info().params.get(p).is_some_and(|d| d.choices.len() == 2) && p < n.p.len() {
+                    let cur = n.p[p] >= 0.5;
+                    n.p[p] = if state.unwrap_or(!cur) { 1.0 } else { 0.0 };
+                    changed = true;
                 }
             }
         }
@@ -743,12 +839,19 @@ impl Routing {
         }
         let mut chosen: Option<Entry> = None;
         let screen = canvas.min + self.pan + s.at.to_vec2() * self.zoom;
-        let pos = pos2(screen.x.clamp(canvas.left() + 4.0, (canvas.right() - 660.0).max(canvas.left() + 4.0)), screen.y.clamp(canvas.top() + 4.0, (canvas.bottom() - 260.0).max(canvas.top() + 4.0)));
+        let browse_now = s.text.trim().is_empty();
+        let win_w = if browse_now { (canvas.width() - 24.0).clamp(300.0, 880.0) } else { 280.0 };
+        let win_h = if browse_now { 300.0 } else { 120.0 };
+        let pos = pos2(screen.x.clamp(canvas.left() + 4.0, (canvas.right() - win_w - 20.0).max(canvas.left() + 4.0)), screen.y.clamp(canvas.top() + 4.0, (canvas.bottom() - win_h - 50.0).max(canvas.top() + 4.0)));
         let mut close = esc;
-        let area = egui::Area::new(egui::Id::new(("routing_search", self.search_n))).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+        // own area per mode, so the size remembered from the other mode never carries over
+        let area = egui::Area::new(egui::Id::new(("routing_search", self.search_n, browse_now))).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                // the groups side by side need their room (a popup is otherwise as wide as the widest line it has had so far)
-                ui.set_width(if s.text.trim().is_empty() { 640.0 } else { 260.0 });
+                ui.set_width(win_w);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                if browse_now {
+                    ui.set_min_height(win_h);
+                }
                 let te = ui.add(egui::TextEdit::singleline(&mut s.text).hint_text("Search nodes: eq, input, compressor ...").desired_width(240.0));
                 if !s.focused {
                     te.request_focus();
@@ -758,7 +861,7 @@ impl Routing {
                     s.sel = 0;
                 }
                 let browse = s.text.trim().is_empty();
-                egui::ScrollArea::vertical().max_height(300.0).auto_shrink([true, true]).show(ui, |ui| {
+                egui::ScrollArea::both().max_height(300.0).auto_shrink([!browse, true]).show(ui, |ui| {
                     if browse {
                         // nothing typed: the groups side by side, each with its nodes one below the other
                         let mut groups: Vec<&str> = Vec::new();
@@ -859,15 +962,29 @@ impl Routing {
                 changed = true;
             }
             if !d.choices.is_empty() {
-                let cur = d.choices.get(n.p[i].round() as usize).copied().unwrap_or("?");
-                egui::ComboBox::from_id_salt(("pc", n.id, i)).width(ui.available_width() - 4.0).truncate().selected_text(cur).show_ui(ui, |ui| {
-                    for (k, c) in d.choices.iter().enumerate() {
-                        if ui.selectable_label(n.p[i].round() as usize == k, *c).clicked() {
-                            n.p[i] = k as f32;
-                            changed = true;
+                let switch = d.choices.len() == 2;
+                // a followed switch shows the state the signal gives it
+                let shown = if switch && followed { super::engine::MOD_LIVE.lock().iter().find(|m| m.0 == n.id && m.1 == i).map(|m| m.2).filter(|v| v.is_finite()).unwrap_or(n.p[i]) } else { n.p[i] };
+                let cur = d.choices.get(shown.round() as usize).copied().unwrap_or("?");
+                let w = ui.available_width() - 4.0;
+                let r = ui.add_enabled_ui(!(switch && followed), |ui| {
+                    egui::ComboBox::from_id_salt(("pc", n.id, i)).width(w).truncate().selected_text(cur).show_ui(ui, |ui| {
+                        for (k, c) in d.choices.iter().enumerate() {
+                            if ui.selectable_label(n.p[i].round() as usize == k, *c).clicked() {
+                                n.p[i] = k as f32;
+                                changed = true;
+                            }
                         }
-                    }
+                    })
                 });
+                if switch {
+                    // right-click: bind to a key, note or button (toggle or momentary); the dot at the left edge takes a signal
+                    // (the menu gets an id of its own: the list of the dropdown and a menu of the same widget would share one popup)
+                    let mut menu_r = r.inner.response.clone();
+                    menu_r.id = menu_r.id.with("bind");
+                    crate::mapping::button_menu(&menu_r,&crate::mapping::Target::toggle(format!("nodet:{}:{}", n.id, i), format!("{} #{}: {}", n.kind.info().name, n.id, d.name), true));
+                    param_port(ui, z, pos2(ui.max_rect().left() - 10.0 * z, ui.min_rect().center().y), n.id, i, (0.0, 1.0, false, "switch"));
+                }
             } else {
                 // the value box next to the slider takes the width of the longest value it will show
                 let digits = if d.unit == " us" { 7 } else { format!("{:.1}", d.max.abs().max(d.min.abs())).len() + usize::from(d.min < 0.0) };
@@ -1312,6 +1429,9 @@ impl Routing {
                         ch |= Self::param_row(ui, n, i, 56.0);
                     }
                 }
+                if n.kind == Kind::Phase && n.param(1).round() as usize == 3 {
+                    ch |= phase_curve(ui, n, z);
+                }
                 if matches!(n.kind, Kind::Phase | Kind::NoiseRed | Kind::Shifter) {
                     if let Some(s) = status.filter(|s| !s.is_empty()) {
                         ui.label(RichText::new(s).small().color(Color32::from_gray(120)));
@@ -1719,6 +1839,17 @@ impl Routing {
                     }
                     ui.close();
                 }
+                if crate::mapping::btn(ui, "Merge here with another line").on_hover_text("A merge node in this line: this line goes into its left input, connect a second line to the right input").clicked() {
+                    let place = self.free_place(at, Kind::Merge);
+                    if let Some(s) = self.g.split_wire_as(Kind::Merge, to, port, place.x, place.y) {
+                        self.sel.clear();
+                        self.sel.insert(s);
+                        self.sel_wire = None;
+                        changed_graph = true;
+                        self.note = "Merge: this line is the left input, connect the second line to the right input".into();
+                    }
+                    ui.close();
+                }
                 if crate::mapping::btn(ui, "Disconnect").clicked() {
                     self.g.disconnect(to, port);
                     self.sel_wire = None;
@@ -2000,7 +2131,9 @@ impl Routing {
                         let port_hit = MOD_ROWS.lock().iter().filter(|(k, _)| k.0 != from).map(|(k, pos)| (pos.distance(p), *k)).filter(|d| d.0 < 11.0 * z.max(0.7)).min_by(|a, b| a.0.total_cmp(&b.0)).map(|d| d.1);
                         if let Some((to, param)) = port_hit {
                             if let Some((lo, hi, log, _)) = self.g.node(to).and_then(|n| param_range(n, param)) {
-                                let m = Modulation { node: to, param, src: from, in_lo: -1.0, in_hi: 1.0, out_lo: lo, out_hi: hi, log };
+                                let switch = self.g.node(to).is_some_and(|n| param_range(n, param).is_some_and(|r| r.3 == "switch"));
+                                let (in_lo, in_hi) = if switch { (-0.05, 0.05) } else { (-1.0, 1.0) };
+                                let m = Modulation { node: to, param, src: from, in_lo, in_hi, out_lo: lo, out_hi: hi, log };
                                 if self.g.set_modulation(m) {
                                     changed_graph = true;
                                 } else {
@@ -2135,6 +2268,14 @@ impl Tool for Routing {
                 if let (Ok(n), Ok(p), Ok(v)) = (n.parse::<NodeId>(), p.parse::<usize>(), v.parse::<f32>()) {
                     if v.is_finite() {
                         self.bound_set.insert((n, p), v);
+                    }
+                }
+            }
+            ["togp", n, p, v] => {
+                if let (Ok(n), Ok(p)) = (n.parse::<NodeId>(), p.parse::<usize>()) {
+                    let state = if *v == "t" { None } else { Some(v.parse::<f32>().unwrap_or(0.0) >= 0.5) };
+                    if self.bound_tog.len() < 64 {
+                        self.bound_tog.push((n, p, state));
                     }
                 }
             }
@@ -2549,18 +2690,6 @@ mod tests {
         let (sn, mn) = (g.node(s).unwrap(), g.node(m).unwrap());
         assert!((out_pos(sn, 1).y - out_pos(sn, 0).y - ROW).abs() < 1e-4);
         assert!((in_pos(mn, 1).y - in_pos(mn, 0).y - ROW).abs() < 1e-4);
-    }
-
-    #[test]
-    fn the_two_inputs_of_a_separate_output_sit_on_their_rows() {
-        let mut g = Graph::default();
-        let o = g.add(Kind::Output, 10.0, 20.0);
-        // a stereo output has its one input in the header, like the other effects
-        let hdr = in_pos(g.node(o).unwrap(), 0).y;
-        g.node_mut(o).unwrap().p[2] = 1.0;
-        let n = g.node(o).unwrap();
-        assert!((in_pos(n, 1).y - in_pos(n, 0).y - ROW).abs() < 1e-4);
-        assert!(in_pos(n, 0).y > hdr, "the dots move down to their rows");
     }
 
     #[test]

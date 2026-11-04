@@ -144,6 +144,58 @@ impl Daw {
         self.sel = p.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
     }
 
+    /// A new track with the selected time range: the clips of the selected track (cut to the range, in place in time, the
+    /// originals stay), or, with no track selected, the mix of everything rendered over the range.
+    pub(super) fn act_track_from_range(&mut self, p: &mut Project) {
+        let Some((a, b)) = self.range.filter(|r| r.1 > r.0) else {
+            self.note = "Select a time range first (drag in the timeline)".into();
+            return;
+        };
+        let Some(ti) = self.sel_track.and_then(|id| p.track_index(id)).filter(|&ti| !p.tracks[ti].draw) else {
+            self.act_bounce(p, false);
+            return;
+        };
+        if p.tracks.len() >= MAX_TRACKS {
+            self.note = "No room for another track".into();
+            return;
+        }
+        let ids: Vec<u32> = p.tracks[ti].clips.iter().filter(|c| c.start < b && c.end() > a).map(|c| c.id).collect();
+        if ids.is_empty() {
+            self.note = "The selected track has no clips in that range".into();
+            return;
+        }
+        self.checkpoint(p);
+        let src = p.tracks[ti].clone();
+        let n = p.add_track(Some(format!("{} (selection)", src.name)), src.input.clone());
+        let new_id = p.tracks[n].id;
+        let mut made = Vec::new();
+        for id in ids {
+            let mut c = src.clips.iter().find(|c| c.id == id).cloned().unwrap();
+            c.id = p.next();
+            made.push(c);
+        }
+        {
+            let t = &mut p.tracks[n];
+            t.chan = src.chan;
+            t.pan = src.pan;
+            t.vol_db = src.vol_db;
+            t.color = src.color;
+            t.clips = made;
+        }
+        let new_clips: Vec<u32> = p.tracks[n].clips.iter().map(|c| c.id).collect();
+        for id in &new_clips {
+            p.trim_clip_to(*id, a, b);
+        }
+        // the new track sits right below the original
+        let at = (ti + 1).min(p.tracks.len() - 1);
+        let t = p.tracks.remove(n);
+        p.tracks.insert(at, t);
+        self.sel.clear();
+        self.sel.extend(new_clips);
+        self.sel_track = Some(new_id);
+        self.note = "New track with the selection".into();
+    }
+
     /// Render the range (or everything) of the mix, or of the selected track, into a new track.
     pub(super) fn act_bounce(&mut self, p: &Project, track_only: bool) {
         let (a, b) = self.analysis_range(p);

@@ -88,6 +88,10 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Settings are remembered between runs
 - PNG screenshots
 
+## ASIO
+
+Every ASIO driver installed on the machine shows up in the device lists (analysis input, timeline recording, generator, monitor, routing graph), written as "name (ASIO)". VisuScope talks to the drivers directly: no ASIO SDK and no extra library are needed. One ASIO driver runs at a time; the inputs and outputs of that driver can all be used together. The channel count, sample rate and buffer size are the ones the driver is set to (change them in the driver's own control panel).
+
 ## Routing graph
 
 Every input and output of the program is a node in one window (the Routing window, open from the start), and the separate device pickers of the other windows (the input menu of the top bar, generator output, recorder sound, timeline input / output) are gone. The **Presets** menu in its toolbar builds a ready-made patch for a task (analyse, monitor, equaliser, noise reduction, measure, record); Ctrl+Z brings the old patch back.

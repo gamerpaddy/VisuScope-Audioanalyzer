@@ -15,11 +15,13 @@ const HILBERT_DELAY: usize = (HILBERT_TAPS - 1) / 2;
 
 /// Phase shift node: a polarity switch plus, optionally, a constant shift of every frequency (a Hilbert transformer,
 /// which delays the signal by `latency()` frames) or an all-pass at a chosen frequency.
-#[derive(Clone)]
 pub struct PhaseUnit {
     sign: f32,
-    /// 0 polarity only, 1 constant shift, 2 all-pass
+    /// 0 polarity only, 1 constant shift, 2 all-pass, 3 drawn curve
     mode: usize,
+    /// the drawn curve as a linear-phase FIR (mode 3), with the curve and rate it was made from
+    curve: Option<ConvUnit>,
+    curve_key: (String, u32),
     cos: f32,
     sin: f32,
     ap: Biquad,
@@ -43,29 +45,117 @@ impl Default for PhaseUnit {
                 2.0 / (PI * m as f32) * w
             })
             .collect();
-        Self { sign: 1.0, mode: 0, cos: 1.0, sin: 0.0, ap: Biquad::default(), hilbert, hist: [vec![0.0; HILBERT_TAPS * 2], vec![0.0; HILBERT_TAPS * 2]], pos: 0 }
+        Self { sign: 1.0, mode: 0, curve: None, curve_key: (String::new(), 0), cos: 1.0, sin: 0.0, ap: Biquad::default(), hilbert, hist: [vec![0.0; HILBERT_TAPS * 2], vec![0.0; HILBERT_TAPS * 2]], pos: 0 }
     }
+}
+
+/// Points of a drawn phase curve: log-spaced from 20 Hz to 20 kHz, in degrees (-180 .. 180).
+pub const CURVE_N: usize = 64;
+const CURVE_TAPS: usize = 4096;
+
+/// Frequency of point `i` of a drawn curve.
+pub fn curve_freq(i: usize) -> f32 {
+    20.0 * 1000f32.powf(i as f32 / (CURVE_N - 1) as f32)
+}
+
+/// A drawn curve as stored in the node ("deg;deg;..."); anything unreadable is a flat 0.
+pub fn curve_parse(s: &str) -> Vec<f32> {
+    let v: Vec<f32> = s.split(';').filter_map(|t| t.trim().parse::<f32>().ok()).map(|d| d.clamp(-180.0, 180.0)).collect();
+    if v.len() == CURVE_N { v } else { vec![0.0; CURVE_N] }
+}
+
+pub fn curve_encode(v: &[f32]) -> String {
+    if v.iter().all(|d| d.abs() < 0.05) {
+        return String::new();
+    }
+    v.iter().map(|d| format!("{d:.1}")).collect::<Vec<_>>().join(";")
+}
+
+/// The phase (radians) of a drawn curve at `f` Hz: straight between the points on a log axis, flat beyond the ends.
+fn curve_at(v: &[f32], f: f32) -> f32 {
+    let t = ((f.max(1.0) / 20.0).ln() / 1000f32.ln() * (CURVE_N - 1) as f32).clamp(0.0, (CURVE_N - 1) as f32);
+    let i = (t.floor() as usize).min(CURVE_N - 2);
+    let a = t - i as f32;
+    (v[i] * (1.0 - a) + v[i + 1] * a).to_radians()
 }
 
 impl PhaseUnit {
     /// `p`: polarity (0 normal, 1 inverted), mode, shift in degrees, frequency, Q.
     pub fn set(&mut self, p: &[f32], fs: f32) {
         self.sign = if p.first().copied().unwrap_or(0.0) >= 0.5 { -1.0 } else { 1.0 };
-        self.mode = p.get(1).copied().unwrap_or(0.0).round().clamp(0.0, 2.0) as usize;
+        self.mode = p.get(1).copied().unwrap_or(0.0).round().clamp(0.0, 3.0) as usize;
         let phi = p.get(2).copied().unwrap_or(0.0).to_radians();
         self.cos = phi.cos();
         self.sin = phi.sin();
+        // 0 and 180 degrees are only a sign: no need to delay the signal for them
+        if self.mode == 1 && self.sin.abs() < 1e-4 {
+            self.sign *= self.cos.signum();
+            self.mode = 0;
+        }
         self.ap.set(BqType::AllPass, fs, p.get(3).copied().unwrap_or(1000.0), 0.0, p.get(4).copied().unwrap_or(0.7));
+    }
+
+    /// Make the filter of a drawn curve (only in that mode, and only when the curve or the rate changed).
+    pub fn set_curve(&mut self, s: &str, fs: f32) {
+        if self.mode != 3 {
+            self.curve = None;
+            self.curve_key = (String::new(), 0);
+            return;
+        }
+        let key = (s.to_string(), fs as u32);
+        if self.curve_key == key {
+            return;
+        }
+        self.curve_key = key.clone();
+        // a flat curve is "off": no filter, no delay
+        if s.is_empty() {
+            self.curve = None;
+            return;
+        }
+        let v = curve_parse(s);
+        let n = CURVE_TAPS;
+        let mut spec = vec![Complex32::new(0.0, 0.0); n];
+        for k in 0..=n / 2 {
+            let ph = curve_at(&v, k as f32 * fs / n as f32);
+            let h = if k == 0 || k == n / 2 { Complex32::new(ph.cos(), 0.0) } else { Complex32::new(ph.cos(), ph.sin()) };
+            spec[k] = h;
+            if k > 0 && k < n / 2 {
+                spec[n - k] = h.conj();
+            }
+        }
+        FftPlanner::<f32>::new().plan_fft_inverse(n).process(&mut spec);
+        // the zero-phase response sits around tap 0: move it to the middle and window it
+        let taps: Vec<f32> = (0..n)
+            .map(|m| {
+                let x = m as f32 / (n - 1) as f32;
+                let w = 0.42 - 0.5 * (2.0 * PI * x).cos() + 0.08 * (4.0 * PI * x).cos();
+                spec[(m + n / 2) % n].re / n as f32 * w
+            })
+            .collect();
+        let mut u = ConvUnit::new();
+        u.load(vec![taps.clone(), taps], 1.0, 256, n as f32 / fs);
+        u.set(&[100.0, 0.0]);
+        self.curve = Some(u);
+        self.curve_key = key;
     }
 
     /// Frames of delay the node adds in its current mode.
     pub fn latency(&self) -> usize {
-        if self.mode == 1 { HILBERT_DELAY } else { 0 }
+        match self.mode {
+            1 => HILBERT_DELAY,
+            3 => self.curve.as_ref().map_or(0, |c| c.latency() + CURVE_TAPS / 2),
+            _ => 0,
+        }
     }
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         match self.mode {
             2 => self.ap.process(l, r),
+            3 => {
+                if let Some(c) = &mut self.curve {
+                    c.process(l, r);
+                }
+            }
             1 => {
                 // y = cos(phi) * x(n - D) + sin(phi) * H{x}(n - D): every frequency is turned by phi
                 let start = self.pos;
@@ -954,6 +1044,63 @@ mod chunking {
         // a zero shift with the mix at 0 % is the delayed input
         let y = run(48000.0, 1000.0, [1.0, 1.0, 0.0, 1.0, 0.0], 0.5);
         assert!(level(&y[y.len() - 10000..], 1000.0, 48000.0) > 0.45);
+    }
+
+    #[test]
+    fn zero_degrees_changes_nothing_and_a_drawn_curve_turns_only_what_is_drawn() {
+        let fs = 48000.0;
+        let n = 24000;
+        let tone = |f: f32| -> Vec<f32> { (0..n).map(|i| (2.0 * PI * f * i as f32 / fs).sin() * 0.5).collect() };
+        // "all frequencies" at 0 degrees: no delay, the same samples
+        let mut u = PhaseUnit::default();
+        u.set(&[0.0, 1.0, 0.0, 1000.0, 0.7], fs);
+        assert_eq!(u.latency(), 0);
+        let (mut l, mut r) = (tone(1000.0), vec![0.0; n]);
+        let x = l.clone();
+        u.process(&mut l, &mut r);
+        assert_eq!(l, x);
+        // a curve: 90 degrees from 2 kHz up, nothing below 300 Hz; a 5 kHz tone is shifted by a quarter period, a 100 Hz tone is not
+        let mut v = vec![0.0f32; CURVE_N];
+        for (i, d) in v.iter_mut().enumerate() {
+            let f = curve_freq(i);
+            *d = if f >= 2000.0 { 90.0 } else if f > 300.0 { 90.0 * (f - 300.0) / 1700.0 } else { 0.0 };
+        }
+        let s = curve_encode(&v);
+        // a flat curve is off: no delay, the same samples
+        let mut off = PhaseUnit::default();
+        off.set(&[0.0, 3.0, 0.0, 1000.0, 0.7], fs);
+        off.set_curve("", fs);
+        assert_eq!(off.latency(), 0);
+        let (mut l, mut r) = (tone(1000.0), vec![0.0; n]);
+        let x = l.clone();
+        off.process(&mut l, &mut r);
+        assert_eq!(l, x);
+        let mut u = PhaseUnit::default();
+        u.set(&[0.0, 3.0, 0.0, 1000.0, 0.7], fs);
+        u.set_curve(&s, fs);
+        let lat = u.latency();
+        assert!(lat > 2000);
+        let phase_of = |u: &mut PhaseUnit, f: f32, shifted: bool| -> f32 {
+            let (mut l, mut r) = (tone(f), vec![0.0; n]);
+            if shifted {
+                u.process(&mut l, &mut r);
+            }
+            // correlate the tail with sine / cosine of the input (delay removed by the latency)
+            let (mut a, mut b) = (0f32, 0f32);
+            for i in 12000..n {
+                let t = (i as f32 - if shifted { lat as f32 } else { 0.0 }) / fs;
+                a += l[i] * (2.0 * PI * f * t).sin();
+                b += l[i] * (2.0 * PI * f * t).cos();
+            }
+            b.atan2(a).to_degrees()
+        };
+        let d5k = phase_of(&mut u, 5000.0, true) - phase_of(&mut u, 5000.0, false);
+        assert!((d5k - 90.0).abs() < 6.0, "5 kHz turned by {d5k}");
+        let mut u2 = PhaseUnit::default();
+        u2.set(&[0.0, 3.0, 0.0, 1000.0, 0.7], fs);
+        u2.set_curve(&s, fs);
+        let d100 = phase_of(&mut u2, 100.0, true) - phase_of(&mut u2, 100.0, false);
+        assert!(d100.abs() < 6.0, "100 Hz turned by {d100}");
     }
 
     #[test]

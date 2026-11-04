@@ -2,7 +2,7 @@
 //! linear-interpolation resampling so any file rate plays on any device rate.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, SampleFormat, SizedSample};
+use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
@@ -234,7 +234,7 @@ pub fn start(queue: Arc<Mutex<Queue>>, gain: Arc<AtomicU32>, dev_id: Option<Stri
                         }
                         if dead.load(Relaxed) && !stop2.load(Relaxed) {
                             // an invalidated stream can hang when dropped: leak it, like the other streams
-                            std::mem::forget(stream);
+                            stream.abandon();
                             *status.lock() = "output changed, reconnecting...".into();
                             std::thread::sleep(Duration::from_millis(500));
                         } else {
@@ -259,7 +259,12 @@ pub fn start(queue: Arc<Mutex<Queue>>, gain: Arc<AtomicU32>, dev_id: Option<Stri
     Handle { stop }
 }
 
-fn build(q: &Arc<Mutex<Queue>>, gain: &Arc<AtomicU32>, id: Option<&str>, dead: Arc<AtomicBool>) -> Result<(cpal::Stream, String), String> {
+fn build(q: &Arc<Mutex<Queue>>, gain: &Arc<AtomicU32>, id: Option<&str>, dead: Arc<AtomicBool>) -> Result<(crate::asio::Held, String), String> {
+    if let Some(aid) = id.filter(|i| crate::asio::is_asio(i)) {
+        let (q2, g2, d2, key) = (q.clone(), gain.clone(), dead.clone(), aid.to_string());
+        let (port, info) = crate::asio::open_output(crate::asio::name_of(aid), dead.clone(), move |i| Box::new(out_body::<f32>(q2, g2, i.sr, i.n_out, key, d2)))?;
+        return Ok((crate::asio::Held::Asio(port), format!("ASIO {} Hz, {} ch, {} frames", info.sr, info.n_out, info.buf)));
+    }
     let host = cpal::default_host();
     let dev = match id {
         Some(id) if !id.is_empty() => {
@@ -286,19 +291,40 @@ fn build(q: &Arc<Mutex<Queue>>, gain: &Arc<AtomicU32>, id: Option<&str>, dead: A
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok((stream, format!("{sr} Hz, {ch} ch")))
+    Ok((crate::asio::Held::Cpal(stream), format!("{sr} Hz, {ch} ch")))
 }
 
 fn make<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, q: Arc<Mutex<Queue>>, gain: Arc<AtomicU32>, out_sr: u32, dead: Arc<AtomicBool>) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32> + Send + 'static,
 {
-    let ch = (cfg.channels as usize).max(1);
+    let ch = cfg.channels as usize;
+    let key = dev.id().map(|i| i.to_string()).unwrap_or_default();
+    let mut f = out_body::<T>(q, gain, out_sr, ch, key, dead.clone());
+    dev.build_output_stream(
+        cfg,
+        move |data: &mut [T], _: &_| f(data),
+        move |e| match e.kind() {
+            cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
+            _ => {
+                crate::log::log(&format!("monitor: stream error {:?}: {e}", e.kind()));
+                dead.store(true, Relaxed)
+            }
+        },
+        None,
+    )
+}
+
+/// What the monitor output does with a block (the same for cpal and for ASIO).
+fn out_body<T>(q: Arc<Mutex<Queue>>, gain: Arc<AtomicU32>, out_sr: u32, ch: usize, key: String, dead_cb: Arc<AtomicBool>) -> impl FnMut(&mut [T]) + Send + 'static
+where
+    T: Copy + Sample + FromSample<f32> + Send + 'static,
+{
+    let ch = ch.max(1);
     // (the source learns the rate of the device, to filter what the device cannot play)
     q.lock().out_sr = out_sr;
     let (mut prev, mut next) = ((0f32, 0f32), (0f32, 0f32));
     let mut frac = 1.0f64;
-    let key = dev.id().map(|i| i.to_string()).unwrap_or_default();
     let mut ctl = OutCtl::new();
     // the last sample played, and a crossfade (frames left) after a backlog was skipped
     let (mut hold, mut fade, mut fade_from, mut fade_len) = ((0f32, 0f32), 0usize, (0f32, 0f32), 1usize);
@@ -306,10 +332,7 @@ where
         ctl.cush = Cushion::from_state(st);
     }
     let mut stored = ctl.cush.state();
-    let dead_cb = dead.clone();
-    dev.build_output_stream(
-        cfg,
-        move |data: &mut [T], _: &_| {
+    move |data: &mut [T]| {
             let silence = T::from_sample(0.0);
             data.iter_mut().for_each(|d| *d = silence);
             if dead_cb.load(Relaxed) {
@@ -388,16 +411,7 @@ where
                     frame[1] = T::from_sample(r);
                 }
             }
-        },
-        move |e| match e.kind() {
-            cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceBusy => {}
-            _ => {
-                crate::log::log(&format!("monitor: stream error {:?}: {e}", e.kind()));
-                dead.store(true, Relaxed)
-            }
-        },
-        None,
-    )
+    }
 }
 
 #[cfg(test)]

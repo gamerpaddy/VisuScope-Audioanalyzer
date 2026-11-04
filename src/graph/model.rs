@@ -104,7 +104,7 @@ pub const DIST_TYPES: &[&str] = &["Soft (tube-like)", "Hard clip", "Asymmetric (
 pub const DIST_HARMONIC: usize = 4;
 const P_PHASE: &[ParamDef] = &[
     c("Polarity", 0, &["normal", "inverted"]),
-    c("Shift", 0, &["off", "all frequencies", "all-pass at frequency"]),
+    c("Shift", 0, &["off", "all frequencies", "all-pass at frequency", "drawn curve"]),
     s("Angle", 0.0, 360.0, 90.0, " deg"),
     l("Freq", 20.0, 20000.0, 1000.0, " Hz"),
     l("Q", 0.1, 10.0, 0.7, ""),
@@ -133,7 +133,7 @@ const P_MIXER: &[ParamDef] = &[
     s("Mute 1", 0.0, 1.0, 0.0, ""), s("Mute 2", 0.0, 1.0, 0.0, ""), s("Mute 3", 0.0, 1.0, 0.0, ""), s("Mute 4", 0.0, 1.0, 0.0, ""),
     s("Mute 5", 0.0, 1.0, 0.0, ""), s("Mute 6", 0.0, 1.0, 0.0, ""), s("Mute 7", 0.0, 1.0, 0.0, ""), s("Mute 8", 0.0, 1.0, 0.0, ""),
 ];
-const P_OUTPUT: &[ParamDef] = &[s("Gain", -60.0, 12.0, 0.0, " dB"), c("Mute", 0, &["on", "muted"]), c("Input", 0, &["Stereo pair", "Separate L / R"])];
+const P_OUTPUT: &[ParamDef] = &[s("Gain", -60.0, 12.0, 0.0, " dB"), c("Mute", 0, &["on", "muted"])];
 
 pub struct KindInfo {
     pub name: &'static str,
@@ -315,8 +315,6 @@ impl Node {
     pub fn inputs(&self) -> usize {
         match self.kind {
             Kind::Mixer => (self.p.first().copied().unwrap_or(4.0).round() as usize).clamp(1, MIX_MAX),
-            // an output can take a stereo pair, or the two channels one by one (each input made mono, like a merge node)
-            Kind::Output if self.param(2).round() as usize == 1 => 2,
             k => k.info().inputs,
         }
     }
@@ -885,23 +883,15 @@ mod tests {
     }
 
     #[test]
-    fn an_output_takes_a_stereo_pair_or_two_single_channels() {
+    fn an_output_has_one_stereo_input_and_old_files_still_load() {
         let mut g = Graph::default();
         let (a, sp, out) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Split, 0.0, 0.0), g.add(Kind::Output, 0.0, 0.0));
         g.connect(a, sp, 0).unwrap();
         assert_eq!(g.node(out).unwrap().inputs(), 1);
         assert!(g.connect_from(sp, 1, out, 1).is_err(), "a stereo output has one input");
-        g.node_mut(out).unwrap().p[2] = 1.0;
-        assert_eq!(g.node(out).unwrap().inputs(), 2);
-        g.connect_from(sp, 0, out, 0).unwrap();
-        g.connect_from(sp, 1, out, 1).unwrap();
-        // it survives the text format, and an old file (two parameters) still loads as a stereo output
-        let h = Graph::decode(&g.encode()).unwrap();
-        assert_eq!(h.node(out).unwrap().inputs(), 2);
-        assert_eq!(h.edges.len(), g.edges.len());
-        let old = Graph::decode("VSGRAPH 1\nnode 1|out|0|0|0||0,0\n").unwrap();
+        // a file of the time of the separate L / R option (three parameters) loads, as a stereo output
+        let old = Graph::decode("VSGRAPH 1\nnode 1|out|0|0|0||0,0,1\n").unwrap();
         assert_eq!(old.node(1).unwrap().inputs(), 1);
-        assert_eq!(old.node(1).unwrap().p.len(), 3);
     }
 
     #[test]

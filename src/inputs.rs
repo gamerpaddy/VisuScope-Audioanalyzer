@@ -41,6 +41,7 @@ impl App {
                         }
                     }
                     None if f.action.starts_with("mixm:") => self.run_action(ctx, &f.action.replacen("mixm:", "mixs:", 1), f.value),
+                    None if f.action.starts_with("nodet:") => self.run_action(ctx, &f.action.replacen("nodet:", "nodes:", 1), f.value),
                     None => {
                         if f.value >= 0.5 {
                             self.run_action(ctx, &f.action, 1.0);
@@ -167,6 +168,14 @@ impl App {
                     self.tool_command("Routing", &format!("setp\t{n}\t{p}\t{v}"));
                 }
             }
+            x if x.starts_with("nodet:") || x.starts_with("nodes:") => {
+                // nodet:<id>:<parameter> switches an on / off setting of a node; nodes: sets it (a momentary binding)
+                let mut it = x[6..].split(':');
+                if let (Some(n), Some(p)) = (it.next(), it.next()) {
+                    let how = if x.starts_with("nodes:") { format!("{}", (v >= 0.5) as u8) } else { "t".to_string() };
+                    self.tool_command("Routing", &format!("togp\t{n}\t{p}\t{how}"));
+                }
+            }
             x if x.starts_with("mixm:") || x.starts_with("mixs:") => {
                 // mixm:<id>:<input> switches the mute; mixs: sets it (a momentary binding: 1 while held, 0 when let go)
                 let mut it = x[5..].split(':');
@@ -241,12 +250,15 @@ impl App {
                     // a button that is on while held, or switches at each press
                     if slider.is_none() && !matches!(id.as_str(), "png" | "reset_minmax" | "tile" | "daw_home" | "daw_zoom_in" | "daw_zoom_out" | "daw_fit" | "daw_marker" | "daw_split" | "daw_undo" | "daw_redo" | "graph_undo" | "graph_redo") && !id.starts_with("layout_") {
                         if let Some(bi) = self.map.bindings.iter().position(|b| b.action == id) {
-                            if self.action_state(&id).is_some() || id.starts_with("mixm:") {
+                            if self.action_state(&id).is_some() || id.starts_with("mixm:") || id.starts_with("nodet:") {
                                 ui.horizontal(|ui| {
                                     ui.add_space(24.0);
                                     let b = &mut self.map.bindings[bi];
                                     let mut ch = ui.radio_value(&mut b.momentary, false, "toggle").changed();
                                     ch |= ui.radio_value(&mut b.momentary, true, "momentary (on while held)").changed();
+                                    if id.starts_with("nodet:") && b.momentary {
+                                        ch |= ui.checkbox(&mut b.invert, "inverted (off while held)").changed();
+                                    }
                                     if ch {
                                         self.map.dirty = true;
                                     }

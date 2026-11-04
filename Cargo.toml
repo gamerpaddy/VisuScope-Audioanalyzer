@@ -1,6 +1,6 @@
 [package]
 name = "visuscope"
-version = "1.11.0"
+version = "1.12.0"
 edition = "2024"
 description = "Real-time audio analyzer"
 license = "Unlicense"
@@ -15,7 +15,7 @@ rfd = "0.15"
 rustfft = "6.4.1"
 symphonia = { version = "0.5", features = ["aac", "alac", "flac", "isomp4", "mkv", "mp3", "ogg", "vorbis", "wav", "pcm"] }
 gilrs = "0.11"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Media", "Win32_Media_Audio", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Media", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Registry", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 opt-level = 3
