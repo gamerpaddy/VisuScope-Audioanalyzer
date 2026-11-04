@@ -7,5 +7,6 @@ pub mod editor;
 pub mod engine;
 pub mod fx;
 pub mod model;
+pub mod presets;
 
 pub use engine::bus;

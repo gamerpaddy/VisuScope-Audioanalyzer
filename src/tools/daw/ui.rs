@@ -2093,13 +2093,31 @@ impl Daw {
         };
         // wide enough for "-10.4 / -14.2 dBFS" and "+0.00093 / +0.00001" in the monospace values
         // a narrow panel (to the right of the tracks) stacks the three parts instead of putting them side by side
-        let (stats_r, spec_r, spg_r) = if body.width() < 600.0 {
-            let stats_h = (body.height() * 0.34).clamp(70.0, 168.0);
-            let half = (body.height() - stats_h - 12.0) * 0.5;
-            let s = Rect::from_min_size(body.min, vec2(body.width(), stats_h));
-            let sp = Rect::from_min_size(pos2(body.left(), s.bottom() + 6.0), vec2(body.width(), half));
-            (s, sp, Rect::from_min_max(pos2(body.left(), sp.bottom() + 6.0), body.max))
-        } else {
+        if body.width() < 600.0 {
+            // a narrow panel stacks the three parts, each at a size it can be read at; when the panel is too low for all of them
+            // the whole stack scrolls instead of squeezing the plots to nothing
+            let two_cols = body.width() >= 330.0;
+            let stats_h = if two_cols { 104.0 } else { 178.0 };
+            let plot_h = ((body.height() - stats_h - 12.0) * 0.5).clamp(110.0, 260.0);
+            let total = (stats_h + 2.0 * plot_h + 12.0).max(body.height());
+            ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+                ui.shrink_clip_rect(body);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let (full, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
+                    let s = Rect::from_min_size(full.min, vec2(full.width(), stats_h));
+                    let sp = Rect::from_min_size(pos2(full.left(), s.bottom() + 6.0), vec2(full.width(), plot_h));
+                    let sg = Rect::from_min_max(pos2(full.left(), sp.bottom() + 6.0), full.max);
+                    self.stats_grid(ui, &out, s, two_cols, false);
+                    self.spectrum_plot(ui, &out, sp);
+                    self.spectrogram_view(ui, &out, sg, (a, b), p.sr);
+                });
+            });
+            if out.truncated {
+                painter.text(pos2(rect.right() - 10.0, rect.top() + 6.0), Align2::RIGHT_TOP, "analysed: first 5 minutes", FontId::proportional(10.0), Color32::from_rgb(255, 190, 80));
+            }
+            return;
+        }
+        let (stats_r, spec_r, spg_r) = {
             let stats_w = 250.0f32.min(body.width() * 0.34);
             let rest = body.width() - stats_w - 12.0;
             let spec_w = rest * 0.56;
@@ -2107,7 +2125,7 @@ impl Daw {
             let sp = Rect::from_min_size(pos2(s.right() + 6.0, body.top()), vec2(spec_w, body.height()));
             (s, sp, Rect::from_min_max(pos2(sp.right() + 6.0, body.top()), body.max))
         };
-        self.stats_grid(ui, &out, stats_r);
+        self.stats_grid(ui, &out, stats_r, false, true);
         self.spectrum_plot(ui, &out, spec_r);
         self.spectrogram_view(ui, &out, spg_r, (a, b), p.sr);
         if out.truncated {
@@ -2120,7 +2138,8 @@ impl Daw {
         p.track_index(id).map(|ti| p.tracks[ti].name.clone())
     }
 
-    fn stats_grid(&self, ui: &mut Ui, out: &AnalysisOut, r: Rect) {
+    /// `two_cols`: two label / value pairs per row (a wide but low stack); `scroll`: the grid scrolls by itself when it does not fit.
+    fn stats_grid(&self, ui: &mut Ui, out: &AnalysisOut, r: Rect, two_cols: bool, scroll: bool) {
         let s = &out.stats;
         let f = |v: f32| if v <= -119.0 { "-inf".to_string() } else { format!("{v:.1}") };
         let rows: Vec<(&str, String)> = vec![
@@ -2136,18 +2155,55 @@ impl Daw {
             ("Clipped samples", format!("{}", s.clipped)),
             ("Silence", format!("{:.0} %", s.silence_pct)),
         ];
-        ui.scope_builder(UiBuilder::new().max_rect(r), |ui| {
-            ui.shrink_clip_rect(r);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                egui::Grid::new("daw_stats").num_columns(2).spacing([6.0, 1.0]).show(ui, |ui| {
-                    for (k, v) in rows {
-                        ui.label(RichText::new(k).small().weak());
-                        let warn = (k == "Clipped samples" && s.clipped > 0) || (k == "True peak" && s.true_peak_db > -0.1);
-                        ui.add(egui::Label::new(RichText::new(v).small().monospace().color(if warn { Color32::from_rgb(255, 130, 110) } else { Color32::from_rgb(215, 224, 238) })).truncate());
+        // the rows fill the room there is: more air between them when the area is tall, larger text when there is plenty
+        let per_row = if two_cols { rows.len().div_ceil(2) } else { rows.len() } as f32;
+        let room = r.height() / per_row;
+        let gap = (room - 15.0).clamp(1.0, 9.0);
+        let big = room > 24.0 && r.width() > 230.0;
+        let show = |ui: &mut Ui, rows: Vec<(&str, String)>| {
+            let cell = |ui: &mut Ui, k: &str, v: String| {
+                let warn = (k == "Clipped samples" && s.clipped > 0) || (k == "True peak" && s.true_peak_db > -0.1);
+                let (kt, vt) = (RichText::new(k).weak(), RichText::new(v).monospace().color(if warn { Color32::from_rgb(255, 130, 110) } else { Color32::from_rgb(215, 224, 238) }));
+                if big {
+                    ui.label(kt.size(12.0));
+                    ui.add(egui::Label::new(vt.size(13.5)).truncate());
+                } else {
+                    ui.label(kt.small());
+                    // (in two columns the values are not cut: the grid takes the width it needs)
+                    ui.add(egui::Label::new(vt.small()).wrap_mode(if two_cols { egui::TextWrapMode::Extend } else { egui::TextWrapMode::Truncate }));
+                }
+            };
+            if two_cols {
+                let half = rows.len().div_ceil(2);
+                egui::Grid::new("daw_stats2").num_columns(4).spacing([10.0, gap]).show(ui, |ui| {
+                    for i in 0..half {
+                        cell(ui, rows[i].0, rows[i].1.clone());
+                        match rows.get(i + half) {
+                            Some((k, v)) => cell(ui, k, v.clone()),
+                            None => {
+                                ui.label("");
+                                ui.label("");
+                            }
+                        }
                         ui.end_row();
                     }
                 });
-            });
+            } else {
+                egui::Grid::new("daw_stats").num_columns(2).spacing([8.0, gap]).show(ui, |ui| {
+                    for (k, v) in rows {
+                        cell(ui, k, v);
+                        ui.end_row();
+                    }
+                });
+            }
+        };
+        ui.scope_builder(UiBuilder::new().max_rect(r), |ui| {
+            ui.shrink_clip_rect(r);
+            if scroll {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| show(ui, rows));
+            } else {
+                show(ui, rows);
+            }
         });
     }
 

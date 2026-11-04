@@ -4,6 +4,7 @@
 //! service involved, and always shows its plan before it changes anything.
 
 use crate::app::App;
+use crate::graph::presets::Preset;
 use crate::tonegen::{NoiseKind, Wave};
 use crate::windows::{win_short, BUILTIN, WIN_COUNT};
 use eframe::egui::{self, vec2, Align2, Color32, RichText};
@@ -35,6 +36,14 @@ pub enum Action {
     Windows(Vec<&'static str>),
     Tone { wave: Wave, noise: Option<NoiseKind>, freq: Option<f32>, level: Option<f32> },
     Monitor,
+    /// from the walk-through: input device and its two channels (0 based)
+    Pair { dev: usize, label: String, l: usize, r: usize },
+    /// output device (index in the list of outputs, 0 = default)
+    OutputDev(usize),
+    /// a microphone calibration file for the 0 (slot 0) or 90 degree (slot 1) response
+    Cal { slot: usize, path: String },
+    /// a routing patch for the node editor
+    Preset(Preset),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,6 +56,7 @@ pub enum Run {
 
 #[derive(Clone, Debug, Default)]
 pub struct Plan {
+    pub preset: Option<Preset>,
     pub title: String,
     pub actions: Vec<Action>,
     pub runs: Vec<Run>,
@@ -96,7 +106,11 @@ impl Action {
                 }
                 s
             }
-            Action::Monitor => "Monitor: on (plays the input on the output chosen in the side bar)".into(),
+            Action::Monitor => "Monitor: on (plays the input on the output chosen in the Input menu)".into(),
+            Action::Pair { label, l, r, .. } => format!("Input: {label}, channels {} and {}", l + 1, r + 1),
+            Action::OutputDev(i) => format!("Output: device {}", if *i == 0 { "default".to_string() } else { format!("#{}", i + 1) }),
+            Action::Cal { slot, path } => format!("Microphone calibration ({} degrees): {}", if *slot == 0 { 0 } else { 90 }, std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()),
+            Action::Preset(p) => format!("Routing patch: {}", p.name()),
         }
     }
 }
@@ -502,6 +516,17 @@ pub fn plan(text: &str, devs: &[String], cur: usize, graph_on: bool) -> Plan {
     if p.runs.iter().any(|r| matches!(r, Run::Stepped(_))) {
         p.notes.push("The stepped distortion measurement needs the generator output fed back into the input.".into());
     }
+    p.preset = if p.actions.is_empty() {
+        None
+    } else if need_sweep || !p.runs.is_empty() || gen_words {
+        Some(Preset::Measure)
+    } else if record {
+        Some(Preset::Record)
+    } else if monitor {
+        Some(Preset::Monitor)
+    } else {
+        Some(Preset::Analyze)
+    };
     if titles.is_empty() {
         titles.push("setup");
     }
@@ -526,6 +551,8 @@ pub struct State {
     pub log: Vec<String>,
     focus: bool,
     hook_done: bool,
+    /// the walk-through, when one is running
+    pub wiz: Option<crate::guide::Wizard>,
     /// runs wait until the restarted input has settled (and delivers a sample rate)
     not_before: Option<Instant>,
     waiting_since: Option<Instant>,
@@ -604,6 +631,34 @@ impl App {
                     }
                 }
                 Action::Monitor => self.mon_on = true,
+                Action::Pair { dev, l, r, .. } => {
+                    self.sel_dev = *dev;
+                    self.ch_a = (*l).min(crate::shared::MAX_CH - 1);
+                    self.ch_b = (*r).min(crate::shared::MAX_CH - 1);
+                    self.start_selected();
+                    self.assist.not_before = Some(Instant::now() + std::time::Duration::from_millis(1800));
+                }
+                Action::OutputDev(i) => {
+                    if *i < self.gen_devs.len() {
+                        self.gen_sel = *i;
+                        // a generator that is already running plays on the old device until it is restarted
+                        if self.gen_handle.is_some() {
+                            self.gen_handle = None;
+                        }
+                        self.mon_dev = if *i == 0 { String::new() } else { self.gen_devs[*i].id.clone() };
+                    }
+                }
+                Action::Cal { slot, path } => self.load_mic_file(std::path::Path::new(path), Some(*slot), true),
+                Action::Preset(pr) => {
+                    let in_id = self.devices.get(self.sel_dev).map(|d| d.id.clone()).unwrap_or_default();
+                    let out_id = if self.gen_sel == 0 { String::new() } else { self.gen_devs.get(self.gen_sel).map(|d| d.id.clone()).unwrap_or_default() };
+                    let g = crate::graph::presets::build(*pr, &in_id, self.ch_a + 1, self.ch_b + 1, &out_id);
+                    if let Some(rec) = g.nodes.iter().find(|n| n.kind == crate::graph::model::Kind::TimelineRec) {
+                        crate::graph::bus().track_requests.lock().push((rec.id, "Input".into()));
+                    }
+                    self.graph_on = true;
+                    *crate::graph::bus().graph_restore.lock() = Some(g.encode());
+                }
             }
         }
         // an opened window needs one frame before it can be used: runs start after the plan is in place
@@ -619,6 +674,7 @@ impl App {
 
     /// Every frame: start the queued measurements one after the other.
     pub fn assist_tick(&mut self) {
+        self.wizard_poll();
         // test hook: VISUSCOPE_ASSIST="what to do" opens the assistant with that sentence planned (VISUSCOPE_ASSIST_RUN=1 also sets it up)
         if !self.assist.hook_done && self.layout_ready {
             self.assist.hook_done = true;
@@ -626,6 +682,15 @@ impl App {
                 self.assist.open = true;
                 self.assist.text = t;
                 self.assist_plan();
+                // (VISUSCOPE_ASSIST_WALK=<step> starts the walk-through at that step: screenshots)
+                if let Some(step) = std::env::var("VISUSCOPE_ASSIST_WALK").ok().and_then(|v| v.parse::<usize>().ok()) {
+                    if let Some(p) = self.assist.plan.clone() {
+                        self.wizard_start(p);
+                        if let Some(w) = self.assist.wiz.as_mut() {
+                            w.at = step.min(w.steps.len() - 1);
+                        }
+                    }
+                }
                 if std::env::var_os("VISUSCOPE_ASSIST_RUN").is_some() {
                     if let Some(p) = self.assist.plan.clone() {
                         self.assist_apply(&p, false);
@@ -709,7 +774,12 @@ impl App {
         let mut open = true;
         let mut do_plan = false;
         let mut apply: Option<bool> = None;
+        let mut walk = false;
         egui::Window::new("Assistant").order(egui::Order::Foreground).open(&mut open).pivot(Align2::RIGHT_TOP).default_pos(ctx.content_rect().right_top() + vec2(-8.0, 34.0)).default_width(400.0).collapsible(false).resizable(true).show(ctx, |ui| {
+            if self.assist.wiz.is_some() {
+                self.wizard_ui(ui);
+                return;
+            }
             ui.label(RichText::new("Say what you want to measure or look at. I set up the input, windows, layout and settings, and can start the measurement.").small().weak());
             ui.horizontal(|ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut self.assist.text).desired_width(ui.available_width() - 62.0).hint_text("e.g. frequency response and distortion with a sweep on input mic1"));
@@ -746,8 +816,14 @@ impl App {
                 for n in &p.notes {
                     ui.label(RichText::new(n).small().color(Color32::from_rgb(255, 190, 100)));
                 }
+                if let Some(pr) = p.preset {
+                    ui.label(RichText::new(format!("Node patch (in the walk-through): {}", pr.name())).small().color(Color32::from_rgb(150, 190, 230)));
+                }
                 if !p.actions.is_empty() {
                     ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Walk me through").strong()).on_hover_text("Choose the input, the output, a calibration file and the parameters step by step, then everything is set up in that order").clicked() {
+                            walk = true;
+                        }
                         if !p.runs.is_empty() && ui.button(RichText::new("Set up and start").strong()).clicked() {
                             apply = Some(true);
                         }
@@ -766,6 +842,11 @@ impl App {
         });
         if do_plan {
             self.assist_plan();
+        }
+        if walk {
+            if let Some(p) = self.assist.plan.clone() {
+                self.wizard_start(p);
+            }
         }
         if let (Some(start), Some(p)) = (apply, self.assist.plan.clone()) {
             self.assist_apply(&p, start);
@@ -890,6 +971,18 @@ mod tests {
         assert!(p.actions.iter().any(|a| matches!(a, Action::Sweep { averages: Some(4), secs: Some(s), .. } if *s == 3.0)), "{:?}", p.actions);
         assert!(windows(&plan("measure the noise floor", &devs(), 0, false)).contains(&"Measure"));
         assert!(windows(&plan("check the level of the left channel", &devs(), 0, false)).contains(&"Measure"));
+    }
+
+    #[test]
+    fn each_task_suggests_a_routing_patch() {
+        use crate::graph::presets::Preset;
+        let pr = |s: &str| plan(s, &devs(), 0, false).preset;
+        assert_eq!(pr("measure the frequency response with a sweep"), Some(Preset::Measure));
+        assert_eq!(pr("generate a 1 khz tone at -20 db"), Some(Preset::Measure));
+        assert_eq!(pr("record from input 2"), Some(Preset::Record));
+        assert_eq!(pr("listen to the input"), Some(Preset::Monitor));
+        assert_eq!(pr("show the spectrum"), Some(Preset::Analyze));
+        assert_eq!(pr("make me a sandwich"), None);
     }
 
     #[test]

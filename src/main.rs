@@ -9,6 +9,7 @@ mod dsp;
 mod eq;
 mod gen_ui;
 mod graph;
+mod guide;
 mod inputs;
 mod layouts;
 mod mapping;
