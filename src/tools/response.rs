@@ -202,10 +202,10 @@ impl Tool for Response {
                 }
             });
             ui.checkbox(&mut self.normalize, "Normalise").on_hover_text("Shift the magnitude so the 1 kHz value reads 0 dB");
-            if ui.button("Hold").on_hover_text("Keep the current magnitude trace as a comparison").clicked() {
+            if crate::mapping::btn(ui, "Hold").on_hover_text("Keep the current magnitude trace as a comparison").clicked() {
                 self.held = self.curve.as_ref().map(|c| ("held".to_string(), c.f.clone(), c.mag.clone()));
             }
-            if self.held.is_some() && ui.small_button("Clear hold").clicked() {
+            if self.held.is_some() && crate::mapping::small_btn(ui, "Clear hold").clicked() {
                 self.held = None;
             }
             if ui.add_enabled(self.curve.is_some() && self.save.is_none(), egui::Button::new("CSV")).on_hover_text("Export magnitude, phase, delay and coherence").clicked() {

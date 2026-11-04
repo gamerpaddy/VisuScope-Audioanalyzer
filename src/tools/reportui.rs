@@ -81,7 +81,7 @@ impl Tool for ReportTool {
                 cx.req.report = Some(ReportReq { title: self.title.clone(), notes: self.notes.clone(), include: SECTIONS.iter().zip(self.include).filter(|(_, on)| *on).map(|(s, _)| s.0.to_string()).collect(), open: self.open_after, path: None });
             }
             ui.checkbox(&mut self.open_after, "open in browser");
-            if ui.button("Folder").on_hover_text("Reports are saved in Documents\\VisuScope").clicked() {
+            if crate::mapping::btn(ui, "Folder").on_hover_text("Reports are saved in Documents\\VisuScope").clicked() {
                 open_path(&docs_dir());
             }
         });

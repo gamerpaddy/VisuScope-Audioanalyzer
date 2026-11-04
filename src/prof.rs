@@ -31,6 +31,13 @@ pub struct Counters {
     pub eng_block: AtomicU32,
     pub eng_block_sum: AtomicU64,
     pub eng_sr: AtomicU32,
+    /// the longest delay the nodes of the graph add from an input to an output (ms, f32 bits), and the engine block averaged
+    /// over the last second (ms, f32 bits)
+    pub path_ms: AtomicU32,
+    pub block_avg_ms: AtomicU32,
+    /// what the sound output has queued right now (ms) and how many times it skipped a backlog
+    pub out_queue_ms: AtomicU32,
+    pub out_skips: AtomicU32,
 }
 
 pub static C: Counters = Counters {
@@ -49,7 +56,27 @@ pub static C: Counters = Counters {
     eng_block: AtomicU32::new(0),
     eng_block_sum: AtomicU64::new(0),
     eng_sr: AtomicU32::new(0),
+    path_ms: AtomicU32::new(0),
+    block_avg_ms: AtomicU32::new(0),
+    out_queue_ms: AtomicU32::new(0),
+    out_skips: AtomicU32::new(0),
 };
+
+/// Everything between the sound arriving at the input device and leaving the output device: buffers, the engine block, the output
+/// cushion, the safety buffer and what the nodes add (a frequency shifter, a phase node ...). In milliseconds; None when no
+/// stream runs.
+pub fn total_delay_ms(graph_on: bool) -> Option<f32> {
+    let (fr, sr) = (C.cb_frames.load(Relaxed), C.cb_sr.load(Relaxed));
+    if sr == 0 {
+        return None;
+    }
+    let period = fr as f32 * 1000.0 / sr as f32;
+    let safety = safety_ms() as f32;
+    let cush = (C.out_cushion_ms.load(Relaxed) as f32 - safety).max(0.0);
+    let cush = if cush > 0.0 { cush } else { 30.0 };
+    let (blk, path) = if graph_on { (f32::from_bits(C.block_avg_ms.load(Relaxed)), f32::from_bits(C.path_ms.load(Relaxed))) } else { (0.0, 0.0) };
+    Some(period + blk + cush + safety + path)
+}
 
 /// Bookkeeping a capture callback keeps for itself; `done` publishes it.
 pub struct CbTimer {
@@ -210,6 +237,7 @@ fn sample_loop() {
         s.eng_block_frames = C.eng_block_sum.swap(0, Relaxed) as f32 / ticks as f32;
         let esr = C.eng_sr.load(Relaxed);
         s.eng_block_ms = if esr > 0 { s.eng_block_frames * 1000.0 / esr as f32 } else { 0.0 };
+        C.block_avg_ms.store(s.eng_block_ms.to_bits(), Relaxed);
         if let Some(c) = sys.as_mut() {
             if let Some(v) = c.read() {
                 s.dpc = v.dpc;
@@ -314,6 +342,11 @@ mod sys {
         // SAFETY: plain calls on the current thread
         unsafe {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+            // the multimedia scheduler (as audio programs use it): the thread is not starved by other work, and is not
+            // kept waiting for a timer tick
+            let task: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+            let mut index = 0u32;
+            windows_sys::Win32::System::Threading::AvSetMmThreadCharacteristicsW(task.as_ptr(), &mut index);
         }
     }
 

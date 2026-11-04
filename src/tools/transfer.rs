@@ -133,7 +133,7 @@ impl Tool for LiveTf {
             } else {
                 ui.add(egui::DragValue::new(&mut self.p.delay_ms).speed(0.01).range(-500.0..=500.0).suffix(" ms"));
             }
-            if ui.button("Reset").on_hover_text("Restart the averaging").clicked() {
+            if crate::mapping::btn(ui, "Reset").on_hover_text("Restart the averaging").clicked() {
                 self.p.reset = self.p.reset.wrapping_add(1);
             }
             ui.checkbox(&mut self.hold, "Freeze");

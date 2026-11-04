@@ -141,6 +141,113 @@ fn wire_distance(pts: &[Pos2; 4], p: Pos2) -> f32 {
 }
 
 /// The port nearest to `p` within `radius` (not the first one within it: the rows of a mixer are close together).
+enum ModReq {
+    Set(Modulation),
+    Clear(NodeId, usize),
+}
+
+/// The menus of the parameters cannot reach the graph: what they may choose from, what is set now, and what they ask for.
+static MOD_SRC: parking_lot::Mutex<Vec<(NodeId, String)>> = parking_lot::Mutex::new(Vec::new());
+static MOD_CUR: parking_lot::Mutex<Vec<Modulation>> = parking_lot::Mutex::new(Vec::new());
+/// Where the parameter rows of the nodes are on the screen (the left edge of the node and the middle of the row): the end of the
+/// dashed line of a parameter that follows a signal.
+static MOD_ROWS: parking_lot::Mutex<Vec<((NodeId, usize), Pos2)>> = parking_lot::Mutex::new(Vec::new());
+static MOD_REQ: parking_lot::Mutex<Vec<ModReq>> = parking_lot::Mutex::new(Vec::new());
+
+/// The entries of the right-click menu of a parameter that let it follow a signal of the graph.
+/// The value a followed parameter has right now (for the display), and whether it is followed at all.
+fn followed_value(node: NodeId, i: usize, base: f32) -> (f32, bool) {
+    if !MOD_CUR.lock().iter().any(|m| m.node == node && m.param == i) {
+        return (base, false);
+    }
+    let live = super::engine::MOD_LIVE.lock().iter().find(|m| m.0 == node && m.1 == i).map(|m| m.2).filter(|v| v.is_finite());
+    (live.unwrap_or(base), true)
+}
+
+/// While a wire is dragged from an output dot: the control ports of the parameters light up.
+static MOD_DRAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The range of a value that can be controlled from a signal: (lowest, highest, logarithmic, unit).
+fn param_range(n: &Node, i: usize) -> Option<(f32, f32, bool, &'static str)> {
+    if n.kind == Kind::Eq {
+        return match i % 4 {
+            1 => Some((20.0, 20000.0, true, " Hz")),
+            2 => Some((-24.0, 24.0, false, " dB")),
+            3 => Some((0.1, 10.0, true, "")),
+            _ => None,
+        };
+    }
+    if n.kind == Kind::Mixer && (2..2 + MIX_MAX).contains(&i) {
+        return Some((-60.0, 12.0, false, " dB"));
+    }
+    n.kind.info().params.get(i).filter(|d| d.choices.is_empty()).map(|d| (d.min, d.max, d.log, d.unit))
+}
+
+/// A control input of a value: a small dot (filled when a signal controls it). Drag a wire from the output of any node onto it;
+/// right-click it for the range and to disconnect. `at` is where it sits on the screen.
+fn param_port(ui: &Ui, z: f32, at: Pos2, node: NodeId, i: usize, range: (f32, f32, bool, &'static str)) {
+    let followed = MOD_CUR.lock().iter().any(|m| m.node == node && m.param == i);
+    let p = ui.painter().clone().with_clip_rect(Rect::EVERYTHING);
+    let orange = Color32::from_rgb(255, 170, 70);
+    if MOD_DRAG.load(std::sync::atomic::Ordering::Relaxed) {
+        p.circle_stroke(at, 7.0 * z, Stroke::new(1.5, Color32::from_rgb(255, 214, 80)));
+    }
+    if followed {
+        p.circle(at, 4.5 * z, orange, Stroke::new(1.0, Color32::from_rgb(40, 30, 20)));
+    } else {
+        p.circle(at, 3.2 * z, Color32::from_rgb(24, 28, 36), Stroke::new(1.0, Color32::from_rgb(120, 130, 150)));
+    }
+    {
+        let mut rows = MOD_ROWS.lock();
+        rows.retain(|r| r.0 != (node, i));
+        rows.push(((node, i), at));
+    }
+    let r = ui.interact(Rect::from_center_size(at, vec2(12.0, 12.0) * z), ui.id().with(("ctlport", node, i)), Sense::click());
+    r.clone().on_hover_text(if followed { "Controlled by a signal (right-click: range, disconnect)" } else { "Control input: drag a wire here from the output of a node" });
+    crate::slider::context_menu(&r, |ui| mod_menu_for(ui, node, i, range));
+}
+
+/// The menu of a control port: where it follows, the ranges, disconnect.
+fn mod_menu_for(ui: &mut Ui, node: NodeId, i: usize, range: (f32, f32, bool, &'static str)) {
+    let (min, max, log, unit) = range;
+    let cur = MOD_CUR.lock().iter().find(|m| m.node == node && m.param == i).copied();
+    let Some(mut m) = cur else {
+        ui.label(RichText::new("Not controlled. Drag a wire from the output dot of a node onto this dot: a generator, a timeline out node, a low-pass ...").small().weak());
+        return;
+    };
+    let name = MOD_SRC.lock().iter().find(|s| s.0 == m.src).map(|s| s.1.clone()).unwrap_or_else(|| "?".into());
+    ui.label(RichText::new(format!("Controlled by: {name}")).small().monospace());
+    let mut ch = false;
+    ui.label(RichText::new("Signal level (full scale is 1) -> value, outside the range it stops").small().weak());
+    ui.horizontal(|ui| {
+        ui.label("Signal at the lowest");
+        ch |= ui.add(egui::DragValue::new(&mut m.in_lo).range(-4.0..=4.0).speed(0.01).max_decimals(3)).changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Signal at the highest");
+        ch |= ui.add(egui::DragValue::new(&mut m.in_hi).range(-4.0..=4.0).speed(0.01).max_decimals(3)).changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Value at the lowest");
+        ch |= ui.add(egui::DragValue::new(&mut m.out_lo).range(min..=max).speed((max - min) * 0.002).suffix(unit)).changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Value at the highest");
+        ch |= ui.add(egui::DragValue::new(&mut m.out_hi).range(min..=max).speed((max - min) * 0.002).suffix(unit)).changed();
+    });
+    if log {
+        ch |= ui.checkbox(&mut m.log, "Logarithmic").changed();
+    }
+    ui.label(RichText::new("To smooth the signal first, put a Control low-pass node between.").small().weak());
+    if ch {
+        MOD_REQ.lock().push(ModReq::Set(m));
+    }
+    if crate::mapping::btn(ui, "Disconnect").clicked() {
+        MOD_REQ.lock().push(ModReq::Clear(node, i));
+        ui.close();
+    }
+}
+
 fn pick_port(cands: &[(NodeId, u8, Pos2)], p: Pos2, radius: f32) -> Option<(NodeId, u8)> {
     cands.iter().map(|(id, k, c)| (c.distance(p), *id, *k)).filter(|(d, _, _)| *d < radius).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, id, k)| (id, k))
 }
@@ -277,10 +384,15 @@ pub struct Routing {
     cmds: Vec<String>,
     /// listening probe: on, its volume (dB), whether the normal outputs go quiet, what it hovers over now and whether that is the body of a node
     probe_on: bool,
+    /// where the probe plays (see `Bus::probe_dev`)
+    probe_dev: String,
     probe_db: f32,
     probe_solo: bool,
     probe_hover: Option<Probe>,
     probe_body: bool,
+    /// settings and mutes that input bindings ask for (applied in `update`)
+    bound_set: HashMap<(NodeId, usize), f32>,
+    bound_mute: Vec<(NodeId, usize, Option<bool>)>,
 }
 
 type Vec2 = egui::Vec2;
@@ -373,7 +485,44 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+    }
+
+    /// Values and mutes that input bindings set (a knob moves many times a frame: only the last value counts).
+    fn apply_bound(&mut self) {
+        let sets = std::mem::take(&mut self.bound_set);
+        let mutes = std::mem::take(&mut self.bound_mute);
+        let mut changed = false;
+        for ((id, p), v) in sets {
+            if let Some(n) = self.g.node_mut(id) {
+                if let Some(d) = n.kind.info().params.get(p).filter(|_| p < n.p.len()) {
+                    let v = v.clamp(d.min, d.max);
+                    if n.p[p] != v {
+                        n.p[p] = v;
+                        changed = true;
+                    }
+                } else if n.kind == Kind::Mixer && (2..2 + MIX_MAX).contains(&p) && p < n.p.len() {
+                    // the gains of the mixer inputs
+                    let v = v.clamp(-60.0, 12.0);
+                    if n.p[p] != v {
+                        n.p[p] = v;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for (id, k, state) in mutes {
+            if let Some(n) = self.g.node_mut(id) {
+                if n.kind == Kind::Mixer && k < MIX_MAX && 2 + MIX_MAX + k < n.p.len() {
+                    let cur = n.p[2 + MIX_MAX + k] >= 0.5;
+                    n.p[2 + MIX_MAX + k] = if state.unwrap_or(!cur) { 1.0 } else { 0.0 };
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.push();
+        }
     }
 
     fn push(&mut self) {
@@ -698,8 +847,9 @@ impl Routing {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             // right-click the name to put the value back to its default
-            let name = ui.add_sized(vec2(label_w * z, 16.0 * z), egui::Label::new(RichText::new(d.name).small().color(Color32::from_rgb(160, 172, 190))).truncate().sense(Sense::click()));
-            if name.on_hover_text("Right-click: reset to the default").secondary_clicked() {
+            let followed = MOD_CUR.lock().iter().any(|m| m.node == n.id && m.param == i);
+            let name = ui.add_sized(vec2(label_w * z, 16.0 * z), egui::Label::new(RichText::new(d.name).small().color(if followed { Color32::from_rgb(255, 170, 70) } else { Color32::from_rgb(160, 172, 190) })).truncate().sense(Sense::click()));
+            if name.on_hover_text(if followed { "Follows a signal (right-click the slider to change it). Right-click here: reset to the default" } else { "Right-click: reset to the default" }).secondary_clicked() {
                 n.p[i] = d.def;
                 changed = true;
             }
@@ -719,28 +869,28 @@ impl Routing {
                 let value_w = (digits + d.unit.len()) as f32 * 7.4 + 22.0;
                 ui.spacing_mut().slider_width = (ui.available_width() - value_w * z - 8.0 * z).max(30.0 * z);
                 let int = d.unit.is_empty() && d.max - d.min >= 1.0 && d.min.fract() == 0.0 && d.def.fract() == 0.0;
-                let mut s = egui::Slider::new(&mut n.p[i], d.min..=d.max).logarithmic(d.log).clamping(egui::SliderClamping::Always);
-                if d.unit != " us" {
-                    s = s.suffix(d.unit);
-                }
-                if int {
-                    s = s.step_by(1.0).max_decimals(0);
+                // right-click the track: back to the default; right-click the value box: reset, follow a signal, bind to an input
+                let t = crate::mapping::Target::slider(format!("node:{}:{}", n.id, i), format!("{} #{}: {}", n.kind.info().name, n.id, d.name), d.min, d.max, d.log, d.unit);
+                let nid = n.id;
+                let fmt = if int {
+                    crate::slider::Fmt { int: true, ..crate::slider::Fmt::new(d.unit, 0) }
                 } else if d.unit == " us" {
-                    // microseconds up to milliseconds: "120 us", "5.0 ms"; typing "5 ms" or "120us" works
-                    s = s.custom_formatter(|v, _| if v >= 1000.0 { format!("{:.1} ms", v / 1000.0) } else { format!("{v:.0} us") }).custom_parser(|t| {
-                        let t = t.trim().to_lowercase();
-                        let ms = t.ends_with("ms");
-                        t.trim_end_matches(|c: char| c.is_alphabetic() || c.is_whitespace()).parse::<f64>().ok().map(|v| if ms { v * 1000.0 } else { v })
-                    });
-                } else if d.unit == " Hz" && d.log && d.min < 1.0 {
-                    // slow rates (wow, flutter, tremolo): steps of 0.1 Hz
-                    s = s.step_by(0.1).max_decimals(1);
+                    crate::slider::Fmt { us: true, ..crate::slider::Fmt::new("", 0) }
                 } else if d.unit == " Hz" || d.unit == " ms" {
-                    s = s.max_decimals(if d.log { 0 } else { 1 });
+                    // (slow rates, wow, flutter, tremolo: tenths of a Hz)
+                    crate::slider::Fmt::new(d.unit, if d.log && d.min >= 1.0 { 0 } else { 1 })
                 } else {
-                    s = s.max_decimals(1);
+                    crate::slider::Fmt::new(d.unit, 1)
+                };
+                if followed {
+                    // the slider shows the value the signal gives it, live (what is dragged here does not count)
+                    let mut shown = super::engine::MOD_LIVE.lock().iter().find(|m| m.0 == nid && m.1 == i).map(|m| m.2).filter(|v| v.is_finite()).unwrap_or(n.p[i]);
+                    crate::slider::bound(ui, &mut shown, d.min, d.max, d.log, d.def, &t, fmt, |_| {});
+                } else {
+                    changed |= crate::slider::bound(ui, &mut n.p[i], d.min, d.max, d.log, d.def, &t, fmt, |_| {});
                 }
-                changed |= ui.add(s).changed();
+                // the control input of the value: at the left edge of the node, in the row
+                param_port(ui, z, pos2(ui.max_rect().left() - 10.0 * z, ui.min_rect().center().y), nid, i, (d.min, d.max, d.log, d.unit));
             }
         });
         changed
@@ -835,7 +985,7 @@ impl Routing {
                     }
                     if !master_ok {
                         ui.separator();
-                        if ui.button("+ New track for this node").on_hover_text("Adds an armed track to the timeline that records what this node receives").clicked() {
+                        if crate::mapping::btn(ui, "+ New track for this node").on_hover_text("Adds an armed track to the timeline that records what this node receives").clicked() {
                             bus().track_requests.lock().push((n.id, format!("Node {}", n.id)));
                             ui.close();
                         }
@@ -1021,11 +1171,22 @@ impl Routing {
                             }
                         });
                         let t = n.p[o].round() as usize;
-                        ch |= ui.add(egui::DragValue::new(&mut n.p[o + 1]).range(20.0..=20000.0).speed(5.0).suffix(" Hz").max_decimals(0)).changed();
+                        let nid = n.id;
                         let (lo, hi) = if t == 5 { (-60.0, 0.0) } else { (-24.0, 24.0) };
-                        ch |= ui.add_enabled(matches!(t, 0 | 1 | 2 | 5), egui::DragValue::new(&mut n.p[o + 2]).range(lo..=hi).speed(0.1).suffix(" dB").max_decimals(1)).on_hover_text(if t == 5 { "Depth of the notch" } else { "Level of the band" }).changed();
-                        ch |= ui.add(egui::DragValue::new(&mut n.p[o + 3]).range(0.1..=10.0).speed(0.02).max_decimals(2)).on_hover_text("Q (width: higher is narrower)").changed();
-                        if n.p.len() / 4 > 1 && ui.small_button("x").on_hover_text("Remove this band").clicked() {
+                        // (right-click a value: let it follow a signal; while it does, the live value is shown)
+                        let (mut sv, f1) = followed_value(nid, o + 1, n.p[o + 1]);
+                        let r1 = ui.add(egui::DragValue::new(if f1 { &mut sv } else { &mut n.p[o + 1] }).range(20.0..=20000.0).speed(5.0).suffix(" Hz").max_decimals(0));
+                        param_port(ui, z, pos2(r1.rect.center().x, r1.rect.top() - 1.0 * z), nid, o + 1, (20.0, 20000.0, true, " Hz"));
+                        ch |= r1.changed() && !f1;
+                        let (mut sv2, f2) = followed_value(nid, o + 2, n.p[o + 2]);
+                        let r2 = ui.add_enabled(matches!(t, 0 | 1 | 2 | 5), egui::DragValue::new(if f2 { &mut sv2 } else { &mut n.p[o + 2] }).range(lo..=hi).speed(0.1).suffix(" dB").max_decimals(1)).on_hover_text(if t == 5 { "Depth of the notch" } else { "Level of the band" });
+                        param_port(ui, z, pos2(r2.rect.center().x, r2.rect.top() - 1.0 * z), nid, o + 2, (lo, hi, false, " dB"));
+                        ch |= r2.changed() && !f2;
+                        let (mut sv3, f3) = followed_value(nid, o + 3, n.p[o + 3]);
+                        let r3 = ui.add(egui::DragValue::new(if f3 { &mut sv3 } else { &mut n.p[o + 3] }).range(0.1..=10.0).speed(0.02).max_decimals(2)).on_hover_text("Q (width: higher is narrower)");
+                        param_port(ui, z, pos2(r3.rect.center().x, r3.rect.top() - 1.0 * z), nid, o + 3, (0.1, 10.0, true, ""));
+                        ch |= r3.changed() && !f3;
+                        if n.p.len() / 4 > 1 && crate::mapping::small_btn(ui, "x").on_hover_text("Remove this band").clicked() {
                             remove = Some(b);
                         }
                     });
@@ -1078,8 +1239,20 @@ impl Routing {
                         ui.label(RichText::new(format!("{}", k + 1)).small().weak());
                         ui.spacing_mut().slider_width = 100.0 * z;
                         let muted = n.p[2 + MIX_MAX + k] >= 0.5;
-                        ch |= ui.add_enabled(!muted, egui::Slider::new(&mut n.p[2 + k], -60.0..=12.0).suffix(" dB").max_decimals(1)).changed();
-                        if ui.selectable_label(muted, "M").on_hover_text("Mute this input").clicked() {
+                        let t = crate::mapping::Target::slider(format!("node:{}:{}", n.id, 2 + k), format!("Mixer #{}: input {} gain", n.id, k + 1), -60.0, 12.0, false, " dB");
+                        let nid = n.id;
+                        let (mut shown, followed) = followed_value(nid, 2 + k, n.p[2 + k]);
+                        ui.add_enabled_ui(!muted, |ui| {
+                            if followed {
+                                crate::slider::bound(ui, &mut shown, -60.0, 12.0, false, 0.0, &t, crate::slider::Fmt::new(" dB", 1), |_| {});
+                            } else {
+                                ch |= crate::slider::bound(ui, &mut n.p[2 + k], -60.0, 12.0, false, 0.0, &t, crate::slider::Fmt::new(" dB", 1), |_| {});
+                            }
+                        });
+                        param_port(ui, z, pos2(ui.max_rect().left() - 10.0 * z, ui.min_rect().center().y), nid, 2 + k, (-60.0, 12.0, false, " dB"));
+                        let mb = ui.selectable_label(muted, "M").on_hover_text("Mute this input");
+                        crate::mapping::button_menu(&mb, &crate::mapping::Target::toggle(format!("mixm:{}:{}", n.id, k), format!("Mixer #{}: mute input {}", n.id, k + 1), true));
+                        if mb.clicked() {
                             n.p[2 + MIX_MAX + k] = if muted { 0.0 } else { 1.0 };
                             ch = true;
                         }
@@ -1111,10 +1284,10 @@ impl Routing {
                 // buttons on one row, the file name on its own (cut to the width of the node), the status wraps
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if ui.button("Load IR...").on_hover_text("A room, a cabinet or a measured impulse response (also one saved from the Impulse window)").clicked() {
+                    if crate::mapping::btn(ui, "Load IR...").on_hover_text("A room, a cabinet or a measured impulse response (also one saved from the Impulse window)").clicked() {
                         self.ir_dlg = Some((n.id, crate::tools::dialogs::open("Impulse response", "Audio", crate::tools::decode::EXTENSIONS)));
                     }
-                    if !n.s.is_empty() && ui.button("Remove").on_hover_text("Remove the impulse response").clicked() {
+                    if !n.s.is_empty() && crate::mapping::btn(ui, "Remove").on_hover_text("Remove the impulse response").clicked() {
                         n.s.clear();
                         ch = true;
                     }
@@ -1232,13 +1405,13 @@ impl Routing {
         }
         if self.ab.is_some() {
             let other = 1 - cur;
-            if ui.small_button("copy").on_hover_text(format!("Copy this version over {}", ["A", "B"][other])).clicked() {
+            if crate::mapping::small_btn(ui, "copy").on_hover_text(format!("Copy this version over {}", ["A", "B"][other])).clicked() {
                 let g = self.g.clone();
                 if let Some(a) = self.ab.as_mut() {
                     a.1[other] = g;
                 }
             }
-            if ui.small_button("x").on_hover_text("Stop comparing and keep this version").clicked() {
+            if crate::mapping::small_btn(ui, "x").on_hover_text("Stop comparing and keep this version").clicked() {
                 self.ab = None;
             }
         }
@@ -1269,6 +1442,38 @@ impl Routing {
         }
     }
 
+    /// Ready-made patches for a task: for people who start from nothing. The current patch is replaced (Ctrl+Z brings it back).
+    fn presets_menu(&mut self, ui: &mut Ui, cx: &Ctx) {
+        let mut pick: Option<super::presets::Preset> = None;
+        crate::windows::sticky_menu(ui, "Presets", |ui| {
+            ui.set_min_width(320.0);
+            ui.label(RichText::new("Start from a ready-made patch (replaces the current one; Ctrl+Z brings it back)").small().weak());
+            for p in super::presets::Preset::ALL {
+                let name = p.name().split(':').next().unwrap_or("");
+                if crate::mapping::btn(ui, name).on_hover_text(p.about()).clicked() {
+                    pick = Some(p);
+                    ui.close();
+                }
+                ui.label(RichText::new(p.about()).small().weak());
+            }
+        });
+        if let Some(p) = pick {
+            // the devices are the defaults (empty): the input node picks the first input, the output node the default output
+            let g = super::presets::build(p, "", 1, 2, "");
+            if let Some(rec) = g.nodes.iter().find(|n| n.kind == Kind::TimelineRec) {
+                bus().track_requests.lock().push((rec.id, "Input".into()));
+            }
+            self.g = g;
+            self.sel.clear();
+            self.sel_wire = None;
+            self.tidy_pending = true;
+            self.fit_next = true;
+            self.push();
+            self.note = format!("Patch: {}", p.name());
+        }
+        let _ = cx;
+    }
+
     /// Save, load and delete named routings.
     fn routings_menu(&mut self, ui: &mut Ui, cx: &Ctx) {
         let title = if self.cur_name.is_empty() { "Routings".to_string() } else { format!("Routings: {}", self.cur_name) };
@@ -1288,7 +1493,7 @@ impl Routing {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let armed = self.del_arm.as_deref() == Some(n.as_str());
-                            if ui.small_button(if armed { "delete?" } else { "x" }).on_hover_text("Delete this saved routing (click twice)").clicked() {
+                            if crate::mapping::small_btn(ui, if armed { "delete?" } else { "x" }).on_hover_text("Delete this saved routing (click twice)").clicked() {
                                 if armed {
                                     del = Some(n.clone());
                                 } else {
@@ -1315,21 +1520,21 @@ impl Routing {
                     }
                 }
             });
-            if !self.cur_name.is_empty() && ui.button(format!("Save changes to {}", self.cur_name)).clicked() {
+            if !self.cur_name.is_empty() && crate::mapping::btn(ui, format!("Save changes to {}", self.cur_name)).clicked() {
                 match save_routing(&self.cur_name, &self.g) {
                     Ok(()) => self.note = format!("Saved routing {}", self.cur_name),
                     Err(e) => self.note = format!("Cannot save: {e}"),
                 }
             }
             ui.separator();
-            if ui.button("New empty routing").clicked() {
+            if crate::mapping::btn(ui, "New empty routing").clicked() {
                 self.g = Graph::default();
                 self.sel.clear();
                 self.cur_name.clear();
                 self.push();
                 ui.close();
             }
-            if ui.button("Input -> analyzer (starter)").clicked() {
+            if crate::mapping::btn(ui, "Input -> analyzer (starter)").clicked() {
                 self.g = Graph::starter(&cx.default_in, None);
                 self.sel.clear();
                 self.cur_name.clear();
@@ -1456,6 +1661,16 @@ impl Routing {
             let col = if selected { Color32::from_rgb(255, 214, 80) } else if near { Color32::from_rgb(200, 220, 255) } else { Color32::from_rgb(80, 120, 170).gamma_multiply(0.6 + 0.4 * live) };
             painter.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(if selected || near { 3.0 } else { 2.2 }, col))));
         }
+        // a parameter that follows a signal: a dashed line from the signal to the node
+        for m in &self.g.mods {
+            let (Some(a), Some(b)) = (self.g.node(m.src), self.g.node(m.node)) else { continue };
+            let bw = self.sizes.get(&b.id).map_or(node_w(b.kind), |s| s.0);
+            // to the port of the parameter row (where the row was drawn last), else to the top of the node
+            let row = MOD_ROWS.lock().iter().find(|r| r.0 == (m.node, m.param)).map(|r| r.1);
+            let pts = wire_pts(sp(out_pos(a, 0)), row.unwrap_or_else(|| sp(pos2(b.x + bw * 0.5, b.y))));
+            let line: Vec<Pos2> = (0..=24).map(|k| bezier_at(&pts, k as f32 / 24.0)).collect();
+            painter.extend(Shape::dashed_line(&line, Stroke::new(1.6, Color32::from_rgb(255, 170, 70).gamma_multiply(0.8)), 6.0, 4.0));
+        }
         if let Some((to, port)) = wire_hit {
             if bg.clicked() || ui.input(|i| i.pointer.primary_clicked()) {
                 self.sel_wire = Some((to, port));
@@ -1470,13 +1685,13 @@ impl Routing {
         bg.context_menu(|ui| {
             let at = pointer.map(mp).unwrap_or(pos2(100.0, 100.0));
             if let Some((to, port)) = self.sel_wire {
-                if ui.button("Insert a node here...").clicked() {
+                if crate::mapping::btn(ui, "Insert a node here...").clicked() {
                     self.search = Some(Search { at, text: String::new(), sel: 0, link: Link::Insert(to, port), focused: false });
                     ui.close();
                 }
                 // a line that carries one channel already (after a split node, for instance) has nothing to split
                 let mono = self.g.edge_into(to, port).is_some_and(|e| self.g.carries_mono(e.from, 0));
-                if ui.button("Split here into two stereo lines").on_hover_text("A node with two outputs, both the whole stereo signal: the first goes on to the same place, the second is free to connect anywhere").clicked() {
+                if crate::mapping::btn(ui, "Split here into two stereo lines").on_hover_text("A node with two outputs, both the whole stereo signal: the first goes on to the same place, the second is free to connect anywhere").clicked() {
                     let place = self.free_place(at, Kind::Dual);
                     if let Some(s) = self.g.split_wire_as(Kind::Dual, to, port, place.x, place.y) {
                         self.sel.clear();
@@ -1487,7 +1702,7 @@ impl Routing {
                     }
                     ui.close();
                 }
-                if !mono && ui.button("Split here into left and right channels").on_hover_text("A split node in this line: the left channel goes on to the same place, the right output is free to connect anywhere").clicked() {
+                if !mono && crate::mapping::btn(ui, "Split here into left and right channels").on_hover_text("A split node in this line: the left channel goes on to the same place, the right output is free to connect anywhere").clicked() {
                     let place = self.free_place(at, Kind::Split);
                     if let Some(s) = self.g.split_wire(to, port, place.x, place.y) {
                         self.sel.clear();
@@ -1498,7 +1713,7 @@ impl Routing {
                     }
                     ui.close();
                 }
-                if ui.button("Disconnect").clicked() {
+                if crate::mapping::btn(ui, "Disconnect").clicked() {
                     self.g.disconnect(to, port);
                     self.sel_wire = None;
                     changed_graph = true;
@@ -1506,11 +1721,11 @@ impl Routing {
                 }
                 ui.separator();
             }
-            if ui.button("Add node...  (Space)").clicked() {
+            if crate::mapping::btn(ui, "Add node...  (Space)").clicked() {
                 self.search = Some(Search { at, text: String::new(), sel: 0, link: Link::None, focused: false });
                 ui.close();
             }
-            if ui.button("Fit all nodes").clicked() {
+            if crate::mapping::btn(ui, "Fit all nodes").clicked() {
                 self.fit_next = true;
                 ui.close();
             }
@@ -1598,7 +1813,7 @@ impl Routing {
                 clicked = Some((id, shift));
             }
             hb.context_menu(|ui| {
-                if ui.button("Duplicate").clicked() {
+                if crate::mapping::btn(ui, "Duplicate").clicked() {
                     let (x, y) = (n.x + 30.0, n.y + 30.0);
                     let k = n.kind;
                     let nn = self.g.add(k, x, y);
@@ -1612,7 +1827,7 @@ impl Routing {
                     }
                     ui.close();
                 }
-                if ui.button("Remove").clicked() {
+                if crate::mapping::btn(ui, "Remove").clicked() {
                     remove = Some(id);
                     ui.close();
                 }
@@ -1672,7 +1887,7 @@ impl Routing {
                 }
                 let mono = self.g.carries_mono(id, 0);
                 r.context_menu(|ui| {
-                    if ui.button("Split here into two stereo lines").on_hover_text("A node with two outputs that both carry the whole stereo signal").clicked() {
+                    if crate::mapping::btn(ui, "Split here into two stereo lines").on_hover_text("A node with two outputs that both carry the whole stereo signal").clicked() {
                         let at = self.free_place(pos2(n.x + node_w(n.kind) + 40.0, n.y + 60.0), Kind::Dual);
                         if let Some(s) = self.g.split_output_as(Kind::Dual, id, op as u8, at.x, at.y) {
                             self.sel.clear();
@@ -1684,7 +1899,7 @@ impl Routing {
                     if mono {
                         return;
                     }
-                    if ui.button("Split here into left and right channels").on_hover_text("A split node on this output: its two outputs carry the left and the right channel, to route them one by one").clicked() {
+                    if crate::mapping::btn(ui, "Split here into left and right channels").on_hover_text("A split node on this output: its two outputs carry the left and the right channel, to route them one by one").clicked() {
                         let at = self.free_place(pos2(n.x + node_w(n.kind) + 40.0, n.y + 60.0), Kind::Split);
                         if let Some(s) = self.g.split_output(id, op as u8, at.x, at.y) {
                             self.sel.clear();
@@ -1775,6 +1990,18 @@ impl Routing {
                 let radius = (15.0 * z.max(0.6)).min(ROW * z * 0.48);
                 match w {
                     WireDrag::FromOut(from, fport) => {
+                        // onto the control input of a value?
+                        let port_hit = MOD_ROWS.lock().iter().filter(|(k, _)| k.0 != from).map(|(k, pos)| (pos.distance(p), *k)).filter(|d| d.0 < 11.0 * z.max(0.7)).min_by(|a, b| a.0.total_cmp(&b.0)).map(|d| d.1);
+                        if let Some((to, param)) = port_hit {
+                            if let Some((lo, hi, log, _)) = self.g.node(to).and_then(|n| param_range(n, param)) {
+                                let m = Modulation { node: to, param, src: from, in_lo: -1.0, in_hi: 1.0, out_lo: lo, out_hi: hi, log };
+                                if self.g.set_modulation(m) {
+                                    changed_graph = true;
+                                } else {
+                                    self.note = "That cannot control this value".into();
+                                }
+                            }
+                        } else {
                         let cands: Vec<(NodeId, u8, Pos2)> = self.g.nodes.iter().flat_map(|n| (0..n.inputs()).map(move |k| (n.id, k as u8, sp(in_pos(n, k))))).collect();
                         let target = pick_port(&cands, p, radius);
                         // dropped on a node body: first free input
@@ -1799,6 +2026,7 @@ impl Routing {
                                 self.search = Some(Search { at: mp(p), text: String::new(), sel: 0, link: Link::FromOut(from, fport), focused: false });
                             }
                             None => {}
+                        }
                         }
                     }
                     WireDrag::FromIn(to, port) => {
@@ -1893,6 +2121,27 @@ impl Tool for Routing {
         if matches!(c, "probe" | "ab" | "undo" | "redo") && self.cmds.len() < 16 {
             self.cmds.push(c.to_string());
         }
+        // settings from an input binding: "setp<tab>node<tab>parameter<tab>value" (only the latest value of each is kept),
+        // "mute<tab>node<tab>input<tab>t (switch) or 1 / 0 (on / off)"
+        let f: Vec<&str> = c.split('\t').collect();
+        match f.as_slice() {
+            ["setp", n, p, v] => {
+                if let (Ok(n), Ok(p), Ok(v)) = (n.parse::<NodeId>(), p.parse::<usize>(), v.parse::<f32>()) {
+                    if v.is_finite() {
+                        self.bound_set.insert((n, p), v);
+                    }
+                }
+            }
+            ["mute", n, k, v] => {
+                if let (Ok(n), Ok(k)) = (n.parse::<NodeId>(), k.parse::<usize>()) {
+                    let state = if *v == "t" { None } else { Some(v.parse::<f32>().unwrap_or(0.0) >= 0.5) };
+                    if self.bound_mute.len() < 64 {
+                        self.bound_mute.push((n, k, state));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn update(&mut self, cx: &mut Ctx, _visible: bool) {
@@ -1905,6 +2154,7 @@ impl Tool for Routing {
         }
         let Some(e) = self.eng.clone() else { return };
         use std::sync::atomic::Ordering::Relaxed;
+        self.apply_bound();
         e.active.store(cx.graph_on, Relaxed);
         if !cx.graph_on {
             return;
@@ -1931,6 +2181,7 @@ impl Tool for Routing {
         if !self.probe_on {
             self.set_probe(None);
         }
+        *bus().probe_dev.lock() = self.probe_dev.clone();
         *bus().first_out.lock() = self.g.nodes.iter().find(|n| n.kind == Kind::Output).map(|n| n.s.clone()).unwrap_or_default();
         // tracks the timeline made for record nodes that asked for one
         let made = std::mem::take(&mut *bus().node_tracks.lock());
@@ -1990,6 +2241,27 @@ impl Tool for Routing {
                 _ => {}
             }
         }
+        // what the menus of the parameters asked for (a parameter that follows a signal), and what they may choose from
+        let reqs: Vec<ModReq> = std::mem::take(&mut *MOD_REQ.lock());
+        if !reqs.is_empty() {
+            for r in reqs {
+                match r {
+                    ModReq::Set(m) => {
+                        self.g.set_modulation(m);
+                    }
+                    ModReq::Clear(n, p) => self.g.clear_modulation(n, p),
+                }
+            }
+            self.push();
+        }
+        *MOD_SRC.lock() = self.g.nodes.iter().filter(|n| n.outputs() > 0).map(|n| (n.id, format!("{} #{}", n.kind.info().name, n.id))).collect();
+        *MOD_CUR.lock() = self.g.mods.clone();
+        MOD_DRAG.store(matches!(self.wire, Some(WireDrag::FromOut(..))), std::sync::atomic::Ordering::Relaxed);
+        MOD_ROWS.lock().retain(|r| self.g.node(r.0 .0).is_some());
+        // the followed values move: keep drawing
+        if !self.g.mods.is_empty() {
+            ui.ctx().request_repaint();
+        }
         // test hook: VISUSCOPE_SEARCH=1 opens the add-node menu once (screenshots)
         if std::env::var_os("VISUSCOPE_SEARCH").is_some() && !self.search_hook {
             self.search_hook = true;
@@ -2000,15 +2272,16 @@ impl Tool for Routing {
         self.hist.track(&self.g, settled);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if ui.button("+ Node").on_hover_text("Search all nodes (Space)").clicked() {
+            if crate::mapping::btn(ui, "+ Node").on_hover_text("Search all nodes (Space)").clicked() {
                 self.search = Some(Search { at: pos2(100.0, 100.0) - self.pan.to_pos2().to_vec2(), text: String::new(), sel: 0, link: Link::None, focused: false });
             }
-            if ui.button("Fit").on_hover_text("Show all nodes (F)").clicked() {
+            if crate::mapping::btn(ui, "Fit").on_hover_text("Show all nodes (F)").clicked() {
                 self.fit_next = true;
             }
-            if ui.button("Tidy").on_hover_text("Move nodes apart that overlap").clicked() {
+            if crate::mapping::btn(ui, "Tidy").on_hover_text("Move nodes apart that overlap").clicked() {
                 self.tidy_pending = true;
             }
+            self.presets_menu(ui, cx);
             self.routings_menu(ui, cx);
             if ui.add_enabled(!self.hist.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last change of the patch (Ctrl+Z)").clicked() {
                 self.undo_graph();
@@ -2020,11 +2293,25 @@ impl Tool for Routing {
             ui.toggle_value(&mut self.probe_on, "Probe").on_hover_text("Listening probe (P): hover over a node, or over one of its input or output dots, to hear the signal there");
             if self.probe_on {
                 ui.add(egui::DragValue::new(&mut self.probe_db).range(-48.0..=6.0).speed(0.2).suffix(" dB")).on_hover_text("Volume of the probe");
+                // where the probe plays
+                let devs: Vec<(String, String)> = cx.out_devs.iter().filter(|d| !d.id.is_empty()).map(|d| (d.id.clone(), short_label(&d.label))).collect();
+                let cur = match self.probe_dev.as_str() {
+                    "" => "first output node".to_string(),
+                    super::engine::PROBE_DEFAULT => "default output".to_string(),
+                    d => devs.iter().find(|x| x.0 == d).map(|x| x.1.clone()).unwrap_or_else(|| "device missing".into()),
+                };
+                egui::ComboBox::from_id_salt("probe_dev").width(130.0).truncate().selected_text(cur).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.probe_dev, String::new(), "Same as the first output node");
+                    ui.selectable_value(&mut self.probe_dev, super::engine::PROBE_DEFAULT.to_string(), "Default output");
+                    for (id, label) in &devs {
+                        ui.selectable_value(&mut self.probe_dev, id.clone(), label);
+                    }
+                }).response.on_hover_text("Where the probe plays");
                 ui.checkbox(&mut self.probe_solo, "mute outputs").on_hover_text("The normal output nodes are silent while the probe listens");
                 let name = self.probe_hover.and_then(|p| self.g.node(p.node).map(|n| format!("{} {}", n.kind.name(), if p.input { format!("in {}", p.port + 1) } else { format!("out {}", p.port + 1) })));
                 ui.label(RichText::new(name.map(|n| format!("listening: {n}")).unwrap_or_else(|| "hover a node or a dot".into())).small().color(Color32::from_rgb(120, 220, 230)));
             }
-            if ui.small_button(format!("{:.0} %", self.zoom * 100.0)).on_hover_text("Zoom of the node window: mouse wheel, or pinch on a touchpad (click: back to 100 %)").clicked() {
+            if crate::mapping::small_btn(ui, format!("{:.0} %", self.zoom * 100.0)).on_hover_text("Zoom of the node window: mouse wheel, or pinch on a touchpad (click: back to 100 %)").clicked() {
                 self.zoom = 1.0;
             }
             ui.label(RichText::new("Rate").small().weak());
@@ -2062,11 +2349,13 @@ impl Tool for Routing {
     fn save(&self, o: &mut SettingsOut) {
         o.put("rate", self.rate_pref);
         o.put("zoom", self.zoom);
+        o.put("probe_dev", self.probe_dev.replace(['\n', '\r'], " "));
     }
 
     fn load(&mut self, i: &SettingsIn) {
         i.set("rate", &mut self.rate_pref);
         i.set("zoom", &mut self.zoom);
+        i.set("probe_dev", &mut self.probe_dev);
         self.zoom = if self.zoom.is_finite() { self.zoom.clamp(0.4, 1.8) } else { 1.0 };
     }
 }

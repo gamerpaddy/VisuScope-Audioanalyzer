@@ -19,6 +19,7 @@ mod options;
 mod prof;
 mod scope;
 mod shared;
+mod slider;
 mod snapshots;
 mod sidebar;
 mod stereo;
@@ -31,7 +32,7 @@ mod views;
 mod windows;
 
 /// "1.1.0 (abc1234)"; a trailing + on the commit marks uncommitted changes.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VS_GIT"), ")");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VS_GIT"), ", built ", env!("VS_TIME"), " UTC)");
 /// Version plus the time this binary was compiled.
 pub const VERSION_FULL: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VS_GIT"), "), built ", env!("VS_BUILD"));
 

@@ -96,6 +96,8 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
         q.buf.clear();
         q.src_sr = sr;
     }
+    // the playback is on time like the audio path: it is not kept waiting by other work
+    crate::prof::raise_thread_priority();
     let mut pos = ctl.pos.load(Relaxed);
     const BLK: usize = 4096;
     let (mut l, mut r, mut fl, mut fr) = (vec![0f32; BLK], vec![0f32; BLK], vec![0f32; BLK], vec![0f32; BLK]);
@@ -334,6 +336,8 @@ pub struct Daw {
     /// track whose volume automation is being edited, the point being dragged (track index, point), and the point under the last right-click
     auto_edit: Option<u32>,
     auto_drag: Option<(usize, usize)>,
+    /// drawing on a draw track: the track index and where the stroke was last (frame, value)
+    draw_drag: Option<(usize, Option<(i64, f32)>)>,
     auto_ctx: Option<(usize, usize)>,
     /// slider that is being edited by typing a value
     val_edit: Option<(eframe::egui::Id, String, bool)>,
@@ -448,6 +452,7 @@ impl Daw {
             edit_cmds: Vec::new(),
             auto_edit: None,
             auto_drag: None,
+            draw_drag: None,
             auto_ctx: None,
             val_edit: None,
             export_dlg: None,

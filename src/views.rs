@@ -158,7 +158,9 @@ impl App {
             if idx == 0 {
                 // the spectrum: clear the average, maximum and minimum traces without opening the settings
                 ui.add_space(4.0);
-                if ui.button("Reset max/min").on_hover_text("Restart the average, maximum and minimum traces").clicked() {
+                let rb = crate::mapping::btn(ui, "Reset max/min").on_hover_text("Restart the average, maximum and minimum traces");
+                crate::mapping::button_menu(&rb, &crate::mapping::Target::toggle("reset_minmax", "Reset average / max / min", false));
+                if rb.clicked() {
                     self.p.reset_gen = self.p.reset_gen.wrapping_add(1);
                 }
             }
@@ -292,17 +294,28 @@ impl App {
                 }
             }
         }
+        // a plain click puts the cursor where it is clicked; with Shift it snaps to the nearest peak
+        let shift = ui.input(|i| i.modifiers.shift);
         let place = |app: &App, p: Pos2| -> f32 {
             let u = flo_u + (p.x - plot.left()) / plot.width() * (fhi_u - flo_u);
             let f = app.u_to_f(u);
-            if app.snap_peak {
+            if shift {
                 let f2 = app.u_to_f(flo_u + (p.x + 8.0 - plot.left()) / plot.width() * (fhi_u - flo_u));
                 app.snap_freq(f, (f2 - f).abs())
             } else {
                 f
             }
         };
-        if resp.clicked() {
+        // a double-click on a cursor removes it
+        self.cursors_idle(ui);
+        let mut removed = false;
+        if resp.double_clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let (pa, pb) = (self.cur_idle.0.map(|f| x_of_u(self.f_to_u(f))), self.cur_idle.1.map(|f| x_of_u(self.f_to_u(f))));
+                removed = self.cursor_dblclick(p.x, pa, pb);
+            }
+        }
+        if resp.clicked() && !removed {
             if let Some(p) = resp.interact_pointer_pos() {
                 self.cur_a = Some(place(self, p));
             }
@@ -531,7 +544,15 @@ impl App {
                 }
             }
         }
-        if resp.clicked() {
+        self.cursors_idle(ui);
+        let mut removed = false;
+        if resp.double_clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let (pa, pb) = (self.cur_idle.0.map(|f| y_of_u(self.f_to_u(f))), self.cur_idle.1.map(|f| y_of_u(self.f_to_u(f))));
+                removed = self.cursor_dblclick(p.y, pa, pb);
+            }
+        }
+        if resp.clicked() && !removed {
             if let Some(p) = resp.interact_pointer_pos() {
                 let f = self.u_to_f(u_of_y(p.y));
                 self.cur_a = Some(f);
@@ -613,6 +634,8 @@ impl App {
         if self.sg_back > 0 {
             self.draw_cursor_label(&painter, plot.left_bottom() + vec2(4.0, -4.0), "scrolled back - drag right edge to return".into(), Color32::YELLOW, Align2::LEFT_BOTTOM);
         }
+        // (the same switch as in the spectrum: the two are one setting)
+        self.band_switch(ui, &painter, plot);
     }
 
     // ------------------------------------------------------------------ waterfall
@@ -671,7 +694,15 @@ impl App {
                 }
             }
         }
-        if resp.clicked() {
+        self.cursors_idle(ui);
+        let mut removed = false;
+        if resp.double_clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let (pa, pb) = (self.cur_idle.0.map(|f| x_of_u(self.f_to_u(f))), self.cur_idle.1.map(|f| x_of_u(self.f_to_u(f))));
+                removed = self.cursor_dblclick(p.x, pa, pb);
+            }
+        }
+        if resp.clicked() && !removed {
             if let Some(p) = resp.interact_pointer_pos() {
                 self.cur_a = Some(self.u_to_f(u_of_x(p.x)));
             }

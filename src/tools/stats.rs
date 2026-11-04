@@ -157,7 +157,7 @@ impl Tool for Stats {
             ui.selectable_value(&mut self.ch, 0, RichText::new("L").color(CH_COLORS[0]));
             ui.selectable_value(&mut self.ch, 1, RichText::new("R").color(CH_COLORS[1]));
             ui.checkbox(&mut self.fade, "Fade (10 s)").on_hover_text("Histogram forgets old samples");
-            if ui.button("Reset").clicked() {
+            if crate::mapping::btn(ui, "Reset").clicked() {
                 self.reset();
             }
         });

@@ -795,7 +795,7 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 for (label, sentence) in EXAMPLES {
-                    if ui.small_button(label).on_hover_text(sentence).clicked() {
+                    if crate::mapping::small_btn(ui, label).on_hover_text(sentence).clicked() {
                         self.assist.text = sentence.to_string();
                         do_plan = true;
                     }
@@ -821,13 +821,13 @@ impl App {
                 }
                 if !p.actions.is_empty() {
                     ui.horizontal(|ui| {
-                        if ui.button(RichText::new("Walk me through").strong()).on_hover_text("Choose the input, the output, a calibration file and the parameters step by step, then everything is set up in that order").clicked() {
+                        if crate::mapping::btn(ui, RichText::new("Walk me through").strong()).on_hover_text("Choose the input, the output, a calibration file and the parameters step by step, then everything is set up in that order").clicked() {
                             walk = true;
                         }
-                        if !p.runs.is_empty() && ui.button(RichText::new("Set up and start").strong()).clicked() {
+                        if !p.runs.is_empty() && crate::mapping::btn(ui, RichText::new("Set up and start").strong()).clicked() {
                             apply = Some(true);
                         }
-                        if ui.button(if p.runs.is_empty() { "Set up" } else { "Set up only" }).clicked() {
+                        if crate::mapping::btn(ui, if p.runs.is_empty() { "Set up" } else { "Set up only" }).clicked() {
                             apply = Some(false);
                         }
                     });

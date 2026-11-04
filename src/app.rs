@@ -93,6 +93,9 @@ pub struct App {
     pub stereo: StereoState,
 
     pub cur_a: Option<f32>,
+    /// the cursors as they were before the click that is going on (a double-click removes one, and its first click has moved A already)
+    pub cur_idle: (Option<f32>, Option<f32>),
+    pub cur_down_t: f64,
     /// play only the band between cursor A and B
     pub band_listen: bool,
     pub cur_b: Option<f32>,
@@ -342,6 +345,8 @@ impl App {
             d3: View3d::new(),
             stereo: StereoState::new(),
             cur_a: None,
+            cur_idle: (None, None),
+            cur_down_t: 0.0,
             band_listen: false,
             cur_b: None,
             snap_peak: true,
@@ -363,7 +368,7 @@ impl App {
             follow: Default::default(),
             lay: Default::default(),
             opts_open: false,
-            graph_on: false,
+            graph_on: true,
             graph_applied: false,
             graph_hook: false,
             open_hook: false,
@@ -503,10 +508,10 @@ impl App {
         kv("st_persist", &self.stereo.persist_ms);
         kv("st_bright", &self.stereo.brightness);
         kv("st_hold", &self.stereo.hold);
+        kv("st_show", &self.stereo.show.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>());
         kv("rotated", &self.rotated);
         kv("auto_tile", &self.auto_tile);
         kv("win_snap", &self.snap_on);
-        kv("graph_on", &self.graph_on);
         kv("layout_ver", &2);
         kv("safety_ms", &self.safety_ms);
         kv("meas_ch", &self.meas_ch);
@@ -647,10 +652,14 @@ impl App {
         set!(self.d3.wire, "d3_wire");
         set!(self.stereo.auto, "st_auto");
         set!(self.stereo.hold, "st_hold");
+        if let Some(v) = m.get("st_show") {
+            for (i, c) in v.chars().take(5).enumerate() {
+                self.stereo.show[i] = c != '0';
+            }
+        }
         set!(self.rotated, "rotated");
         set!(self.auto_tile, "auto_tile");
         set!(self.snap_on, "win_snap");
-        set!(self.graph_on, "graph_on");
         set!(self.safety_ms, "safety_ms");
         self.safety_ms = self.safety_ms.min(1000);
         crate::prof::set_safety_ms(self.safety_ms);
@@ -1017,6 +1026,38 @@ impl App {
         if self.an.sr > 0.0 { self.an.sr } else { 48000.0 }
     }
 
+    /// Once per frame in a view where clicks place the cursors: remember them while nothing is being clicked.
+    pub fn cursors_idle(&mut self, ui: &egui::Ui) {
+        let (down, now) = ui.input(|i| (i.pointer.any_down(), i.time));
+        if down {
+            self.cur_down_t = now;
+        } else if now - self.cur_down_t > 0.5 {
+            self.cur_idle = (self.cur_a, self.cur_b);
+        }
+    }
+
+    /// A double-click at `coord` (a pixel position along the frequency axis; `pa` and `pb` are where cursor A and B were before the
+    /// click, in the same unit): removes the cursor that is under it, within 10 pixels. True when one was removed.
+    pub fn cursor_dblclick(&mut self, coord: f32, pa: Option<f32>, pb: Option<f32>) -> bool {
+        let da = pa.map(|x| (x - coord).abs()).filter(|d| *d < 10.0);
+        let db = pb.map(|x| (x - coord).abs()).filter(|d| *d < 10.0);
+        let remove_a = match (da, db) {
+            (Some(a), Some(b)) => a <= b,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return false,
+        };
+        // the first click of the double-click has put A under the pointer: back to what it was
+        (self.cur_a, self.cur_b) = self.cur_idle;
+        if remove_a {
+            self.cur_a = None;
+        } else {
+            self.cur_b = None;
+        }
+        self.cur_idle = (self.cur_a, self.cur_b);
+        true
+    }
+
     pub fn u_to_f(&self, u: f32) -> f32 {
         u_to_freq(u, self.p.log_freq, self.sr())
     }
@@ -1236,13 +1277,13 @@ impl App {
                     ui.selectable_value(&mut self.cal.entry_unit, i as u8, *n);
                 }
             });
-            if ui.small_button("L").clicked() {
+            if crate::mapping::small_btn(ui, "L").clicked() {
                 apply = Some([true, false]);
             }
-            if ui.small_button("R").clicked() {
+            if crate::mapping::small_btn(ui, "R").clicked() {
                 apply = Some([false, true]);
             }
-            if ui.small_button("Both").clicked() {
+            if crate::mapping::small_btn(ui, "Both").clicked() {
                 apply = Some([true, true]);
             }
         });
@@ -1263,16 +1304,16 @@ impl App {
             });
         });
         ui.horizontal(|ui| {
-            if ui.button("Cal L").clicked() {
+            if crate::mapping::btn(ui, "Cal L").clicked() {
                 cal_mask = Some([true, false]);
             }
-            if ui.button("Cal R").clicked() {
+            if crate::mapping::btn(ui, "Cal R").clicked() {
                 cal_mask = Some([false, true]);
             }
-            if ui.button("Cal both").clicked() {
+            if crate::mapping::btn(ui, "Cal both").clicked() {
                 cal_mask = Some([true, true]);
             }
-            if ui.button("Reset").clicked() {
+            if crate::mapping::btn(ui, "Reset").clicked() {
                 self.recal(|a| a.cal.on = false);
                 self.note = "Calibration cleared".into();
             }
@@ -1377,8 +1418,8 @@ impl App {
     pub fn cursors_ui(&mut self, ui: &mut Ui) {
         ui.heading("Cursors");
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.snap_peak, "Snap to peak");
-            if ui.button("Clear").clicked() {
+            ui.checkbox(&mut self.snap_peak, "Peak level correction").on_hover_text("Read the true level of a peak between two bins (undoes the loss of the window). Shift+click puts a cursor on the nearest peak; a plain click puts it exactly where you click.");
+            if crate::mapping::btn(ui, "Clear").clicked() {
                 self.cur_a = None;
                 self.cur_b = None;
             }
@@ -1411,10 +1452,10 @@ impl App {
                     ui.selectable_value(&mut self.snap_src, i, *n);
                 }
             });
-            if ui.button("Capture").clicked() {
+            if crate::mapping::btn(ui, "Capture").clicked() {
                 self.take_snapshot();
             }
-            if ui.button("Export CSV").clicked() {
+            if crate::mapping::btn(ui, "Export CSV").clicked() {
                 self.export_csv();
             }
         });
@@ -1422,7 +1463,7 @@ impl App {
         for (i, s) in self.snaps.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut s.visible, RichText::new(&s.name).color(s.color));
-                if ui.small_button("x").clicked() {
+                if crate::mapping::small_btn(ui, "x").clicked() {
                     del = Some(i);
                 }
             });

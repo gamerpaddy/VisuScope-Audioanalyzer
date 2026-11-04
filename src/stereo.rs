@@ -32,6 +32,9 @@ pub struct StereoState {
     pub brightness: f32,
     /// infinite persistence (no decay)
     pub hold: bool,
+    /// what the window shows: the XY display, the correlation meter, its history, correlation against frequency, the controls under
+    /// the XY display
+    pub show: [bool; 5],
     pub clear: bool,
     peak: f32,
     tl: Vec<f32>,
@@ -66,6 +69,7 @@ impl StereoState {
             persist_ms: 60.0,
             brightness: 1.0,
             hold: false,
+            show: [true; 5],
             clear: false,
             peak: 0.0,
             tl: Vec::new(),
@@ -198,26 +202,46 @@ impl App {
             if icon_btn(ui, if single { Ico::Restore } else { Ico::Maximize }, if single { "Restore window size" } else { "Maximize window" }, single) {
                 self.max_req = Some(2);
             }
+            crate::windows::sticky_menu(ui, "Show", |ui| {
+                ui.label(RichText::new("What this window shows").small().weak());
+                for (k, name) in ["XY display (goniometer)", "Controls under the XY display", "Correlation meter", "Correlation history", "Correlation against frequency"].into_iter().enumerate() {
+                    // (the order of the list is not the order of the flags: 0 xy, 4 controls, 1 meter, 2 history, 3 frequency)
+                    let idx = [0, 4, 1, 2, 3][k];
+                    ui.checkbox(&mut self.stereo.show[idx], name);
+                }
+            });
         });
+        let [xy, meter, hist, freq, _] = self.stereo.show;
+        let meters = meter || hist || freq;
         let avail = ui.available_size();
         if avail.x < 620.0 {
             // narrow cell: scope on top, meters underneath, scrollable
             let side = (avail.x - 16.0).min(avail.y * 0.62).max(100.0);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                self.gonio_ui(ui, side);
-                self.meters_ui(ui, Some(190.0));
+                if xy {
+                    self.gonio_ui(ui, side);
+                }
+                if meters {
+                    self.meters_ui(ui, Some(190.0));
+                }
             });
             return;
         }
         // leave room under the scope for the gain / persistence / clear rows
-        let side = (avail.y - 110.0).min(avail.x * 0.5).max(100.0);
+        let side = if self.stereo.show[4] { (avail.y - 110.0).min(avail.x * 0.5).max(100.0) } else { (avail.y - 8.0).min(avail.x * 0.5).max(100.0) };
+        // only the XY display: it takes all the room
+        let side = if xy && !meters { if self.stereo.show[4] { (avail.y - 110.0).min(avail.x - 16.0).max(100.0) } else { (avail.y - 8.0).min(avail.x - 16.0).max(100.0) } } else { side };
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_width(side);
-                    self.gonio_ui(ui, side);
-                });
-                ui.vertical(|ui| self.meters_ui(ui, None));
+                if xy {
+                    ui.vertical(|ui| {
+                        ui.set_width(side);
+                        self.gonio_ui(ui, side);
+                    });
+                }
+                if meters {
+                    ui.vertical(|ui| self.meters_ui(ui, None));
+                }
             });
         });
     }
@@ -266,25 +290,29 @@ impl App {
         painter.text(c + vec2(rad - 2.0, -4.0), Align2::RIGHT_BOTTOM, "S", f.clone(), TXT);
         painter.text(c + vec2(0.0, rad - 2.0), Align2::CENTER_BOTTOM, "out of phase", f, Color32::from_rgb(230, 90, 70));
 
+        if !self.stereo.show[4] {
+            return;
+        }
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.stereo.auto, "Auto gain");
-            ui.add_enabled(!self.stereo.auto, egui::Slider::new(&mut self.stereo.gain_db, -20.0..=60.0).suffix(" dB"));
+            { let r = ui.add_enabled(!self.stereo.auto, egui::Slider::new(&mut self.stereo.gain_db, -20.0..=60.0).suffix(" dB")); crate::slider::reset(ui, &r, &mut self.stereo.gain_db, 0.0); }
         });
         ui.horizontal(|ui| {
-            ui.add_enabled(
+            let r = ui.add_enabled(
                 !self.stereo.hold,
                 egui::Slider::new(&mut self.stereo.persist_ms, 5.0..=5000.0).logarithmic(true).suffix(" ms").text("Persist"),
             );
+            crate::slider::reset(ui, &r, &mut self.stereo.persist_ms, 60.0);
         });
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.stereo.brightness, 0.1..=8.0).logarithmic(true).text("Brightness").custom_formatter(|v, _| format!("x{v:.2}")));
-            if ui.small_button("1x").on_hover_text("Default brightness").clicked() {
+            { let r = ui.add(egui::Slider::new(&mut self.stereo.brightness, 0.1..=8.0).logarithmic(true).text("Brightness").custom_formatter(|v, _| format!("x{v:.2}"))); crate::slider::reset(ui, &r, &mut self.stereo.brightness, 1.0); }
+            if crate::mapping::small_btn(ui, "1x").on_hover_text("Default brightness").clicked() {
                 self.stereo.brightness = 1.0;
             }
         });
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.stereo.hold, "Infinite");
-            if ui.button("Clear").clicked() {
+            if crate::mapping::btn(ui, "Clear").clicked() {
                 self.stereo.clear = true;
             }
         });
@@ -294,8 +322,14 @@ impl App {
     fn meters_ui(&mut self, ui: &mut Ui, fixed: Option<f32>) {
         let gs = Stroke::new(1.0, GRID_MAJOR);
         let rest = fixed.unwrap_or_else(|| (ui.available_height() - 76.0).clamp(120.0, 600.0));
-        let (hist_h, band_h) = (rest * 0.36, rest * 0.64 - 10.0);
+        let [_, show_meter, show_hist, show_freq, _] = self.stereo.show;
+        let (hist_h, band_h) = match (show_hist, show_freq) {
+            (true, true) => (rest * 0.36, rest * 0.64 - 10.0),
+            (true, false) => (rest - 10.0, 0.0),
+            _ => (0.0, rest - 10.0),
+        };
         // correlation meter
+        if show_meter {
         let s = &self.stereo;
         let (resp, painter) = ui.allocate_painter(vec2(ui.available_width(), 34.0), Sense::hover());
         let m = Rect::from_min_max(resp.rect.min + vec2(6.0, 4.0), resp.rect.max - vec2(6.0, 14.0));
@@ -328,8 +362,11 @@ impl App {
             self.sm_st[4],
             100.0 * 10f32.powf((self.sm_st[4] - self.sm_st[3]) / 20.0).min(2.0)
         )).small());
+        }
 
         // correlation history
+        let s = &self.stereo;
+        if show_hist {
         let (resp, painter) = ui.allocate_painter(vec2(ui.available_width(), hist_h), Sense::hover());
         let h = resp.rect;
         painter.rect_filled(h, 2.0, BG);
@@ -345,8 +382,12 @@ impl App {
             prev = Some(p);
         }
         painter.text(h.left_top() + vec2(3.0, 2.0), Align2::LEFT_TOP, "correlation history (10 s)", FontId::proportional(9.0), TXT);
+        }
 
         // correlation vs frequency
+        if !show_freq {
+            return;
+        }
         let (resp, painter) = ui.allocate_painter(vec2(ui.available_width(), band_h), Sense::hover());
         let h = resp.rect;
         painter.rect_filled(h, 2.0, BG);

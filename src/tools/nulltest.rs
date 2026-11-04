@@ -384,7 +384,7 @@ impl NullTest {
         }
         let sig = if is_b { &self.b } else { &self.a };
         if cur == Src::File {
-            if ui.small_button("Open...").clicked() {
+            if crate::mapping::small_btn(ui, "Open...").clicked() {
                 self.dlg = Some((is_b, dialogs::open("Open audio file", "Audio", decode::EXTENSIONS)));
             }
         }

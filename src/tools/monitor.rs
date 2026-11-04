@@ -27,10 +27,10 @@ impl Queue {
     /// Append samples; if the output falls far behind (clock drift) the oldest ones are dropped.
     pub fn push(&mut self, l: &[f32], r: &[f32]) {
         self.buf.extend(l.iter().copied().zip(r.iter().copied()));
-        // the backlog that is tolerated grows with the safety buffer
-        let cap = (self.src_sr as usize * (400 + 2 * crate::prof::safety_ms() as usize) / 1000).max(4096);
+        // the backlog that is tolerated grows with the safety buffer (the reserve of an output is 150 ms at most)
+        let cap = (self.src_sr as usize * (250 + 2 * crate::prof::safety_ms() as usize) / 1000).max(4096);
         if self.buf.len() > cap {
-            let drop = self.buf.len() - cap / 2;
+            let drop = self.buf.len() - cap * 7 / 10;
             self.buf.drain(..drop);
         }
     }
@@ -127,11 +127,13 @@ pub struct OutCtl {
     win_min: f64,
     win_t: f32,
     surplus: bool,
+    /// how much of a backlog that stayed all second long is to be skipped (ms), asked for by the next callback
+    skip_ms: f32,
 }
 
 impl OutCtl {
     pub fn new() -> Self {
-        Self { cush: Cushion::new(), primed: false, gap: None, win_min: f64::MAX, win_t: 0.0, surplus: false }
+        Self { cush: Cushion::new(), primed: false, gap: None, win_min: f64::MAX, win_t: 0.0, surplus: false, skip_ms: 0.0 }
     }
 
     /// `len` frames are queued, the callback needs `need` of them (both at the source rate `sr`) and lasts `dt` seconds.
@@ -163,10 +165,20 @@ impl OutCtl {
             self.cush.on_calm(self.win_t, min_ms - safety_ms);
             // more in reserve than wanted, all second long: catch up slowly
             self.surplus = min_ms > self.cush.ms() + safety_ms + 4.0;
+            // far more than needed, all second long (a burst, a stall that was caught up): playing it away at 0.5 % would take
+            // minutes of too much delay. Skip most of it at once.
+            if min_ms > self.cush.ms() + safety_ms + 50.0 {
+                self.skip_ms = min_ms - self.cush.ms() - safety_ms - 10.0;
+            }
             self.win_min = f64::MAX;
             self.win_t = 0.0;
         }
         Act::Play { fast: self.surplus }
+    }
+
+    /// A backlog to skip now (ms), once.
+    pub fn take_skip(&mut self) -> f32 {
+        std::mem::take(&mut self.skip_ms)
     }
 
     /// The source jumped: start afresh, without learning from the pause.
@@ -284,6 +296,8 @@ where
     let mut frac = 1.0f64;
     let key = dev.id().map(|i| i.to_string()).unwrap_or_default();
     let mut ctl = OutCtl::new();
+    // the last sample played, and a crossfade (frames left) after a backlog was skipped
+    let (mut hold, mut fade, mut fade_from, mut fade_len) = ((0f32, 0f32), 0usize, (0f32, 0f32), 1usize);
     if let Some(st) = learned_get(&key) {
         ctl.cush = Cushion::from_state(st);
     }
@@ -299,7 +313,8 @@ where
             }
             let g = f32::from_bits(gain.load(Relaxed));
             let safety_ms = crate::prof::safety_ms() as usize;
-            let Some(mut q) = q.try_lock() else { return };
+            // (the engine holds the queue for a few microseconds while it adds a block: wait for it rather than play silence)
+            let Some(mut q) = q.try_lock_for(Duration::from_micros(800)) else { return };
             if std::mem::take(&mut q.flushed) {
                 ctl.restart();
             }
@@ -317,6 +332,16 @@ where
                 }
             }
             crate::prof::C.out_cushion_ms.store(ctl.reserve_ms(safety_ms as f32) as u32, Relaxed);
+            let skip = ctl.take_skip();
+            if skip > 0.0 {
+                let drop = ((skip as f64 / 1000.0 * q.src_sr as f64) as usize).min(q.buf.len().saturating_sub(need as usize * 2));
+                q.buf.drain(..drop);
+                // the cut is crossfaded from what was playing (2 ms)
+                fade = (out_sr as usize * 2 / 1000).max(8);
+                fade_from = hold;
+                crate::prof::C.out_skips.fetch_add(1, Relaxed);
+            }
+            crate::prof::C.out_queue_ms.store((q.buf.len() as f64 / q.src_sr.max(1) as f64 * 1000.0) as u32, Relaxed);
             if ctl.cush.state() != stored {
                 stored = ctl.cush.state();
                 learned_put(&key, stored);
@@ -336,8 +361,21 @@ where
                     frac -= 1.0;
                 }
                 let t = frac as f32;
-                let l = (prev.0 + (next.0 - prev.0) * t) * g;
-                let r = (prev.1 + (next.1 - prev.1) * t) * g;
+                let mut l = (prev.0 + (next.0 - prev.0) * t) * g;
+                let mut r = (prev.1 + (next.1 - prev.1) * t) * g;
+                if fade > 0 {
+                    if fade_len == 1 {
+                        fade_len = fade;
+                    }
+                    let a = 1.0 - fade as f32 / fade_len as f32;
+                    l = fade_from.0 * (1.0 - a) + l * a;
+                    r = fade_from.1 * (1.0 - a) + r * a;
+                    fade -= 1;
+                    if fade == 0 {
+                        fade_len = 1;
+                    }
+                }
+                hold = (l, r);
                 frac += step;
                 if ch == 1 {
                     frame[0] = T::from_sample(0.5 * (l + r));

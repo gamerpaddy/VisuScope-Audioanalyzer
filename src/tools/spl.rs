@@ -296,7 +296,7 @@ impl Tool for Spl {
             ui.label(RichText::new("Input").small().weak());
             ui.selectable_value(&mut self.ch, 0, "L");
             ui.selectable_value(&mut self.ch, 1, "R");
-            if ui.button("Reset").on_hover_text("Restart Leq, Lmax, peak and the percentile levels").clicked() {
+            if crate::mapping::btn(ui, "Reset").on_hover_text("Restart Leq, Lmax, peak and the percentile levels").clicked() {
                 self.reset_stats();
             }
         });
@@ -327,7 +327,7 @@ impl Tool for Spl {
             heading(ui, "With an acoustic calibrator");
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut self.cal_ref).speed(0.1).range(40.0..=140.0).suffix(" dB SPL"));
-                if ui.button("Calibrate now").on_hover_text("Put the calibrator on the microphone, then click: the current unweighted 1 s level is set to this value").clicked() {
+                if crate::mapping::btn(ui, "Calibrate now").on_hover_text("Put the calibrator on the microphone, then click: the current unweighted 1 s level is set to this value").clicked() {
                     if self.pz > 1e-16 {
                         let off = self.cal_ref - 10.0 * (self.pz as f32).log10();
                         self.fs_sine_spl = off + SINE_RMS_DB;
@@ -344,7 +344,7 @@ impl Tool for Spl {
                 if ui.add(egui::DragValue::new(&mut self.fs_sine_spl).speed(0.1).range(-20.0..=200.0).suffix(" dB SPL")).changed() {
                     self.calibrated = true;
                 }
-                if ui.small_button("Uncalibrated").clicked() {
+                if crate::mapping::small_btn(ui, "Uncalibrated").clicked() {
                     self.fs_sine_spl = SINE_RMS_DB;
                     self.calibrated = false;
                 }

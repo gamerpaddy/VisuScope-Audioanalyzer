@@ -21,6 +21,7 @@ fn main() {
     let y = yoe + era * 400 + (m <= 2) as i64;
     let (hh, mm) = ((secs % 86400) / 3600, (secs % 3600) / 60);
     println!("cargo:rustc-env=VS_GIT={}{}", hash, if dirty { "+" } else { "" });
+    println!("cargo:rustc-env=VS_TIME={hh:02}:{mm:02}");
     println!("cargo:rustc-env=VS_BUILD={y:04}-{m:02}-{d:02} {hh:02}:{mm:02} UTC");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");

@@ -183,9 +183,9 @@ impl Tool for Octave {
         });
         if self.target {
             ui.horizontal(|ui| {
-                ui.add(egui::Slider::new(&mut self.tilt, -6.0..=6.0).text("tilt dB/oct").fixed_decimals(1));
-                ui.add(egui::Slider::new(&mut self.target_db, -120.0..=0.0).text("at 1 kHz").fixed_decimals(0));
-                if ui.button("Fit").on_hover_text("Set the target level to the mean band level").clicked() && !self.level.is_empty() {
+                { let r = ui.add(egui::Slider::new(&mut self.tilt, -6.0..=6.0).text("tilt dB/oct").fixed_decimals(1)); crate::slider::reset(ui, &r, &mut self.tilt, 0.0); }
+                { let r = ui.add(egui::Slider::new(&mut self.target_db, -120.0..=0.0).text("at 1 kHz").fixed_decimals(0)); crate::slider::reset(ui, &r, &mut self.target_db, -30.0); }
+                if crate::mapping::btn(ui, "Fit").on_hover_text("Set the target level to the mean band level").clicked() && !self.level.is_empty() {
                     let mean: f32 = self.level.iter().enumerate().map(|(i, l)| l - self.tilt * (self.bands[i].fc / 1000.0).log2()).sum::<f32>() / self.level.len() as f32;
                     self.target_db = mean;
                 }

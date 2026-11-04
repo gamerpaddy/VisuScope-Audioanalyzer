@@ -72,7 +72,7 @@ impl App {
             self.channel_picker(ui, chans);
         }
         ui.horizontal(|ui| {
-            if ui.button("Restart").clicked() {
+            if crate::mapping::btn(ui, "Restart").clicked() {
                 restart = true;
             }
             if ui.add_enabled(!self.scanning, egui::Button::new(if self.scanning { "Scanning..." } else { "Rescan" })).clicked() {
@@ -134,8 +134,11 @@ impl App {
 
     fn monitor_ui(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.mon_on, "Monitor").on_hover_text("Play the analysed input (L and R) on an output device");
-            ui.add_enabled(self.mon_on, egui::Slider::new(&mut self.mon_gain_db, -60.0..=6.0).suffix(" dB"));
+            let mc = ui.checkbox(&mut self.mon_on, "Monitor").on_hover_text("Play the analysed input (L and R) on an output device");
+            crate::mapping::button_menu(&mc, &crate::mapping::Target::toggle("monitor", "Monitor on / off", true));
+            ui.add_enabled_ui(self.mon_on, |ui| {
+                crate::slider::bound(ui, &mut self.mon_gain_db, -60.0, 6.0, false, -10.0, &crate::mapping::Target::slider("mon_gain", "Monitor volume", -60.0, 6.0, false, " dB"), crate::slider::Fmt::new(" dB", 1), |_| {});
+            });
         });
         let cur = self.gen_devs.iter().find(|d| d.id == self.mon_dev).map(|d| d.label.clone()).unwrap_or_else(|| self.gen_devs.first().map(|d| d.label.clone()).unwrap_or_else(|| "-".into()));
         egui::ComboBox::from_id_salt("mon_out").width(ui.available_width() - 8.0).selected_text(cur).show_ui(ui, |ui| {
@@ -284,7 +287,7 @@ impl App {
             if ui.add_enabled(self.mic_dialog.is_none(), egui::Button::new("Load file...")).on_hover_text("Calibration file of the microphone (frequency and dB pairs). A name containing 90 is stored as the 90° file.").clicked() {
                 self.mic_dialog = Some(crate::tools::dialogs::open("Load microphone calibration", "Calibration", &["txt", "cal", "csv", "frd"]));
             }
-            if ui.button("Clear").clicked() {
+            if crate::mapping::btn(ui, "Clear").clicked() {
                 self.mic = [None, None];
                 self.mic_paths = Default::default();
                 changed = true;
@@ -343,10 +346,10 @@ impl App {
             });
             ui.end_row();
             ui.label("FFT rate");
-            ui.add(egui::Slider::new(&mut self.p.update_hz, 10.0..=240.0).suffix(" Hz"));
+            { let r = ui.add(egui::Slider::new(&mut self.p.update_hz, 10.0..=240.0).suffix(" Hz")); crate::slider::reset(ui, &r, &mut self.p.update_hz, 120.0); }
             ui.end_row();
             ui.label("Average");
-            ui.add(egui::Slider::new(&mut self.p.avg_count, 1.0..=512.0).logarithmic(true));
+            { let r = ui.add(egui::Slider::new(&mut self.p.avg_count, 1.0..=512.0).logarithmic(true)); crate::slider::reset(ui, &r, &mut self.p.avg_count, 16.0); }
             ui.end_row();
         });
         ui.horizontal(|ui| {
@@ -356,7 +359,9 @@ impl App {
                 self.f_lo = 0.0;
                 self.f_hi = 1.0;
             }
-            if ui.button("Reset avg/max/min").clicked() {
+            let rb = crate::mapping::btn(ui, "Reset avg/max/min");
+            crate::mapping::button_menu(&rb, &crate::mapping::Target::toggle("reset_minmax", "Reset average / max / min", false));
+            if rb.clicked() {
                 self.p.reset_gen = self.p.reset_gen.wrapping_add(1);
             }
         });
@@ -395,7 +400,7 @@ impl App {
         })
         .response
         .on_hover_text("Fractional-octave smoothing of the displayed spectrum (power average). Cursor readouts stay unsmoothed.");
-        ui.add(egui::Slider::new(&mut self.line_w, 0.5..=3.0).text("Line width"));
+        { let r = ui.add(egui::Slider::new(&mut self.line_w, 0.5..=3.0).text("Line width")); crate::slider::reset(ui, &r, &mut self.line_w, 1.2); }
     }
 
     fn spectro_section(&mut self, ui: &mut Ui) {
@@ -411,17 +416,19 @@ impl App {
             });
             ui.end_row();
             ui.label("Floor");
-            let a = ui.add(egui::Slider::new(&mut self.col_lo, -160.0..=-20.0).suffix(" dB")).changed();
+            let ar = ui.add(egui::Slider::new(&mut self.col_lo, -160.0..=-20.0).suffix(" dB"));
+            let a = ar.changed() | crate::slider::reset(ui, &ar, &mut self.col_lo, -120.0);
             ui.end_row();
             ui.label("Ceiling");
-            let b = ui.add(egui::Slider::new(&mut self.col_hi, -80.0..=10.0).suffix(" dB")).changed();
+            let br = ui.add(egui::Slider::new(&mut self.col_hi, -80.0..=10.0).suffix(" dB"));
+            let b = br.changed() | crate::slider::reset(ui, &br, &mut self.col_hi, -10.0);
             ui.end_row();
             if a || b {
                 self.col_hi = self.col_hi.max(self.col_lo + 10.0);
                 self.rebuild_dyn_lut();
             }
             ui.label("Columns/s");
-            ui.add(egui::Slider::new(&mut self.p.cols_per_sec, 2.0..=240.0).logarithmic(true));
+            { let r = ui.add(egui::Slider::new(&mut self.p.cols_per_sec, 2.0..=240.0).logarithmic(true)); crate::slider::reset(ui, &r, &mut self.p.cols_per_sec, 60.0); }
             ui.end_row();
             ui.label("Source");
             let before = self.p.spectro_src;

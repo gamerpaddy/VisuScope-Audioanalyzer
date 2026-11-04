@@ -211,7 +211,7 @@ impl Tool for Logger {
         if let Some(lf) = &self.log {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{} rows  {}", lf.rows, lf.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())).small().monospace());
-                if ui.small_button("Show folder").clicked() {
+                if crate::mapping::small_btn(ui, "Show folder").clicked() {
                     let _ = std::process::Command::new("explorer").arg(docs_dir().join("logs")).spawn();
                 }
             });

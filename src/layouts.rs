@@ -432,7 +432,7 @@ impl App {
                     let r = preset_card(ui, &preview_user(&self.presets[k]), &self.presets[k].name, &hint);
                     let clicked = r.clicked();
                     r.context_menu(|ui| {
-                        if ui.button("Delete this layout").clicked() {
+                        if crate::mapping::btn(ui, "Delete this layout").clicked() {
                             delete = Some(k);
                             ui.close();
                         }

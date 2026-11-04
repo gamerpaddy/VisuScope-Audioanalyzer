@@ -278,7 +278,14 @@ pub struct Track {
     pub input: Input,
     /// 0..=2 (small, normal, large)
     pub h: u8,
+    /// a track the user draws a control signal on (a curve between -1 and 1 over the timeline): it is never part of the master
+    /// mix, only a Timeline out node of the routing graph can pick it up
+    pub draw: bool,
+    /// the drawing: (frame, value) points, sorted; the value is held beyond the ends
+    pub curve: Vec<(i64, f32)>,
 }
+
+pub const MAX_CURVE_POINTS: usize = 20000;
 
 /// Range of the automation lane (dB).
 pub const AUTO_RANGE: (f32, f32) = (-40.0, 12.0);
@@ -312,6 +319,45 @@ impl Track {
             return None;
         }
         Some(i)
+    }
+
+    /// Put a point on the drawing (replaces the point at the same frame).
+    pub fn curve_set(&mut self, frame: i64, v: f32) {
+        let v = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+        let i = self.curve.partition_point(|p| p.0 < frame);
+        if i < self.curve.len() && self.curve[i].0 == frame {
+            self.curve[i].1 = v;
+        } else if self.curve.len() < MAX_CURVE_POINTS {
+            self.curve.insert(i, (frame.max(0), v));
+        }
+    }
+
+    /// Draw a stroke from (`a`, `va`) to (`b`, `vb`): what was drawn between the two is replaced.
+    pub fn curve_stroke(&mut self, a: i64, va: f32, b: i64, vb: f32) {
+        let (lo, hi) = (a.min(b), a.max(b));
+        self.curve.retain(|p| p.0 < lo || p.0 > hi);
+        self.curve_set(a, va);
+        if b != a {
+            self.curve_set(b, vb);
+        }
+    }
+
+    /// The drawing at a frame; `seg` is the index of the first point after the frame (kept between calls with rising frames).
+    pub fn curve_at(&self, seg: &mut usize, f: i64) -> f32 {
+        let c = &self.curve;
+        while *seg < c.len() && c[*seg].0 <= f {
+            *seg += 1;
+        }
+        if c.is_empty() {
+            0.0
+        } else if *seg == 0 {
+            c[0].1
+        } else if *seg >= c.len() {
+            c[c.len() - 1].1
+        } else {
+            let ((f0, v0), (f1, v1)) = (c[*seg - 1], c[*seg]);
+            v0 + (v1 - v0) * ((f - f0) as f32 / (f1 - f0).max(1) as f32)
+        }
     }
 
     pub fn height(&self) -> f32 {
@@ -400,7 +446,19 @@ impl Project {
     pub fn add_track(&mut self, name: Option<String>, input: Input) -> usize {
         let id = self.next();
         let n = self.tracks.len();
-        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, invert: false, auto: Vec::new(), input, h: 1 });
+        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, invert: false, auto: Vec::new(), input, h: 1, draw: false, curve: Vec::new() });
+        n
+    }
+
+    /// A track to draw a control signal on.
+    pub fn add_draw_track(&mut self) -> usize {
+        let n = self.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        let id = self.tracks[n].id;
+        let draws = self.tracks.iter().filter(|t| t.draw).count() + 1;
+        let t = &mut self.tracks[n];
+        t.draw = true;
+        t.name = format!("Draw {draws} (id {id})");
+        t.h = 1;
         n
     }
 
@@ -466,6 +524,21 @@ impl Project {
         tr.clear();
         tr.resize(n, 0.0);
         for (ti, t) in self.tracks.iter().enumerate() {
+            if t.draw {
+                // a drawing is muted for the master mix: only a request for this very track (the routing graph) gets it
+                if only == Some(t.id) {
+                    let mut seg = t.curve.partition_point(|p| p.0 <= start);
+                    for i in 0..n {
+                        let v = t.curve_at(&mut seg, start + i as i64);
+                        l[i] += v;
+                        r[i] += v;
+                    }
+                }
+                if let Some(p) = peaks.get_mut(ti) {
+                    *p = [0.0; 2];
+                }
+                continue;
+            }
             let audible = match only {
                 Some(id) => t.id == id,
                 None => !t.mute && (!any_solo || t.solo),
@@ -816,6 +889,24 @@ mod tests {
         }
         assert!(l.iter().zip(&a).all(|(x, y)| (x - y).abs() < 1e-5));
         assert!(p.tracks[0].auto_set(5, 99.0).is_some() && p.tracks[0].auto[0].1 == AUTO_RANGE.1);
+    }
+
+    #[test]
+    fn a_drawn_track_is_not_in_the_master_mix_but_a_node_can_take_it() {
+        let mut p = Project::new(48000);
+        let n = p.add_draw_track();
+        let id = p.tracks[n].id;
+        // a ramp from -1 at frame 100 to 1 at frame 300, drawn in two strokes (the second replaces part of the first)
+        p.tracks[n].curve_stroke(100, -1.0, 200, 0.0);
+        p.tracks[n].curve_stroke(150, 0.5, 300, 1.0);
+        assert!(p.tracks[n].curve.windows(2).all(|w| w[0].0 < w[1].0));
+        let (mut l, mut r, mut pk) = (vec![9.0f32; 400], vec![9.0f32; 400], vec![[0.0f32; 2]; 4]);
+        p.mix(0, &mut l, &mut r, None, &mut pk);
+        assert!(l.iter().chain(r.iter()).all(|v| *v == 0.0), "muted for the master");
+        p.mix(0, &mut l, &mut r, Some(id), &mut pk);
+        assert_eq!(l, r);
+        assert_eq!((l[0], l[100], l[300], l[399]), (-1.0, -1.0, 1.0, 1.0), "held beyond the ends");
+        assert!((l[150] - 0.5).abs() < 1e-5 && l[125] > -1.0 && l[125] < 0.5, "{} {}", l[150], l[125]);
     }
 
     #[test]

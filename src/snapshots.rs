@@ -99,14 +99,14 @@ impl App {
             egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
             for n in &names {
                 ui.horizontal(|ui| {
-                    if ui.button(n).on_hover_text("Restore this snapshot (the current state is replaced)").clicked() {
+                    if crate::mapping::btn(ui, n).on_hover_text("Restore this snapshot (the current state is replaced)").clicked() {
                         restore = Some(n.clone());
                     }
                     if self.snap_del.as_deref() == Some(n.as_str()) {
-                        if ui.small_button("really delete").clicked() {
+                        if crate::mapping::small_btn(ui, "really delete").clicked() {
                             remove = Some(n.clone());
                         }
-                    } else if ui.small_button("x").on_hover_text("Delete this snapshot").clicked() {
+                    } else if crate::mapping::small_btn(ui, "x").on_hover_text("Delete this snapshot").clicked() {
                         self.snap_del = Some(n.clone());
                     }
                 });

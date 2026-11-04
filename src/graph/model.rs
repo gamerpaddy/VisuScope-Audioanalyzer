@@ -22,6 +22,8 @@ pub enum Kind {
     Crusher,
     Jitter,
     Tremolo,
+    /// a signal smoothed (a low-pass): for the control inputs of other nodes
+    ControlLp,
     Stereo,
     Utility,
     Phase,
@@ -119,6 +121,7 @@ const P_NR: &[ParamDef] = &[s("Reduce", 0.0, 40.0, 12.0, " dB"), s("Strength", 0
 const P_FUZZ: &[ParamDef] = &[s("Fuzz", 0.0, 100.0, 70.0, " %"), s("Gate", 0.0, 100.0, 10.0, " %"), l("Tone", 300.0, 20000.0, 5000.0, " Hz"), s("Output", -36.0, 12.0, -10.0, " dB")];
 const P_CRUSH: &[ParamDef] = &[s("Bits", 1.0, 24.0, 8.0, ""), s("Hold", 1.0, 64.0, 1.0, ""), s("Mix", 0.0, 100.0, 100.0, " %")];
 const P_JITTER: &[ParamDef] = &[l("Depth", 1.0, 50000.0, 100.0, " us"), l("Rate", 0.1, 5000.0, 8.0, " Hz"), c("Shape", 0, &["Random", "Sine"]), s("Mix", 0.0, 100.0, 100.0, " %")];
+const P_CLP: &[ParamDef] = &[l("Time", 0.1, 5000.0, 50.0, " ms")];
 const P_TREM: &[ParamDef] = &[l("Rate", 0.1, 30.0, 5.0, " Hz"), s("Depth", 0.0, 100.0, 50.0, " %"), c("Shape", 0, &["Sine", "Triangle", "Square"])];
 const P_STEREO: &[ParamDef] = &[s("Width", 0.0, 200.0, 100.0, " %"), s("Balance", -100.0, 100.0, 0.0, " %")];
 const P_UTIL: &[ParamDef] = &[c("Mode", 0, &["Stereo (through)", "Left to both", "Right to both", "Mono sum", "Swap L/R", "Invert left", "Invert right", "Invert both"])];
@@ -149,7 +152,7 @@ const FX: (u8, u8, u8) = (90, 110, 170);
 const SNK: (u8, u8, u8) = (170, 100, 80);
 
 impl Kind {
-    pub const ALL: [Kind; 28] = [
+    pub const ALL: [Kind; 29] = [
         Kind::Input,
         Kind::Generator,
         Kind::TimelineOut,
@@ -165,6 +168,7 @@ impl Kind {
         Kind::Crusher,
         Kind::Jitter,
         Kind::Tremolo,
+        Kind::ControlLp,
         Kind::Stereo,
         Kind::Utility,
         Kind::Phase,
@@ -197,6 +201,7 @@ impl Kind {
             Kind::Fuzz => k("Fuzz", "Effect", "fuzz box guitar clip sputter", 1, 1, P_FUZZ, FX),
             Kind::Crusher => k("Bit crusher", "Effect", "bitcrusher bit depth sample rate reduce lofi quantise", 1, 1, P_CRUSH, FX),
             Kind::Jitter => k("Jitter / wow & flutter", "Effect", "jitter clock timing wow flutter vibrato modulation", 1, 1, P_JITTER, FX),
+            Kind::ControlLp => k("Control low-pass", "Effect", "smooth lowpass slew control signal lfo modulation filter eases", 1, 1, P_CLP, FX),
             Kind::Tremolo => k("Tremolo", "Effect", "tremolo amplitude modulation lfo", 1, 1, P_TREM, FX),
             Kind::Stereo => k("Stereo width", "Effect", "width balance pan mid side", 1, 1, P_STEREO, FX),
             Kind::Utility => k("Channel utility", "Effect", "mono swap invert left right channel phase", 1, 1, P_UTIL, FX),
@@ -235,6 +240,7 @@ impl Kind {
             Kind::Crusher => "crush",
             Kind::Jitter => "jit",
             Kind::Tremolo => "trem",
+            Kind::ControlLp => "clp",
             Kind::Stereo => "wid",
             Kind::Utility => "util",
             Kind::Phase => "phase",
@@ -358,10 +364,38 @@ pub struct Edge {
     pub port: u8,
 }
 
+/// A parameter of a node that follows a signal of the graph: the level of the signal (averaged over a block, between `in_lo` and
+/// `in_hi`, clamped) is mapped onto `out_lo` to `out_hi`. The signal can be any output, a generator's sawtooth for instance.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Modulation {
+    pub node: NodeId,
+    pub param: usize,
+    pub src: NodeId,
+    pub in_lo: f32,
+    pub in_hi: f32,
+    pub out_lo: f32,
+    pub out_hi: f32,
+    pub log: bool,
+}
+
+impl Modulation {
+    /// The value of the parameter for a signal level.
+    pub fn map(&self, x: f32) -> f32 {
+        let span = self.in_hi - self.in_lo;
+        let t = if span.abs() < 1e-9 || !x.is_finite() { 0.0 } else { ((x - self.in_lo) / span).clamp(0.0, 1.0) };
+        if self.log && self.out_lo > 0.0 && self.out_hi > 0.0 {
+            self.out_lo * (self.out_hi / self.out_lo).powf(t)
+        } else {
+            self.out_lo + (self.out_hi - self.out_lo) * t
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    pub mods: Vec<Modulation>,
     next: NodeId,
 }
 
@@ -390,6 +424,26 @@ impl Graph {
     pub fn remove(&mut self, id: NodeId) {
         self.nodes.retain(|n| n.id != id);
         self.edges.retain(|e| e.from != id && e.to != id);
+        self.mods.retain(|m| m.node != id && m.src != id);
+    }
+
+    pub fn modulation(&self, node: NodeId, param: usize) -> Option<&Modulation> {
+        self.mods.iter().find(|m| m.node == node && m.param == param)
+    }
+
+    /// Let a parameter follow a signal (replaces what it followed before). Refused for a source without an output, the node
+    /// itself or a parameter that does not exist.
+    pub fn set_modulation(&mut self, m: Modulation) -> bool {
+        let ok = m.node != m.src && self.node(m.src).is_some_and(|s| s.outputs() > 0) && self.node(m.node).is_some_and(|n| m.param < n.p.len()) && [m.in_lo, m.in_hi, m.out_lo, m.out_hi].iter().all(|v| v.is_finite());
+        if ok {
+            self.mods.retain(|x| !(x.node == m.node && x.param == m.param));
+            self.mods.push(m);
+        }
+        ok
+    }
+
+    pub fn clear_modulation(&mut self, node: NodeId, param: usize) {
+        self.mods.retain(|m| !(m.node == node && m.param == param));
     }
 
     /// Remove a node; a node that has something connected to one input only (and has an output) is cut out of its line: whatever
@@ -422,7 +476,7 @@ impl Graph {
             Kind::Dual => upstream(self, 0),
             Kind::Utility => matches!(n.param(0).round() as usize, 1..=3) || upstream(self, 0),
             // the same processing on both sides keeps identical sides identical
-            Kind::Gain | Kind::Eq | Kind::Filter | Kind::Comp | Kind::Limiter | Kind::Gate | Kind::Delay | Kind::Distortion | Kind::Fuzz | Kind::Crusher | Kind::Jitter | Kind::Tremolo | Kind::Phase | Kind::Shifter | Kind::NoiseRed => upstream(self, 0),
+            Kind::Gain | Kind::Eq | Kind::Filter | Kind::Comp | Kind::Limiter | Kind::Gate | Kind::Delay | Kind::Distortion | Kind::Fuzz | Kind::Crusher | Kind::Jitter | Kind::Tremolo | Kind::ControlLp | Kind::Phase | Kind::Shifter | Kind::NoiseRed => upstream(self, 0),
             Kind::Stereo => n.param(1).abs() < 1e-6 && upstream(self, 0),
             Kind::Mixer => {
                 let used: Vec<u8> = (0..n.inputs() as u8).filter(|p| self.edge_into(from, *p).is_some()).collect();
@@ -567,6 +621,9 @@ impl Graph {
         for e in &self.edges {
             out.push_str(&format!("edge {}|{}|{}|{}\n", e.from, e.to, e.port, e.from_port));
         }
+        for m in &self.mods {
+            out.push_str(&format!("mod {}|{}|{}|{}|{}|{}|{}|{}\n", m.node, m.param, m.src, m.in_lo, m.in_hi, m.out_lo, m.out_hi, m.log as u8));
+        }
         out
     }
 
@@ -613,6 +670,14 @@ impl Graph {
                 n.p = n.clamped();
                 g.next = g.next.max(id);
                 g.nodes.push(n);
+            } else if let Some(r) = l.strip_prefix("mod ") {
+                let f: Vec<&str> = r.split('|').collect();
+                if f.len() >= 8 {
+                    if let (Ok(node), Ok(param), Ok(src), Ok(a), Ok(b), Ok(c), Ok(d)) = (f[0].parse(), f[1].parse(), f[2].parse(), f[3].parse(), f[4].parse(), f[5].parse(), f[6].parse()) {
+                        // (after the nodes: a line that comes before its nodes is dropped)
+                        let _ = g.set_modulation(Modulation { node, param, src, in_lo: a, in_hi: b, out_lo: c, out_hi: d, log: f[7] == "1" });
+                    }
+                }
             } else if let Some(r) = l.strip_prefix("edge ") {
                 let f: Vec<&str> = r.split('|').collect();
                 if f.len() >= 3 {
@@ -637,6 +702,31 @@ fn unesc(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_parameter_follows_a_signal_clamped_and_the_link_survives_the_file() {
+        let mut g = Graph::default();
+        let saw = g.add(Kind::Generator, 0.0, 0.0);
+        let tr = g.add(Kind::Tremolo, 0.0, 0.0);
+        let m = Modulation { node: tr, param: 0, src: saw, in_lo: -0.5, in_hi: 0.5, out_lo: 2.0, out_hi: 12.0, log: false };
+        assert!(g.set_modulation(m));
+        assert!(!g.set_modulation(Modulation { src: tr, ..m }), "not itself");
+        assert!(!g.set_modulation(Modulation { param: 99, ..m }), "no such parameter");
+        assert_eq!((m.map(-0.5), m.map(0.0), m.map(0.5)), (2.0, 7.0, 12.0));
+        assert_eq!((m.map(-3.0), m.map(9.0), m.map(f32::NAN)), (2.0, 12.0, 2.0), "clamped");
+        let l = Modulation { in_lo: 0.0, in_hi: 1.0, out_lo: 20.0, out_hi: 20000.0, log: true, ..m };
+        assert!((l.map(0.5) - 632.4555).abs() < 0.1);
+        // a second link for the same parameter replaces the first
+        let other = g.add(Kind::Generator, 0.0, 0.0);
+        assert!(g.set_modulation(Modulation { src: other, ..m }));
+        assert_eq!(g.mods.len(), 1);
+        let back = Graph::decode(&g.encode()).unwrap();
+        assert_eq!(back.mods, g.mods);
+        // removing either node removes the link
+        g.remove(other);
+        assert!(g.mods.is_empty());
+        let _ = (saw, tr);
+    }
 
     #[test]
     fn connect_rules() {

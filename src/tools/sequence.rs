@@ -605,7 +605,7 @@ impl Tool for Sequence {
                 if ui.add_enabled(self.save.is_none(), egui::Button::new("Save...")).on_hover_text("Save as .vss to keep the script; as .txt to save the result report").clicked() {
                     self.save = Some(dialogs::save("Save sequence or report", "Sequence / report", &["vss", "txt"], "sequence.vss".into()));
                 }
-                if ui.button("Example").clicked() {
+                if crate::mapping::btn(ui, "Example").clicked() {
                     self.text = EXAMPLE.to_string();
                 }
             });

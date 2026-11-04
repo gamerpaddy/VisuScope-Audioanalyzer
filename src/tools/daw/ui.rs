@@ -118,7 +118,15 @@ fn icon_button(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> bool {
             p.add(Shape::convex_polygon(vec![c + vec2(2.0, -7.0), c + vec2(2.0, -1.0), c + vec2(6.0, -4.0)], col, Stroke::NONE));
         }
     }
-    resp.on_hover_text(tip).clicked()
+    let r = resp.on_hover_text(tip);
+    let (id, label) = match icon {
+        Icon::Start => ("daw_home", "Timeline: to the start"),
+        Icon::Play | Icon::Stop => ("daw_play", "Timeline: play / pause"),
+        Icon::Rec => ("daw_record", "Timeline: record / stop"),
+        Icon::Loop => ("daw_loop", "Timeline: loop on / off"),
+    };
+    crate::mapping::button_menu(&r, &crate::mapping::Target::toggle(id, label, false));
+    r.clicked()
 }
 
 /// Small M / S / R style toggle.
@@ -249,6 +257,9 @@ impl Daw {
                 "split" => self.act_split(&mut p),
                 "undo" => self.undo(&mut p),
                 "redo" => self.redo(&mut p),
+                "zoom_in" => self.zoom_by(1.4, None),
+                "zoom_out" => self.zoom_by(0.7, None),
+                "fit" => self.fit_view(),
                 _ => {}
             }
         }
@@ -307,33 +318,43 @@ impl Daw {
             ui.toggle_value(&mut self.show_clip, "Clip").on_hover_text("Show samples above full scale in red on the waveforms and in the track meters (switch off to see the plain waveform)");
             ui.toggle_value(&mut self.snap, "Snap").on_hover_text("Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Shift to move freely)");
             ui.separator();
-            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last timeline edit (Ctrl+Z)").clicked() {
+            let ub = ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last timeline edit (Ctrl+Z)");
+            crate::mapping::button_menu(&ub, &crate::mapping::Target::toggle("daw_undo", "Timeline: undo", false));
+            if ub.clicked() {
                 self.undo(p);
             }
-            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo").small()).on_hover_text("Redo (Ctrl+Y)").clicked() {
+            let rb = ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo").small()).on_hover_text("Redo (Ctrl+Y)");
+            crate::mapping::button_menu(&rb, &crate::mapping::Target::toggle("daw_redo", "Timeline: redo", false));
+            if rb.clicked() {
                 self.redo(p);
             }
             ui.separator();
-            if ui.small_button("-").on_hover_text("Zoom out (mouse wheel over the tracks)").clicked() {
+            if crate::mapping::small_btn(ui, "-").on_hover_text("Zoom out (mouse wheel over the tracks)").clicked() {
                 self.zoom_by(0.7, None);
             }
-            if ui.small_button("+").on_hover_text("Zoom in (mouse wheel over the tracks; Shift+wheel scrolls sideways)").clicked() {
+            if crate::mapping::small_btn(ui, "+").on_hover_text("Zoom in (mouse wheel over the tracks; Shift+wheel scrolls sideways)").clicked() {
                 self.zoom_by(1.4, None);
             }
-            if ui.small_button("Fit").on_hover_text("Show the whole project").clicked() {
+            if crate::mapping::small_btn(ui, "Fit").on_hover_text("Show the whole project").clicked() {
                 self.fit_view();
             }
             ui.separator();
             ui.menu_button("+ Track", |ui| {
-                if ui.button("Empty track").clicked() {
+                if crate::mapping::btn(ui, "Empty track").clicked() {
                     self.checkpoint(p);
                     let n = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
                     self.sel_track = Some(p.tracks[n].id);
                     ui.close();
                 }
+                if crate::mapping::btn(ui, "Draw track (a control signal)").on_hover_text("Draw a curve over the timeline with the mouse. It is not heard in the master mix: pick it in a Timeline out node of the Routing window, and let it control a setting of a node (right-click a value there)").clicked() {
+                    self.checkpoint(p);
+                    let n = p.add_draw_track();
+                    self.sel_track = Some(p.tracks[n].id);
+                    ui.close();
+                }
                 ui.separator();
                 if graph_on() {
-                    if ui.button("Track that records from the Routing window").on_hover_text("An armed track plus a Timeline record node to connect").clicked() {
+                    if crate::mapping::btn(ui, "Track that records from the Routing window").on_hover_text("An armed track plus a Timeline record node to connect").clicked() {
                         self.checkpoint(p);
                         let n = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
                         let id = p.tracks[n].id;
@@ -353,21 +374,21 @@ impl Daw {
                 for d in devs {
                     ui.menu_button(capture::short_label(&d.label), |ui| {
                         ui.label(RichText::new(format!("{} ch, {} Hz", d.ch, d.sr)).small().weak());
-                        if ui.button(format!("One mono track per channel ({})", d.ch.min(32))).clicked() {
+                        if crate::mapping::btn(ui, format!("One mono track per channel ({})", d.ch.min(32))).clicked() {
                             self.checkpoint(p);
                             for c in 0..d.ch.min(32) {
                                 self.add_input_track(p, &d, Mode::Chan(c), Some(format!("In {}", c + 1)));
                             }
                             ui.close();
                         }
-                        if d.ch >= 2 && ui.button(format!("Stereo pairs ({})", d.ch / 2)).clicked() {
+                        if d.ch >= 2 && crate::mapping::btn(ui, format!("Stereo pairs ({})", d.ch / 2)).clicked() {
                             self.checkpoint(p);
                             for k in 0..(d.ch / 2).min(16) {
                                 self.add_input_track(p, &d, Mode::Pair(k), Some(format!("In {}+{}", 2 * k + 1, 2 * k + 2)));
                             }
                             ui.close();
                         }
-                        if ui.button("Mono mix of all channels").clicked() {
+                        if crate::mapping::btn(ui, "Mono mix of all channels").clicked() {
                             self.checkpoint(p);
                             self.add_input_track(p, &d, Mode::Mix, Some(format!("{} mix", capture::short_label(&d.label))));
                             ui.close();
@@ -375,28 +396,28 @@ impl Daw {
                     });
                 }
             });
-            if ui.button("Import...").on_hover_text("Add audio files (WAV, FLAC, MP3 ...) as tracks. Files can also be dropped on the window.").clicked() && self.open_dlg.is_none() {
+            if crate::mapping::btn(ui, "Import...").on_hover_text("Add audio files (WAV, FLAC, MP3 ...) as tracks. Files can also be dropped on the window.").clicked() && self.open_dlg.is_none() {
                 self.open_dlg = Some(dialogs::open_many("Add audio files", "Audio files", decode::EXTENSIONS));
             }
             ui.menu_button("Edit", |ui| self.edit_menu(ui, p));
             ui.menu_button("Export", |ui| {
                 let range = self.range;
-                if ui.button(if range.is_some() { "Mix of the selection to WAV..." } else { "Mix to WAV..." }).clicked() {
+                if crate::mapping::btn(ui, if range.is_some() { "Mix of the selection to WAV..." } else { "Mix to WAV..." }).clicked() {
                     self.ask_export(Export::Mix(range));
                     ui.close();
                 }
-                if ui.button("Every track as its own WAV...").clicked() {
+                if crate::mapping::btn(ui, "Every track as its own WAV...").clicked() {
                     self.ask_export(Export::StemsDir);
                     ui.close();
                 }
                 if let Some(id) = self.sel.iter().next().copied() {
-                    if ui.button("Selected clip to WAV...").clicked() {
+                    if crate::mapping::btn(ui, "Selected clip to WAV...").clicked() {
                         self.ask_export(Export::Clip(id));
                         ui.close();
                     }
                 }
                 ui.separator();
-                if ui.button("Bounce mix to a new track").on_hover_text("Render the selection (or everything) into one new track").clicked() {
+                if crate::mapping::btn(ui, "Bounce mix to a new track").on_hover_text("Render the selection (or everything) into one new track").clicked() {
                     self.act_bounce(p, false);
                     ui.close();
                 }
@@ -406,12 +427,12 @@ impl Daw {
                 }
             });
             ui.menu_button("Project", |ui| {
-                if ui.button("New").clicked() {
+                if crate::mapping::btn(ui, "New").clicked() {
                     self.new_project(cx);
                     p.tracks.clear();
                     ui.close();
                 }
-                if ui.button("Open...").clicked() {
+                if crate::mapping::btn(ui, "Open...").clicked() {
                     self.open_clicked();
                     ui.close();
                 }
@@ -419,12 +440,12 @@ impl Daw {
                     self.save_clicked(false);
                     ui.close();
                 }
-                if ui.button("Save as...").clicked() {
+                if crate::mapping::btn(ui, "Save as...").clicked() {
                     self.save_clicked(true);
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("Add demo tracks").on_hover_text("Tone, sweep, noise and kick: something to edit and analyse").clicked() {
+                if crate::mapping::btn(ui, "Add demo tracks").on_hover_text("Tone, sweep, noise and kick: something to edit and analyse").clicked() {
                     self.demo();
                     ui.close();
                 }
@@ -449,7 +470,7 @@ impl Daw {
                             ui.selectable_value(&mut self.mon_dev, d.id.clone(), &d.label);
                         }
                     });
-                    ui.add(egui::Slider::new(&mut self.mon_vol, 0.0..=1.0).text("volume"));
+                    { let r = ui.add(egui::Slider::new(&mut self.mon_vol, 0.0..=1.0).text("volume")); crate::slider::reset(ui, &r, &mut self.mon_vol, 0.7); }
                 });
                 ui.separator();
                 ui.checkbox(&mut self.feed_analysers, "Show the timeline in the analysers").on_hover_text("Off: playing leaves the live input in the spectrum, scope, loudness ... windows.\nOn: they follow the timeline while it plays (the live input pauses).\n'Loop & play' in the analysis panel always does this.");
@@ -460,7 +481,7 @@ impl Daw {
                 ui.separator();
                 ui.add(egui::DragValue::new(&mut self.rec_off_ms).range(-500.0..=500.0).speed(0.5).suffix(" ms")).on_hover_text("Shift new recordings earlier by this much to make up for the interface latency");
                 ui.label(RichText::new("recording latency compensation").small().weak());
-                if ui.button("Rescan input devices").clicked() {
+                if crate::mapping::btn(ui, "Rescan input devices").clicked() {
                     let d2 = self.devs.clone();
                     std::thread::Builder::new().name("daw-probe".into()).spawn(move || *d2.lock() = Some(capture::probe_all())).ok();
                 }
@@ -836,7 +857,12 @@ impl Daw {
             }
         }
         if lane_resp.drag_started_by(egui::PointerButton::Primary) {
-            if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
+            if let Some((ti, _)) = ui.input(|i| i.pointer.press_origin()).and_then(|pos| Self::draw_row_at(p, &rows, pos)) {
+                // on a draw track the mouse draws
+                self.checkpoint(p);
+                self.draw_drag = Some((ti, None));
+                self.sel_track = Some(p.tracks[ti].id);
+            } else if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
                 let auto_grab = self.auto_hit(p, &view, &rows, pos);
                 if let Some(g) = auto_grab {
                     self.checkpoint(p);
@@ -869,7 +895,27 @@ impl Daw {
         }
         if lane_resp.dragged() {
             if let Some(ptr) = lane_resp.interact_pointer_pos() {
-                if let Some((ti, pt)) = self.auto_drag {
+                if let Some((ti, last)) = self.draw_drag {
+                    let row = rows[ti];
+                    let v = (((row.bottom() - 4.0 - ptr.y) / (row.height() - 8.0).max(1.0)).clamp(0.0, 1.0) * 2.0 - 1.0).clamp(-1.0, 1.0);
+                    let f = view.frame(ptr.x).max(0);
+                    // (a stroke is a point about every other pixel, not one for every mouse event)
+                    let min_gap = (view.sr / view.pps * 1.5) as i64;
+                    let t = &mut p.tracks[ti];
+                    match last {
+                        None => {
+                            t.curve_set(f, v);
+                            self.draw_drag = Some((ti, Some((f, v))));
+                            self.touch();
+                        }
+                        Some((lf, lv)) if (f - lf).abs() >= min_gap.max(1) => {
+                            t.curve_stroke(lf, lv, f, v);
+                            self.draw_drag = Some((ti, Some((f, v))));
+                            self.touch();
+                        }
+                        _ => {}
+                    }
+                } else if let Some((ti, pt)) = self.auto_drag {
                     // a point of the volume automation: along the time axis between its neighbours, and in level
                     if let Some(t) = p.tracks.get_mut(ti).filter(|t| pt < t.auto.len()) {
                         let lo = if pt > 0 { t.auto[pt - 1].0 + 1 } else { 0 };
@@ -961,6 +1007,15 @@ impl Daw {
                 }
             }
         }
+        if lane_resp.drag_stopped() {
+            self.draw_drag = None;
+        }
+        // holding the right button and moving pans the timeline (a right-click without moving still opens the menu)
+        if lane_resp.dragged_by(egui::PointerButton::Secondary) {
+            let dx = lane_resp.drag_delta().x;
+            self.t0 = (self.t0 - dx as f64 / self.pps).max(0.0);
+            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+        }
         if lane_resp.secondary_clicked() {
             if let Some(pos) = lane_resp.interact_pointer_pos() {
                 self.auto_ctx = self.auto_hit(p, &view, &rows, pos);
@@ -979,7 +1034,7 @@ impl Daw {
         }
         lane_resp.context_menu(|ui| {
             if let Some((ti, pt)) = self.auto_ctx {
-                if ui.button("Delete this automation point").clicked() {
+                if crate::mapping::btn(ui, "Delete this automation point").clicked() {
                     self.checkpoint(p);
                     if ti < p.tracks.len() && pt < p.tracks[ti].auto.len() {
                         p.tracks[ti].auto.remove(pt);
@@ -992,17 +1047,33 @@ impl Daw {
                 self.edit_menu(ui, p);
                 if let Some(id) = self.ctx_clip {
                     ui.separator();
-                    if ui.button("Select the clip's time range").clicked() {
+                    if crate::mapping::btn(ui, "Select the clip's time range").clicked() {
                         if let Some((ti, ci)) = p.find_clip(id) {
                             self.range = Some((p.tracks[ti].clips[ci].start, p.tracks[ti].clips[ci].end()));
                         }
                         ui.close();
                     }
                 }
+            } else if let Some(ti) = self.sel_track.and_then(|t| p.track_index(t)).filter(|&ti| p.tracks[ti].draw) {
+                if crate::mapping::btn(ui, "Clear the drawing").clicked() {
+                    self.checkpoint(p);
+                    p.tracks[ti].curve.clear();
+                    self.touch();
+                    ui.close();
+                }
+                if crate::mapping::btn(ui, "Smooth the drawing").on_hover_text("Average every point with its neighbours").clicked() {
+                    self.checkpoint(p);
+                    let c = p.tracks[ti].curve.clone();
+                    for i in 1..c.len().saturating_sub(1) {
+                        p.tracks[ti].curve[i].1 = (c[i - 1].1 + 2.0 * c[i].1 + c[i + 1].1) * 0.25;
+                    }
+                    self.touch();
+                    ui.close();
+                }
             } else {
                 if let Some(ti) = self.sel_track.and_then(|t| p.track_index(t)) {
                     let (tid, f) = (p.tracks[ti].id, self.ctx_frame);
-                    if ui.button(format!("Import audio file here ({})...", p.tracks[ti].name)).clicked() && self.open_dlg.is_none() {
+                    if crate::mapping::btn(ui, format!("Import audio file here ({})...", p.tracks[ti].name)).clicked() && self.open_dlg.is_none() {
                         self.import_target = Some((tid, f));
                         self.open_dlg = Some(dialogs::open_many("Add audio to the track", "Audio files", decode::EXTENSIONS));
                         ui.close();
@@ -1012,7 +1083,7 @@ impl Daw {
                     }
                     ui.separator();
                 }
-                if ui.button("Split everything here (S)").clicked() {
+                if crate::mapping::btn(ui, "Split everything here (S)").clicked() {
                     self.act_split(p);
                     ui.close();
                 }
@@ -1024,7 +1095,7 @@ impl Daw {
                     self.act_delete(p);
                     ui.close();
                 }
-                if ui.button("Select all (Ctrl+A)").clicked() {
+                if crate::mapping::btn(ui, "Select all (Ctrl+A)").clicked() {
                     self.act_select_all(p);
                     ui.close();
                 }
@@ -1060,7 +1131,7 @@ impl Daw {
         }
         egui::Popup::context_menu(&ruler_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             let (frame, hit) = self.ruler_ctx;
-            if ui.button("Add a marker here").clicked() {
+            if crate::mapping::btn(ui, "Add a marker here").clicked() {
                 self.checkpoint(p);
                 p.add_mark(frame, 0, None);
                 self.touch();
@@ -1083,21 +1154,21 @@ impl Daw {
                 }
                 let m = p.marks[i].clone();
                 if m.len > 0 {
-                    if ui.button("Select and loop this region").clicked() {
+                    if crate::mapping::btn(ui, "Select and loop this region").clicked() {
                         self.range = Some((m.at, m.at + m.len));
                         self.loop_on = true;
                         self.seek(m.at);
                         ui.close();
                     }
-                    if ui.button("Select this region").clicked() {
+                    if crate::mapping::btn(ui, "Select this region").clicked() {
                         self.range = Some((m.at, m.at + m.len));
                         ui.close();
                     }
-                } else if ui.button("Move the playhead here").clicked() {
+                } else if crate::mapping::btn(ui, "Move the playhead here").clicked() {
                     self.seek(m.at);
                     ui.close();
                 }
-                if ui.button("Delete").clicked() {
+                if crate::mapping::btn(ui, "Delete").clicked() {
                     self.checkpoint(p);
                     p.marks.remove(i);
                     self.touch();
@@ -1132,6 +1203,9 @@ impl Daw {
             let dimmed = t.mute || (p.tracks.iter().any(|o| o.solo) && !t.solo);
             for c in &t.clips {
                 self.draw_clip(&lp, &view, lane, c, col, selected_ids.contains(&c.id), chans, t.ch_mute, dimmed);
+            }
+            if t.draw {
+                self.draw_curve(&lp, &view, lane, row, t);
             }
             if !t.auto.is_empty() || self.auto_edit == Some(t.id) {
                 self.draw_auto(&lp, &view, lane, row, t);
@@ -1336,6 +1410,40 @@ impl Daw {
     }
 
     /// The volume automation of a track: a line over its lane, with dots to drag while it is being edited.
+    /// The drawing of a draw track: a zero line and the curve.
+    fn draw_curve(&self, lp: &Painter, view: &View, lane: Rect, row: Rect, t: &Track) {
+        let y_of = |v: f32| row.bottom() - 4.0 - ((v + 1.0) * 0.5).clamp(0.0, 1.0) * (row.height() - 8.0);
+        let col = track_color(t);
+        let y0 = y_of(0.0);
+        lp.line_segment([pos2(lane.left(), y0), pos2(lane.right(), y0)], Stroke::new(1.0, Color32::from_white_alpha(36)));
+        if t.curve.is_empty() {
+            lp.text(pos2(lane.left() + 6.0, row.center().y), Align2::LEFT_CENTER, "draw here with the mouse: a control signal from -1 to 1, not heard in the master mix", FontId::proportional(10.0), Color32::from_white_alpha(90));
+            return;
+        }
+        let mut pts: Vec<Pos2> = Vec::with_capacity(t.curve.len() + 2);
+        let first = t.curve[0];
+        pts.push(pos2(lane.left(), y_of(first.1)));
+        for (f, v) in &t.curve {
+            let x = view.x(*f);
+            // (points far outside the view are skipped, the line still passes through)
+            if x > lane.left() - 200.0 && x < lane.right() + 200.0 || pts.len() == 1 {
+                pts.push(pos2(x, y_of(*v)));
+            }
+        }
+        let last = t.curve[t.curve.len() - 1];
+        pts.push(pos2(lane.right(), y_of(last.1)));
+        lp.add(Shape::line(pts, Stroke::new(1.8, col)));
+    }
+
+    /// The track of a drawing under a position (its index, and the value the height means).
+    fn draw_row_at(p: &Project, rows: &[Rect], pos: Pos2) -> Option<(usize, f32)> {
+        let ti = rows.iter().position(|r| pos.y >= r.top() && pos.y < r.bottom())?;
+        let t = p.tracks.get(ti).filter(|t| t.draw)?;
+        let _ = t;
+        let row = rows[ti];
+        Some((ti, (((row.bottom() - 4.0 - pos.y) / (row.height() - 8.0).max(1.0)).clamp(0.0, 1.0) * 2.0 - 1.0)))
+    }
+
     fn draw_auto(&self, lp: &Painter, view: &View, lane: Rect, row: Rect, t: &Track) {
         let editing = self.auto_edit == Some(t.id);
         let y_of = |db: f32| row.bottom() - 4.0 - ((db - AUTO_RANGE.0) / (AUTO_RANGE.1 - AUTO_RANGE.0)).clamp(0.0, 1.0) * (row.height() - 8.0);
@@ -1586,24 +1694,24 @@ impl Daw {
                 self.auto_edit = if editing { Some(id) } else { None };
                 ui.close();
             }
-            if !p.tracks[ti].auto.is_empty() && ui.button("Clear the automation").clicked() {
+            if !p.tracks[ti].auto.is_empty() && crate::mapping::btn(ui, "Clear the automation").clicked() {
                 self.checkpoint(p);
                 p.tracks[ti].auto.clear();
                 self.touch();
                 ui.close();
             }
             ui.separator();
-            if ui.button("Rename").clicked() {
+            if crate::mapping::btn(ui, "Rename").clicked() {
                 self.renaming = Some((id, p.tracks[ti].name.clone()));
                 ui.close();
             }
-            if ui.button("Import audio file to this track...").on_hover_text("Place a file on this track at the playhead").clicked() && self.open_dlg.is_none() {
+            if crate::mapping::btn(ui, "Import audio file to this track...").on_hover_text("Place a file on this track at the playhead").clicked() && self.open_dlg.is_none() {
                 self.import_target = Some((id, if IMPORT_AT_START.load(Relaxed) { 0 } else { self.cursor }));
                 self.open_dlg = Some(dialogs::open_many("Add audio to the track", "Audio files", decode::EXTENSIONS));
                 ui.close();
             }
             if graph_on() {
-                if ui.button("Record from the Routing window").on_hover_text("Arms the track and adds a Timeline record node you can connect to anything").clicked() {
+                if crate::mapping::btn(ui, "Record from the Routing window").on_hover_text("Arms the track and adds a Timeline record node you can connect to anything").clicked() {
                     self.checkpoint(p);
                     p.tracks[ti].input = graph_input(id);
                     p.tracks[ti].arm = true;
@@ -1613,7 +1721,7 @@ impl Daw {
             } else {
                 ui.menu_button("Record input", |ui| self.input_menu(ui, p, ti));
             }
-            if p.tracks[ti].arm && ui.button("Disarm").clicked() {
+            if p.tracks[ti].arm && crate::mapping::btn(ui, "Disarm").clicked() {
                 p.tracks[ti].arm = false;
                 self.touch();
                 ui.close();
@@ -1623,23 +1731,23 @@ impl Daw {
                 let t = &p.tracks[ti];
                 if t.chan == Chan::Stereo || t.chan == Chan::Mono {
                     let mono = t.chan == Chan::Mono;
-                    if ui.button(if mono { "Back to stereo" } else { "Convert to mono" }).clicked() {
+                    if crate::mapping::btn(ui, if mono { "Back to stereo" } else { "Convert to mono" }).clicked() {
                         self.checkpoint(p);
                         p.tracks[ti].chan = if mono { Chan::Stereo } else { Chan::Mono };
                         ui.close();
                     }
-                    if ui.button("Split into left and right tracks").on_hover_text("Two tracks, panned hard left and hard right").clicked() {
+                    if crate::mapping::btn(ui, "Split into left and right tracks").on_hover_text("Two tracks, panned hard left and hard right").clicked() {
                         self.split_req = Some(id);
                         ui.close();
                     }
-                } else if ui.button("Back to stereo").clicked() {
+                } else if crate::mapping::btn(ui, "Back to stereo").clicked() {
                     self.checkpoint(p);
                     p.tracks[ti].chan = Chan::Stereo;
                     p.tracks[ti].pan = 0.0;
                     ui.close();
                 }
                 let expanded = p.tracks[ti].h >= 2;
-                if ui.button(if expanded { "Hide channel sub-tracks" } else { "Show channel sub-tracks" }).clicked() {
+                if crate::mapping::btn(ui, if expanded { "Hide channel sub-tracks" } else { "Show channel sub-tracks" }).clicked() {
                     p.tracks[ti].h = if expanded { 1 } else { 2 };
                     self.touch();
                     ui.close();
@@ -1689,7 +1797,7 @@ impl Daw {
                 *swap = Some((ti, ti + 1));
                 ui.close();
             }
-            if ui.button("Duplicate track").clicked() {
+            if crate::mapping::btn(ui, "Duplicate track").clicked() {
                 *dup = Some(ti);
                 ui.close();
             }
@@ -1704,7 +1812,7 @@ impl Daw {
                 self.act_merge_tracks(p, false);
                 ui.close();
             }
-            if ui.button("Delete track").clicked() {
+            if crate::mapping::btn(ui, "Delete track").clicked() {
                 *remove = Some(ti);
                 ui.close();
             }
@@ -1902,7 +2010,7 @@ impl Daw {
                         // level differences between the channels are the balance's job; a gain set here by an older version is shown so it can be cleared
                         if t.ch_db[k].abs() > 0.05 {
                             ui.label(RichText::new(format!("{:+.1} dB", t.ch_db[k])).small().weak());
-                            if ui.small_button("0 dB").on_hover_text("Clear the gain of this channel (use the balance for level differences between the channels)").clicked() {
+                            if crate::mapping::small_btn(ui, "0 dB").on_hover_text("Clear the gain of this channel (use the balance for level differences between the channels)").clicked() {
                                 t.ch_db[k] = 0.0;
                                 changed = true;
                                 ck = true;
@@ -1924,7 +2032,7 @@ impl Daw {
             ui.spacing_mut().item_spacing.x = 3.0;
             let mono = t.chan == Chan::Mono;
             if t.chan == Chan::Left || t.chan == Chan::Right {
-                if ui.small_button("Back to stereo").on_hover_text("Play both channels again").clicked() {
+                if crate::mapping::small_btn(ui, "Back to stereo").on_hover_text("Play both channels again").clicked() {
                     t.chan = Chan::Stereo;
                     t.pan = 0.0;
                     changed = true;
@@ -1936,7 +2044,7 @@ impl Daw {
                     changed = true;
                     ck = true;
                 }
-                if ui.small_button("Split L/R").on_hover_text("Make two tracks: the left channel panned left and the right channel panned right").clicked() {
+                if crate::mapping::small_btn(ui, "Split L/R").on_hover_text("Make two tracks: the left channel panned left and the right channel panned right").clicked() {
                     self.split_req = Some(id);
                 }
             }
@@ -1965,17 +2073,17 @@ impl Daw {
                 ui.label(RichText::new(format!("{} ch, {} Hz", d.ch, d.sr)).small().weak());
                 let mut pick: Option<Mode> = None;
                 for c in 0..d.ch.min(32) {
-                    if ui.button(format!("Channel {}", c + 1)).clicked() {
+                    if crate::mapping::btn(ui, format!("Channel {}", c + 1)).clicked() {
                         pick = Some(Mode::Chan(c));
                     }
                 }
                 ui.separator();
                 for k in 0..(d.ch / 2).min(16) {
-                    if ui.button(format!("Stereo pair {}+{}", 2 * k + 1, 2 * k + 2)).clicked() {
+                    if crate::mapping::btn(ui, format!("Stereo pair {}+{}", 2 * k + 1, 2 * k + 2)).clicked() {
                         pick = Some(Mode::Pair(k));
                     }
                 }
-                if ui.button("Mono mix of all channels").clicked() {
+                if crate::mapping::btn(ui, "Mono mix of all channels").clicked() {
                     pick = Some(Mode::Mix);
                 }
                 if let Some(m) = pick {
@@ -2063,7 +2171,7 @@ impl Daw {
             ui.label(RichText::new(format!("Analysis of the {what}, {src}   {} - {}", clock(a as f32 / p.sr as f32), clock(b as f32 / p.sr as f32))).small().color(Color32::from_rgb(170, 182, 200)));
             ui.selectable_value(&mut self.an_src, AnSrc::Master, "Master");
             ui.selectable_value(&mut self.an_src, AnSrc::Track, "Track");
-            if ui.small_button("Loop & play").on_hover_text("Play this stretch in a loop: all analysers (spectrum, scope, loudness ...) follow it").clicked() {
+            if crate::mapping::small_btn(ui, "Loop & play").on_hover_text("Play this stretch in a loop: all analysers (spectrum, scope, loudness ...) follow it").clicked() {
                 if self.range.is_none() && b > a {
                     self.range = Some((a, b));
                 }
@@ -2075,7 +2183,7 @@ impl Daw {
                 }
             }
             if let Some(out) = self.an_out.clone() {
-                if ui.small_button("Store spectrum as trace").on_hover_text("Add the averaged spectrum to the trace library (Response, Transfer and EQ windows can use it)").clicked() {
+                if crate::mapping::small_btn(ui, "Store spectrum as trace").on_hover_text("Add the averaged spectrum to the trace library (Response, Transfer and EQ windows can use it)").clicked() {
                     let name = format!("Timeline {what} ({})", src);
                     let avg: Vec<f32> = (0..out.f.len()).map(|i| 10.0 * (0.5 * (10f32.powf(out.db[0][i] / 10.0) + 10f32.powf(out.db[1][i] / 10.0))).max(1e-12).log10()).collect();
                     cx.lib.add(Some(name), out.f.clone(), avg, Vec::new());

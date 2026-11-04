@@ -80,10 +80,10 @@ impl Tool for Profiler {
                     ui.label(RichText::new(format!("{recent} hiccup(s) in the last minute")).strong().color(Color32::from_rgb(255, 170, 80)));
                 }
                 ui.label(RichText::new(format!("{total} since start")).small().weak());
-                if ui.small_button("Clear").clicked() {
+                if crate::mapping::small_btn(ui, "Clear").clicked() {
                     prof::clear();
                 }
-                if ui.small_button("Copy report").on_hover_text("Copy the numbers and the hiccup list to the clipboard").clicked() {
+                if crate::mapping::small_btn(ui, "Copy report").on_hover_text("Copy the numbers and the hiccup list to the clipboard").clicked() {
                     let mut s = format!("VisuScope {} profiler report\n", crate::VERSION_FULL);
                     s += &format!("timer latency worst {:.1} ms, input callback gap worst {:.1} ms, DPC {:.1} % (worst core {:.1} %), interrupts {:.1} %, CPU {:.0} %\n", last.wake_max_ms, last.cb_gap_max_ms, last.dpc, last.dpc_worst, last.intr, last.cpu);
                     for e in &events {
@@ -124,8 +124,13 @@ impl Tool for Profiler {
                 // the output cushion learns: it starts small and grows after a gap, shrinks while all is calm
                 let cush = (prof::C.out_cushion_ms.load(std::sync::atomic::Ordering::Relaxed) as f32 - safety).max(0.0);
                 let cush = if cush > 0.0 { cush } else { 30.0 };
-                let est = period + if cx.graph_on { block_ms } else { 0.0 } + cush + safety;
-                row(ui, "Input to output delay", format!("about {est:.0} ms (input buffer {period:.0} ms + {} + output cushion {cush:.0} ms, adjusted automatically + safety buffer {safety:.0} ms)", if cx.graph_on { format!("engine block {:.0} ms", (block_ms / 5.0).round() * 5.0) } else { "no engine".into() }), false);
+                let nodes_ms = if cx.graph_on { f32::from_bits(prof::C.path_ms.load(std::sync::atomic::Ordering::Relaxed)) } else { 0.0 };
+                let est = period + if cx.graph_on { block_ms } else { 0.0 } + cush + safety + nodes_ms;
+                if cx.graph_on {
+                    let (qms, skips) = (prof::C.out_queue_ms.load(std::sync::atomic::Ordering::Relaxed), prof::C.out_skips.load(std::sync::atomic::Ordering::Relaxed));
+                    row(ui, "Sound output queue", format!("{qms} ms queued (reserve wanted {cush:.0} ms + {safety:.0} ms safety){}", if skips > 0 { format!(", a backlog was skipped {skips} times") } else { String::new() }), qms as f32 > cush + safety + 80.0);
+                }
+                row(ui, "Input to output delay", format!("about {est:.0} ms (input buffer {period:.0} ms + {} + output cushion {cush:.0} ms, adjusted automatically + safety buffer {safety:.0} ms{})", if cx.graph_on { format!("engine block {:.0} ms", (block_ms / 5.0).round() * 5.0) } else { "no engine".into() }, if nodes_ms > 0.05 { format!(" + nodes {nodes_ms:.1} ms") } else { String::new() }), false);
             }
             bars(ui, "Timer latency", &secs, |s| s.wake_max_ms, 10.0, Some(5.0), " ms");
             bars(ui, "Input callback gap", &secs, |s| s.cb_gap_max_ms, (period * 3.0).max(20.0), if period > 0.0 { Some(period * 2.5 + 4.0) } else { None }, " ms");

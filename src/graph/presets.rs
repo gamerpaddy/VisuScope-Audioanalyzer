@@ -12,6 +12,27 @@ pub enum Preset {
     Analyze,
     /// the input into the analysers and onto a new armed timeline track
     Record,
+    /// the input through an equaliser to the output, and the analysers (tune the sound while looking)
+    MonitorEq,
+    /// the input through noise reduction to the output, and the analysers
+    Denoise,
+}
+
+impl Preset {
+    /// Every preset, for the menu.
+    pub const ALL: [Preset; 6] = [Preset::Analyze, Preset::Monitor, Preset::MonitorEq, Preset::Denoise, Preset::Measure, Preset::Record];
+
+    /// One line for the menu: what the patch is for.
+    pub fn about(self) -> &'static str {
+        match self {
+            Preset::Analyze => "Look at what comes in: spectrum, scope, loudness",
+            Preset::Monitor => "Hear the input on the output while looking at it",
+            Preset::MonitorEq => "Shape the sound with an equaliser while listening and looking",
+            Preset::Denoise => "Take steady noise out of the input (learn the noise in the node)",
+            Preset::Measure => "Play test signals out and measure what comes back (sweeps, tones)",
+            Preset::Record => "Record the input onto a new timeline track",
+        }
+    }
 }
 
 impl Preset {
@@ -21,12 +42,14 @@ impl Preset {
             Preset::Monitor => "Monitor: input to the analysers and to the output",
             Preset::Analyze => "Analyse: input to the analysers",
             Preset::Record => "Record: input to the analysers and to a new timeline track",
+            Preset::MonitorEq => "Equaliser: input through an equaliser to the output",
+            Preset::Denoise => "Noise reduction: input through noise reduction to the output",
         }
     }
 
     /// Whether the patch has an output device node (the wizard asks for the output then).
     pub fn uses_output(self) -> bool {
-        matches!(self, Preset::Measure | Preset::Monitor)
+        matches!(self, Preset::Measure | Preset::Monitor | Preset::MonitorEq | Preset::Denoise)
     }
 }
 
@@ -39,9 +62,20 @@ pub fn build(p: Preset, in_dev: &str, in_l: usize, in_r: usize, out_dev: &str) -
         n.p[0] = in_l.clamp(1, 32) as f32;
         n.p[1] = in_r.clamp(1, 32) as f32;
     }
-    let an = g.add(Kind::Analyzer, 400.0, 40.0);
+    let an = g.add(Kind::Analyzer, 740.0, 40.0);
     let _ = g.connect(inp, an, 0);
     match p {
+        Preset::MonitorEq | Preset::Denoise => {
+            let fx = g.add(if p == Preset::MonitorEq { Kind::Eq } else { Kind::NoiseRed }, 400.0, 40.0);
+            let out = g.add(Kind::Output, 740.0, 260.0);
+            if let Some(n) = g.node_mut(out) {
+                n.s = out_dev.to_string();
+            }
+            let _ = g.connect(inp, fx, 0);
+            let _ = g.connect(fx, out, 0);
+            // the analysers see what is heard
+            let _ = g.connect(fx, an, 0);
+        }
         Preset::Measure => {
             let generator = g.add(Kind::Generator, 40.0, 260.0);
             let out = g.add(Kind::Output, 400.0, 260.0);
@@ -72,7 +106,7 @@ mod tests {
 
     #[test]
     fn every_preset_is_a_complete_loop_free_patch() {
-        for p in [Preset::Measure, Preset::Monitor, Preset::Analyze, Preset::Record] {
+        for p in Preset::ALL {
             let g = build(p, "dev|1", 3, 4, "out|2");
             let h = Graph::decode(&g.encode()).unwrap();
             assert_eq!(h.nodes.len(), g.nodes.len(), "{p:?}");

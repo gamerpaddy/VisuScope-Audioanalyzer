@@ -52,12 +52,17 @@ pub struct Bus {
     pub virt_loop: Mutex<std::collections::HashSet<String>>,
     /// device of the first output node (tools that play sound use it while the graph is on; empty = default output)
     pub first_out: Mutex<String>,
+    /// where the listening probe plays: empty = the device of the first output node, PROBE_DEFAULT = the default output, else a device id
+    pub probe_dev: Mutex<String>,
     /// bands (frequency, gain, Q) the EQ design window wants in an equaliser node, and the preamp it asks for
     pub eq_send: Mutex<Option<(Vec<[f32; 3]>, f32)>>,
     /// the graph as text (for snapshots) and a graph text a snapshot wants put back
     pub graph_text: Mutex<String>,
     pub graph_restore: Mutex<Option<String>>,
 }
+
+/// `Bus::probe_dev`: the default output device.
+pub const PROBE_DEFAULT: &str = "\u{2}";
 
 pub fn bus() -> &'static Bus {
     static B: OnceLock<Bus> = OnceLock::new();
@@ -227,6 +232,7 @@ enum Rt {
     Crush(CrushUnit),
     Jit(JitterUnit),
     Trem(TremUnit),
+    Smooth(SmoothUnit),
     Mix { gain: [f32; MIX_MAX], mute: [bool; MIX_MAX], master: f32 },
     Split,
     Merge,
@@ -246,11 +252,39 @@ struct RtNode {
     out2: [Vec<f32>; 2],
     peak: [f32; 2],
     extra: f32,
+    /// the gain that was applied last (slot 0: input trim, gain node, output; the mixer uses one per input); NaN = not set yet
+    cur: [f32; MIX_MAX],
     rt: Rt,
+}
+
+/// A gain that changes is eased over the block that follows (a step makes a click): returns the gain at the first sample and the
+/// change per sample.
+fn span(cur: &mut f32, tgt: f32, n: usize) -> (f32, f32) {
+    if !cur.is_finite() {
+        *cur = tgt;
+    }
+    let g0 = *cur;
+    *cur = tgt;
+    (g0, (tgt - g0) / n.max(1) as f32)
+}
+
+/// What the followed parameters have now (node, parameter, value), for the display.
+pub static MOD_LIVE: Mutex<Vec<(NodeId, usize, f32)>> = Mutex::new(Vec::new());
+
+/// A parameter that follows a signal, in the running graph: the destination and source (indices of the nodes), a copy of the
+/// node whose parameter is set, the value it has now.
+struct RtMod {
+    dst: usize,
+    src: usize,
+    node: Node,
+    m: Modulation,
+    /// the value after the low-pass (what is applied)
+    last: f32,
 }
 
 struct Run {
     e: Arc<Engine>,
+    mods: Vec<RtMod>,
     rev: u64,
     rate: u32,
     nodes: Vec<RtNode>,
@@ -286,6 +320,7 @@ impl Run {
     fn new(e: Arc<Engine>) -> Run {
         Run {
             e,
+            mods: Vec::new(),
             rev: 0,
             rate: 48000,
             nodes: Vec::new(),
@@ -412,6 +447,7 @@ impl Run {
             Kind::Crusher => Rt::Crush(CrushUnit::default()),
             Kind::Jitter => Rt::Jit(JitterUnit::new(fs)),
             Kind::Tremolo => Rt::Trem(TremUnit::default()),
+            Kind::ControlLp => Rt::Smooth(SmoothUnit::default()),
             Kind::Mixer => Rt::Mix { gain: [1.0; MIX_MAX], mute: [false; MIX_MAX], master: 1.0 },
             Kind::Split => Rt::Split,
             Kind::Dual => Rt::Dual,
@@ -428,13 +464,18 @@ impl Run {
             Kind::Analyzer => Rt::None,
         };
         let out2 = if matches!(n.kind, Kind::Split | Kind::Dual) { blank() } else { [Vec::new(), Vec::new()] };
-        RtNode { id: n.id, kind: n.kind, bypass: false, src: Vec::new(), out: blank(), out2, peak: [0.0; 2], extra: 0.0, rt }
+        RtNode { id: n.id, kind: n.kind, bypass: false, src: Vec::new(), out: blank(), out2, peak: [0.0; 2], extra: 0.0, cur: [f32::NAN; MIX_MAX], rt }
     }
 
     /// Bring a runtime node in line with the parameters of its graph node.
     fn apply(&mut self, rn: &mut RtNode, n: &Node) {
-        let fs = self.rate as f32;
-        let default_in = self.e.default_in.lock().clone();
+        let (rate, e) = (self.rate, self.e.clone());
+        Self::apply_with(rate, &e, rn, n);
+    }
+
+    fn apply_with(rate: u32, e: &Arc<Engine>, rn: &mut RtNode, n: &Node) {
+        let fs = rate as f32;
+        let default_in = e.default_in.lock().clone();
         // parameters are limited to their ranges before they reach a filter
         let pv = n.clamped();
         match &mut rn.rt {
@@ -467,13 +508,13 @@ impl Run {
             Rt::Dist(u) => u.set(&pv, fs),
             Rt::Shift(u) => {
                 u.set(&pv, fs);
-                self.e.node_status.lock().insert(n.id, format!("delays the signal by {:.1} ms", u.latency() as f32 * 1000.0 / fs));
+                e.node_status.lock().insert(n.id, format!("delays the signal by {:.1} ms", u.latency() as f32 * 1000.0 / fs));
             }
             Rt::Phase(u) => {
                 u.set(&pv, fs);
                 let ms = u.latency() as f32 * 1000.0 / fs;
                 let st = if ms > 0.0 { format!("delays the signal by {ms:.1} ms") } else { String::new() };
-                self.e.node_status.lock().insert(n.id, st);
+                e.node_status.lock().insert(n.id, st);
             }
             Rt::Conv { u, path, loading } => {
                 u.set(&pv);
@@ -493,18 +534,19 @@ impl Run {
                         *loading = Some(slot);
                         "loading the impulse response...".to_string()
                     };
-                    self.e.node_status.lock().insert(n.id, st);
+                    e.node_status.lock().insert(n.id, st);
                 }
             }
             Rt::Nr(u) => {
                 u.set(&pv);
                 let st = if u.learning { "learning the noise: keep only the noise playing".to_string() } else { format!("delays by {:.1} ms{}", u.latency() as f32 * 1000.0 / fs, if u.has_profile() { ", profile stored" } else { "" }) };
-                self.e.node_status.lock().insert(n.id, st);
+                e.node_status.lock().insert(n.id, st);
             }
             Rt::Fuzz(u) => u.set(&pv, fs),
             Rt::Crush(u) => u.set(&pv),
             Rt::Jit(u) => u.set(&pv),
             Rt::Trem(u) => u.set(&pv, fs),
+            Rt::Smooth(u) => u.set(&pv, fs),
             Rt::Mix { gain, mute, master } => {
                 *master = db_to_lin(n.param(1));
                 for k in 0..MIX_MAX {
@@ -548,6 +590,13 @@ impl Run {
                 }
             }
         }
+        // the signals that parameters follow run as well, with everything that feeds them
+        let mut stack: Vec<NodeId> = g.mods.iter().filter(|m| live.contains(&m.node)).map(|m| m.src).collect();
+        while let Some(n) = stack.pop() {
+            if live.insert(n) {
+                stack.extend(g.edges.iter().filter(|e| e.to == n).map(|e| e.from));
+            }
+        }
         let mut old: HashMap<NodeId, RtNode> = self.nodes.drain(..).map(|n| (n.id, n)).collect();
         let mut idx: HashMap<NodeId, usize> = HashMap::new();
         let mut nodes: Vec<RtNode> = Vec::new();
@@ -565,6 +614,33 @@ impl Run {
         }
         drop(old);
         self.nodes = nodes;
+        self.mods = g.mods.iter().filter_map(|m| Some(RtMod { dst: *idx.get(&m.node)?, src: *idx.get(&m.src)?, node: g.node(m.node)?.clone(), m: *m, last: f32::NAN })).collect();
+        // the longest delay the nodes add between an input and an output (for the display of the total delay)
+        {
+            let fs = self.rate as f32;
+            let mut dp = vec![0f32; self.nodes.len()];
+            let mut total = 0f32;
+            for i in 0..self.nodes.len() {
+                let rn = &self.nodes[i];
+                let own = if rn.bypass {
+                    0.0
+                } else {
+                    match &rn.rt {
+                        Rt::Input { .. } => g.node(rn.id).map_or(0.0, |n| n.param(3).max(0.0)),
+                        Rt::Shift(u) => u.latency() as f32 * 1000.0 / fs,
+                        Rt::Phase(u) => u.latency() as f32 * 1000.0 / fs,
+                        Rt::Nr(u) => u.latency() as f32 * 1000.0 / fs,
+                        _ => 0.0,
+                    }
+                };
+                let up = rn.src.iter().flatten().map(|&(s, _)| dp[s]).fold(0.0, f32::max);
+                dp[i] = up + own;
+                if matches!(rn.rt, Rt::Out { .. }) {
+                    total = total.max(dp[i]);
+                }
+            }
+            prof::C.path_ms.store(total.to_bits(), Relaxed);
+        }
         self.master = self.nodes.iter().position(|n| n.kind == Kind::Input);
         self.sync_devices(g);
         // record nodes that are fed from the timeline (directly or through effects): internal loopbacks
@@ -659,7 +735,11 @@ impl Run {
             }
             if probe.is_some() {
                 self.probe_idle = Instant::now();
-                let dev = bus().first_out.lock().clone();
+                let dev = match bus().probe_dev.lock().as_str() {
+                    "" => bus().first_out.lock().clone(),
+                    PROBE_DEFAULT => String::new(),
+                    d => d.to_string(),
+                };
                 if self.probe_out.as_ref().is_none_or(|(_, d)| *d != dev) {
                     self.probe_q.lock().flush();
                     let h = monitor::start(self.probe_q.clone(), self.e.probe_gain.clone(), Some(dev.clone()).filter(|d| !d.is_empty()), self.probe_status.clone());
@@ -762,7 +842,7 @@ impl Run {
             match &mut self.nodes[self.master.unwrap()].rt {
                 Rt::Input { rs: Some(rs), .. } => {
                     // after a stall do not replay old audio: keep at most 0.3 s
-                    rs.trim(self.rate as usize * 3 / 10);
+                    rs.trim_out(self.rate as usize * 12 / 100);
                     rs.available()
                 }
                 _ => 0,
@@ -788,18 +868,19 @@ impl Run {
 
         // 4. sources that run on another clock must not pile up or run dry for long
         let safety = crate::prof::safety_ms() as usize;
-        let (keep_hi, keep_lo) = (self.rate as usize * (150 + 2 * safety) / 1000, self.rate as usize * (60 + safety) / 1000);
+        // (in frames of the graph rate: a source of a lower rate has fewer frames for the same time)
+        let (keep_hi, keep_lo) = (self.rate as usize * (100 + 2 * safety) / 1000, self.rate as usize * (40 + safety) / 1000);
         for (i, n) in self.nodes.iter_mut().enumerate() {
             let is_master = Some(i) == self.master && clocked;
             match &mut n.rt {
                 Rt::Input { rs: Some(rs), .. } if !is_master => {
-                    if rs.queued() > keep_hi * 2 {
-                        rs.trim(keep_lo * 2);
+                    if rs.queued_out() > keep_hi {
+                        rs.trim_out(keep_lo);
                     }
                 }
                 Rt::Tl { rs: Some(rs), .. } => {
-                    if rs.queued() > keep_hi * 2 {
-                        rs.trim(keep_lo * 2);
+                    if rs.queued_out() > keep_hi {
+                        rs.trim_out(keep_lo);
                     }
                 }
                 _ => {}
@@ -842,6 +923,26 @@ impl Run {
         let probe = *self.e.probe.lock();
         let probe_at = probe.and_then(|p| self.nodes.iter().position(|n| n.id == p.node).map(|i| (i, p)));
         let mute_outputs = probe_at.is_some() && self.e.probe_solo.load(Relaxed);
+        if !self.mods.is_empty() {
+            // the level of each followed signal over the block before (the signal is a block ahead of its parameter at most)
+            let e = self.e.clone();
+            for rm in self.mods.iter_mut() {
+                let b = &self.nodes[rm.src].out;
+                let len = n.min(b[0].len());
+                let mean = if len == 0 { 0.0 } else { (0..len).map(|k| 0.5 * (b[0][k] + b[1][k])).sum::<f32>() / len as f32 };
+                let v = rm.m.map(mean);
+                if rm.last.is_nan() || (v - rm.last).abs() > 1e-6 * (rm.m.out_hi - rm.m.out_lo).abs().max(1e-6) {
+                    rm.last = v;
+                    if let Some(slot) = rm.node.p.get_mut(rm.m.param) {
+                        *slot = v;
+                    }
+                    Self::apply_with(rate, &e, &mut self.nodes[rm.dst], &rm.node);
+                }
+            }
+            let mut live = MOD_LIVE.lock();
+            live.clear();
+            live.extend(self.mods.iter().map(|r| (r.m.node, r.m.param, r.last)));
+        }
         for i in 0..self.nodes.len() {
             let (before, rest) = self.nodes.split_at_mut(i);
             let node = &mut rest[0];
@@ -857,9 +958,13 @@ impl Run {
                     o0[got..n].fill(0.0);
                     o1[got..n].fill(0.0);
                     delay.process(&mut o0[..n], &mut o1[..n]);
-                    if (*gain - 1.0).abs() > 1e-6 {
-                        o0[..n].iter_mut().for_each(|v| *v *= *gain);
-                        o1[..n].iter_mut().for_each(|v| *v *= *gain);
+                    let (g0, dg) = span(&mut node.cur[0], *gain, n);
+                    if (g0 - 1.0).abs() > 1e-6 || dg != 0.0 {
+                        for k in 0..n {
+                            let g = g0 + dg * k as f32;
+                            o0[k] *= g;
+                            o1[k] *= g;
+                        }
                     }
                 }
                 Rt::Gen { st, idx } => {
@@ -890,12 +995,16 @@ impl Run {
                     o1[..n].fill(0.0);
                     for (p, s) in node.src.iter().enumerate() {
                         let Some((s, sp)) = s else { continue };
-                        if mute[p.min(MIX_MAX - 1)] {
+                        let pi = p.min(MIX_MAX - 1);
+                        // (a mute or a change of the level fades over the block)
+                        let tgt = if mute[pi] { 0.0 } else { gain[pi] * *master };
+                        let (g0, dg) = span(&mut node.cur[pi], tgt, n);
+                        if g0 == 0.0 && dg == 0.0 {
                             continue;
                         }
-                        let g = gain[p.min(MIX_MAX - 1)] * *master;
                         let src = outbuf(&before[*s], *sp);
                         for k in 0..n {
+                            let g = g0 + dg * k as f32;
                             o0[k] += src[0][k] * g;
                             o1[k] += src[1][k] * g;
                         }
@@ -951,9 +1060,15 @@ impl Run {
                     let port = |k: usize| node.src.get(k).copied().flatten().map(|(s, sp)| outbuf(&before[s], sp));
                     let have = gather_out(inp, port(0), port(1), separate, n, bl, br);
                     node.peak = peak2(&bl[..n], &br[..n], node.peak);
-                    if have && !*mute && !mute_outputs {
-                        bl[..n].iter_mut().for_each(|v| *v *= *gain);
-                        br[..n].iter_mut().for_each(|v| *v *= *gain);
+                    if have {
+                        // (muted: the stream goes on with silence, so that the sound output does not run dry and mistake it for a gap)
+                        let tgt = if *mute || mute_outputs { 0.0 } else { *gain };
+                        let (g0, dg) = span(&mut node.cur[0], tgt, n);
+                        for k in 0..n {
+                            let g = g0 + dg * k as f32;
+                            bl[k] *= g;
+                            br[k] *= g;
+                        }
                         band.process(&mut bl[..n], &mut br[..n], rate as f32);
                         let mut q = q.lock();
                         q.src_sr = rate;
@@ -1000,8 +1115,12 @@ impl Run {
                         let (l, r) = (&mut o0[..n], &mut o1[..n]);
                         match rt {
                             Rt::Gain(g) => {
-                                l.iter_mut().for_each(|v| *v *= *g);
-                                r.iter_mut().for_each(|v| *v *= *g);
+                                let (g0, dg) = span(&mut node.cur[0], *g, n);
+                                for k in 0..n {
+                                    let g = g0 + dg * k as f32;
+                                    l[k] *= g;
+                                    r[k] *= g;
+                                }
                             }
                             Rt::Width { w, b } => stereo_width(l, r, *w, *b),
                             Rt::Util(m) => utility(l, r, *m),
@@ -1029,6 +1148,7 @@ impl Run {
                             Rt::Crush(u) => u.process(l, r),
                             Rt::Jit(u) => u.process(l, r),
                             Rt::Trem(u) => u.process(l, r),
+                            Rt::Smooth(u) => u.process(l, r),
                             _ => {}
                         }
                     }
@@ -1423,6 +1543,37 @@ mod tests {
     }
 
     #[test]
+    fn a_parameter_follows_a_generator_signal_and_stays_inside_its_limits() {
+        // a sawtooth generator drives the gain of a node that passes a second, constant signal: the output level follows
+        let mut g = Graph::default();
+        let a = g.add(Kind::Generator, 0.0, 0.0);
+        let b = g.add(Kind::Generator, 0.0, 0.0);
+        let gain = g.add(Kind::Gain, 0.0, 0.0);
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.node_mut(a).unwrap().p[0] = 1.0;
+        g.node_mut(b).unwrap().p[0] = 2.0;
+        g.connect(b, gain, 0).unwrap();
+        g.connect(gain, an, 0).unwrap();
+        // the signal of generator 1 is a DC-like level (a steady wave is enough: its mean over a block is near zero, so the value sits in the middle)
+        assert!(g.set_modulation(Modulation { node: gain, param: 0, src: a, in_lo: -1.0, in_hi: 1.0, out_lo: -40.0, out_hi: 0.0, log: false }));
+        let mut ga = GenParams::default();
+        ga.wave = crate::tonegen::Wave::Sine;
+        let (mut run, _sh) = engine_with(g, vec![ga, GenParams::default()]);
+        for _ in 0..6 {
+            run.chunk(CHUNK, false);
+        }
+        assert_eq!(run.mods.len(), 1);
+        // the node follows: its gain is a value inside the range, set by the signal
+        let v = run.mods[0].node.p[0];
+        assert!((-40.0..=0.0).contains(&v), "{v}");
+        // a signal outside the input range clamps
+        run.mods[0].m.in_lo = 5.0;
+        run.mods[0].m.in_hi = 6.0;
+        run.chunk(CHUNK, false);
+        assert_eq!(run.mods[0].node.p[0], -40.0);
+    }
+
+    #[test]
     fn two_generators_mixed_and_bypass() {
         let mut g = Graph::default();
         let (a, b) = (g.add(Kind::Generator, 0.0, 0.0), g.add(Kind::Generator, 0.0, 0.0));
@@ -1482,6 +1633,64 @@ mod tests {
         let (l, r) = ring_tail(&sh, 16384);
         assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()), "NaN or infinity came out");
         assert!(l.iter().chain(r.iter()).all(|v| v.abs() < 1000.0), "the chain blew up");
+    }
+
+    /// Cost of every kind of node: milliseconds of processing for one second of audio (cargo test --release bench_nodes -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn bench_nodes() {
+        for rate in [48000u32, 192000] {
+            println!("---- {rate} Hz");
+            for kind in Kind::ALL.into_iter().filter(|k| !k.is_source() && !k.is_sink() && !matches!(k, Kind::Mixer | Kind::Split | Kind::Merge | Kind::Dual)) {
+                let mut g = Graph::default();
+                let gn = g.add(Kind::Generator, 0.0, 0.0);
+                let id = g.add(kind, 0.0, 0.0);
+                g.connect(gn, id, 0).unwrap();
+                let an = g.add(Kind::Analyzer, 0.0, 0.0);
+                g.connect(id, an, 0).unwrap();
+                let (mut run, _sh) = engine_with(g, vec![GenParams { on: true, level_db: [-6.0; 2], ..GenParams::default() }]);
+                run.rate = rate;
+                let g2 = run.e.graph.lock().clone();
+                run.rebuild(&g2);
+                for _ in 0..20 {
+                    run.tick(Some(1024));
+                }
+                let frames = rate as usize;
+                let t = std::time::Instant::now();
+                let mut done = 0;
+                while done < frames {
+                    run.tick(Some(1024));
+                    done += 1024;
+                }
+                let ms = t.elapsed().as_secs_f64() * 1000.0 * (frames as f64 / done as f64);
+                println!("{:28} {:7.2} ms per second of audio", kind.name(), ms);
+            }
+        }
+    }
+
+    #[test]
+    fn a_gain_that_changes_is_eased_and_a_mute_fades() {
+        // a steady signal through a gain node: when the gain jumps from 0 dB to -20 dB the output has no step
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let gain = g.add(Kind::Gain, 0.0, 0.0);
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.connect(gn, gain, 0).unwrap();
+        g.connect(gain, an, 0).unwrap();
+        let (mut run, sh) = engine_with(g.clone(), vec![GenParams { on: true, level_db: [-6.0; 2], freq: 100.0, ..GenParams::default() }]);
+        for _ in 0..8 {
+            run.tick(Some(1024));
+        }
+        let mut g2 = g.clone();
+        g2.node_mut(gain).unwrap().p[0] = -20.0;
+        run.rebuild(&g2);
+        for _ in 0..4 {
+            run.tick(Some(1024));
+        }
+        let (l, _) = ring_tail(&sh, 4096);
+        // a 100 Hz sine at 48 kHz changes by at most 2 pi 100 / 48000 = 0.013 per sample (times 0.5 for -6 dB): a click would be larger
+        let worst = l.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        assert!(worst < 0.02, "a step of {worst} in the signal");
     }
 
     #[test]

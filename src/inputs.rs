@@ -14,17 +14,44 @@ impl App {
         if self.map.learning.is_some() || !ctx.egui_wants_keyboard_input() {
             let events = ctx.input(|i| i.events.clone());
             for e in events {
-                if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = e {
-                    mapping::push_event(Src::Key { key: key.name().to_string(), ctrl: modifiers.command, shift: modifiers.shift, alt: modifiers.alt }, 1.0);
+                if let egui::Event::Key { key, pressed, repeat: false, modifiers, .. } = e {
+                    // Escape ends the learning instead of becoming the binding
+                    if pressed && key == egui::Key::Escape && self.map.learning.is_some() {
+                        self.map.cancel_learning();
+                        continue;
+                    }
+                    mapping::push_event(Src::Key { key: key.name().to_string(), ctrl: modifiers.command, shift: modifiers.shift, alt: modifiers.alt }, if pressed { 1.0 } else { 0.0 });
                 }
             }
         }
+        self.map.serve_menus();
+        mapping::MEDIA_WANTED.store(self.map.learning.is_some() || self.map.bindings.iter().any(|b| matches!(&b.src, Src::Key { key, .. } if mapping::MEDIA_KEYS.contains(&key.as_str()))), std::sync::atomic::Ordering::Relaxed);
+        self.sync_bound_controls();
         let defs = std::mem::take(&mut self.map_defs);
         let fired = self.map.poll(&defs);
         self.map_defs = defs;
         for f in fired {
-            self.run_action(ctx, &f.action, f.value);
+            let momentary = self.map.binding(&f.action).is_some_and(|b| b.momentary);
+            if momentary {
+                // follows the input: only switch when the state differs from what the input says
+                match self.action_state(&f.action) {
+                    Some(cur) => {
+                        if cur != (f.value >= 0.5) {
+                            self.run_action(ctx, &f.action, 1.0);
+                        }
+                    }
+                    None if f.action.starts_with("mixm:") => self.run_action(ctx, &f.action.replacen("mixm:", "mixs:", 1), f.value),
+                    None => {
+                        if f.value >= 0.5 {
+                            self.run_action(ctx, &f.action, 1.0);
+                        }
+                    }
+                }
+            } else {
+                self.run_action(ctx, &f.action, f.value);
+            }
         }
+        self.learning_note(ctx);
         if self.map.dirty {
             self.map.save();
         }
@@ -33,6 +60,59 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         self.mappings_ui(ctx);
+    }
+
+    /// The controls of the windows that have a binding are listed with the fixed actions.
+    fn sync_bound_controls(&mut self) {
+        let stat: Vec<String> = mapping::actions().into_iter().map(|d| d.id).collect();
+        let mut extra: Vec<mapping::ActionDef> = Vec::new();
+        for b in &self.map.bindings {
+            if stat.contains(&b.action) {
+                continue;
+            }
+            let slider = mapping::is_dyn_slider(&b.action).then_some((b.lim.0, b.lim.1, b.log, ""));
+            extra.push(mapping::ActionDef { id: b.action.clone(), label: if b.label.is_empty() { b.action.clone() } else { b.label.clone() }, group: "Controls in the windows", slider });
+        }
+        let same = {
+            let cur: Vec<&mapping::ActionDef> = self.map_defs.iter().filter(|d| d.group == "Controls in the windows").collect();
+            cur.len() == extra.len() && cur.iter().zip(&extra).all(|(a, b)| a.id == b.id && a.label == b.label)
+        };
+        if !same {
+            self.map_defs.retain(|d| d.group != "Controls in the windows");
+            self.map_defs.extend(extra);
+        }
+    }
+
+    /// While a control waits for its input (and the editor is closed) a note says so.
+    fn learning_note(&mut self, ctx: &egui::Context) {
+        if self.map.open {
+            return;
+        }
+        let Some(id) = self.map.learning.clone() else { return };
+        let label = self.map.learn_meta.as_ref().map(|m| m.label.clone()).or_else(|| self.map_defs.iter().find(|d| d.id == id).map(|d| d.label.clone())).unwrap_or(id);
+        egui::Area::new(egui::Id::new("learn_note")).order(egui::Order::Tooltip).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0)).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{label}: press a key or button, or move a knob, fader or axis")).color(Color32::from_rgb(255, 200, 90)));
+                    if ui.button("Cancel (Esc)").clicked() {
+                        self.map.cancel_learning();
+                    }
+                });
+            });
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    /// The on / off state of a switch, when it has one.
+    fn action_state(&self, id: &str) -> Option<bool> {
+        match id {
+            "freeze" => Some(self.p.paused),
+            "monitor" => Some(self.mon_on),
+            "generator" => Some(self.tg.on),
+            "assistant" => Some(self.assist.open),
+            x if x.starts_with("win:") => (0..WIN_COUNT).find(|&i| win_short(i) == &x[4..]).map(|i| self.wins[i].open),
+            _ => None,
+        }
     }
 
     fn tool_command(&mut self, short: &str, cmd: &str) {
@@ -62,6 +142,15 @@ impl App {
             "daw_play" => self.tool_command("Timeline", "play"),
             "daw_record" => self.tool_command("Timeline", "record"),
             "daw_loop" => self.tool_command("Timeline", "loop"),
+            "daw_home" => self.tool_command("Timeline", "home"),
+            "daw_zoom_in" => self.tool_command("Timeline", "zoom_in"),
+            "daw_zoom_out" => self.tool_command("Timeline", "zoom_out"),
+            "daw_fit" => self.tool_command("Timeline", "fit"),
+            x if x.starts_with("btn:") => {
+                // a button of a window that is drawn: it acts as if clicked on the next frame
+                mapping::request_press(x);
+                ctx.request_repaint();
+            }
             "daw_marker" => self.tool_command("Timeline", "marker"),
             "daw_split" => self.tool_command("Timeline", "split"),
             "daw_undo" => self.tool_command("Timeline", "undo"),
@@ -71,6 +160,21 @@ impl App {
             "graph_ab" => self.tool_command("Routing", "ab"),
             "graph_undo" => self.tool_command("Routing", "undo"),
             "graph_redo" => self.tool_command("Routing", "redo"),
+            x if x.starts_with("node:") => {
+                // node:<id>:<parameter>
+                let mut it = x[5..].split(':');
+                if let (Some(n), Some(p)) = (it.next(), it.next()) {
+                    self.tool_command("Routing", &format!("setp\t{n}\t{p}\t{v}"));
+                }
+            }
+            x if x.starts_with("mixm:") || x.starts_with("mixs:") => {
+                // mixm:<id>:<input> switches the mute; mixs: sets it (a momentary binding: 1 while held, 0 when let go)
+                let mut it = x[5..].split(':');
+                if let (Some(n), Some(k)) = (it.next(), it.next()) {
+                    let how = if x.starts_with("mixs:") { format!("{}", (v >= 0.5) as u8) } else { "t".to_string() };
+                    self.tool_command("Routing", &format!("mute\t{n}\t{k}\t{how}"));
+                }
+            }
             x if x.starts_with("layout_") => {
                 if let Some(n) = x[7..].parse::<usize>().ok().filter(|n| *n >= 1) {
                     self.apply_preset_index(n - 1);
@@ -120,19 +224,36 @@ impl App {
                         if waiting {
                             ui.label(RichText::new(if slider.is_some() { "move a knob, fader or axis ..." } else { "press a key or a button ..." }).small().color(Color32::from_rgb(255, 200, 90)));
                             if ui.small_button("Cancel").clicked() {
-                                self.map.learning = None;
+                                self.map.cancel_learning();
                             }
                         } else {
                             let (r, _) = ui.allocate_exact_size(egui::vec2(190.0, 18.0), egui::Sense::hover());
                             ui.painter().with_clip_rect(r).text(r.left_center(), egui::Align2::LEFT_CENTER, bound.clone().unwrap_or_else(|| "-".into()), egui::FontId::monospace(10.5), if bound.is_some() { Color32::from_gray(220) } else { Color32::from_gray(110) });
                             if ui.small_button("Learn").clicked() {
                                 self.map.learning = Some(id.clone());
+                                self.map.learn_meta = None;
                             }
                             if bound.is_some() && ui.small_button("Clear").clicked() {
                                 self.map.clear(&id);
                             }
                         }
                     });
+                    // a button that is on while held, or switches at each press
+                    if slider.is_none() && !matches!(id.as_str(), "png" | "reset_minmax" | "tile" | "daw_home" | "daw_zoom_in" | "daw_zoom_out" | "daw_fit" | "daw_marker" | "daw_split" | "daw_undo" | "daw_redo" | "graph_undo" | "graph_redo") && !id.starts_with("layout_") {
+                        if let Some(bi) = self.map.bindings.iter().position(|b| b.action == id) {
+                            if self.action_state(&id).is_some() || id.starts_with("mixm:") {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(24.0);
+                                    let b = &mut self.map.bindings[bi];
+                                    let mut ch = ui.radio_value(&mut b.momentary, false, "toggle").changed();
+                                    ch |= ui.radio_value(&mut b.momentary, true, "momentary (on while held)").changed();
+                                    if ch {
+                                        self.map.dirty = true;
+                                    }
+                                });
+                            }
+                        }
+                    }
                     // a slider's range, and whether the control works the other way round
                     if let (Some((lo, hi, _, unit)), Some(bi)) = (slider, self.map.bindings.iter().position(|b| b.action == id)) {
                         ui.horizontal(|ui| {
@@ -144,6 +265,7 @@ impl App {
                             ui.label(RichText::new("to").small().weak());
                             ch |= ui.add(egui::DragValue::new(&mut b.max).range(lo..=hi).speed((hi - lo) * 0.002).suffix(unit)).changed();
                             ch |= ui.checkbox(&mut b.invert, "reversed").changed();
+                            ui.label(RichText::new("(a key or button: lowest when released, highest when pressed)").small().weak());
                             if ch {
                                 self.map.dirty = true;
                             }
@@ -156,7 +278,7 @@ impl App {
         });
         if !open {
             self.map.open = false;
-            self.map.learning = None;
+            self.map.cancel_learning();
         }
     }
 }

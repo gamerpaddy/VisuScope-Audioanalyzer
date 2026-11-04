@@ -780,15 +780,15 @@ impl App {
                     ctx.set_cursor_icon(egui::CursorIcon::Grab);
                 }
                 tr.context_menu(|ui| {
-                    if ui.button("Pop out to own window").clicked() {
+                    if crate::mapping::btn(ui, "Pop out to own window").clicked() {
                         e.pop = true;
                         ui.close();
                     }
-                    if ui.button(if maximized { "Restore" } else { "Maximise" }).clicked() {
+                    if crate::mapping::btn(ui, if maximized { "Restore" } else { "Maximise" }).clicked() {
                         e.max = true;
                         ui.close();
                     }
-                    if ui.button("Tile all windows").clicked() {
+                    if crate::mapping::btn(ui, "Tile all windows").clicked() {
                         e.tile = true;
                         ui.close();
                     }
@@ -949,12 +949,14 @@ impl App {
                 self.layouts_menu(ui);
                 self.snapshots_menu(ui);
                 ui.separator();
-                if ui.button("Tile").on_hover_text("Fill the area without gaps; visual windows get the most space").clicked() {
+                let tb = crate::mapping::btn(ui, "Tile").on_hover_text("Fill the area without gaps; visual windows get the most space");
+                crate::mapping::button_menu(&tb, &crate::mapping::Target::toggle("tile", "Tile the windows", false));
+                if tb.clicked() {
                     self.need_tile = true;
                 }
                 ui.checkbox(&mut self.auto_tile, "Auto").on_hover_text("Re-tile automatically when a window is opened or closed");
                 ui.checkbox(&mut self.snap_on, "Snap").on_hover_text("Windows snap to each other and dock against the edges.\nCtrl while dragging: free. Alt while resizing: do not move neighbours.");
-                if ui.button("Reset layout").on_hover_text("Default windows, tiled").clicked() {
+                if crate::mapping::btn(ui, "Reset layout").on_hover_text("Default windows, tiled").clicked() {
                     for i in 0..WIN_COUNT {
                         self.wins[i] = WinState::new(i);
                         self.popped[i] = false;
@@ -963,13 +965,17 @@ impl App {
                 }
                 ui.separator();
                 let lbl = if self.p.paused { "Resume" } else { "Freeze" };
-                if ui.selectable_label(self.p.paused, lbl).on_hover_text("Freeze the analysis").clicked() {
+                let fb = ui.selectable_label(self.p.paused, lbl).on_hover_text("Freeze the analysis");
+                crate::mapping::button_menu(&fb, &crate::mapping::Target::toggle("freeze", "Freeze / resume the analysis", true));
+                if fb.clicked() {
                     self.p.paused = !self.p.paused;
                 }
-                if ui.button("PNG").on_hover_text("Save a screenshot").clicked() {
+                let pb = crate::mapping::btn(ui, "PNG").on_hover_text("Save a screenshot");
+                crate::mapping::button_menu(&pb, &crate::mapping::Target::toggle("png", "Save a screenshot", false));
+                if pb.clicked() {
                     self.request_png(ui.ctx());
                 }
-                if ui.button("Options").on_hover_text("Frame rate, window behaviour, folders ...").clicked() {
+                if crate::mapping::btn(ui, "Options").on_hover_text("Frame rate, window behaviour, folders ...").clicked() {
                     self.opts_open = !self.opts_open;
                 }
                 });
@@ -1013,6 +1019,14 @@ impl App {
                     for (text, col) in &statuses {
                         ui.add(egui::Label::new(egui::RichText::new(text).small().strong().color(*col)).truncate());
                     }
+                });
+                ui.separator();
+                let delay = match crate::prof::total_delay_ms(self.graph_on) {
+                    Some(ms) => format!("In to out delay {ms:.0} ms"),
+                    None => "In to out delay -".to_string(),
+                };
+                cell(ui, 140.0, &mut |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&delay).small()).truncate()).on_hover_text("From the input device to the output device: buffers, the engine block, the output cushion, the safety buffer and what the nodes add (shifter, phase ...)");
                 });
                 ui.separator();
                 let perf = format!("UI {:.0} fps ({:.1} ms)   DSP {:.0} fps ({:.2} ms)", self.ui_fps, self.ms[WIN_COUNT], self.an.dsp_fps, self.an.dsp_ms);

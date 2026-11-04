@@ -797,6 +797,29 @@ impl JitterUnit {
     }
 }
 
+/// A one-pole low-pass (a smoothing of a control signal): the output eases towards the input with a time constant.
+#[derive(Clone, Default)]
+pub struct SmoothUnit {
+    a: f32,
+    y: [f32; 2],
+}
+
+impl SmoothUnit {
+    pub fn set(&mut self, p: &[f32], fs: f32) {
+        let ms = p.first().copied().unwrap_or(50.0).max(0.01);
+        self.a = 1.0 - (-1.0 / (ms * 0.001 * fs.max(1.0))).exp();
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        for i in 0..l.len() {
+            self.y[0] += self.a * (l[i] - self.y[0]);
+            self.y[1] += self.a * (r[i] - self.y[1]);
+            l[i] = self.y[0];
+            r[i] = self.y[1];
+        }
+    }
+}
+
 /// Tremolo: the level swings with a low frequency oscillator.
 #[derive(Clone, Default)]
 pub struct TremUnit {
@@ -871,6 +894,17 @@ impl Rs {
 
     pub fn queued(&self) -> usize {
         self.buf.len()
+    }
+
+    /// What is queued, in frames of the graph rate (the queue itself holds frames of the source rate).
+    pub fn queued_out(&self) -> usize {
+        if self.same_rate() { self.buf.len() } else { (self.buf.len() as f64 / self.ratio) as usize }
+    }
+
+    /// `trim` with `keep` in frames of the graph rate.
+    pub fn trim_out(&mut self, keep: usize) {
+        let k = if self.same_rate() { keep } else { (keep as f64 * self.ratio) as usize };
+        self.trim(k);
     }
 
     /// Drop the oldest frames so that no more than `keep` remain (drift control).

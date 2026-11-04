@@ -283,7 +283,7 @@ impl App {
             ui.spacing_mut().item_spacing = vec2(5.0, 3.0);
             let s = &mut self.scope;
             let run_txt = if s.running { "Stop" } else { "Run" };
-            if ui.button(run_txt).clicked() {
+            if crate::mapping::btn(ui, run_txt).clicked() {
                 s.running = !s.running;
             }
             ui.checkbox(&mut s.show[0], RichText::new("L").color(CH_COLORS[0]));
@@ -302,7 +302,7 @@ impl App {
                 ui.selectable_value(&mut s.rising, true, "Rising");
                 ui.selectable_value(&mut s.rising, false, "Falling");
             });
-            if s.mode == 2 && ui.button("Arm").clicked() {
+            if s.mode == 2 && crate::mapping::btn(ui, "Arm").clicked() {
                 s.armed = true;
             }
             // The level spans full scale (+-1 FS, or +-volts when calibrated) whatever part of it is on screen.

@@ -28,6 +28,7 @@ impl Tool for Daw {
                     }
                 }
                 (Some("loop"), _) => self.loop_on = !self.loop_on,
+                (Some("home"), _) => self.seek(0),
                 (Some("master"), Some(v)) => {
                     if let Some(db) = v.parse::<f32>().ok().filter(|v| v.is_finite()) {
                         self.proj.lock().master_db = db.clamp(-60.0, 12.0);
@@ -35,7 +36,7 @@ impl Tool for Daw {
                     }
                 }
                 // edits need the window (they act on what it shows); with it closed they are dropped, not stored for later
-                (Some(x @ ("marker" | "split" | "undo" | "redo")), _) if visible => self.edit_cmds.push(x.to_string()),
+                (Some(x @ ("marker" | "split" | "undo" | "redo" | "zoom_in" | "zoom_out" | "fit")), _) if visible => self.edit_cmds.push(x.to_string()),
                 _ => {}
             }
         }
@@ -118,7 +119,7 @@ impl Tool for Daw {
             (Some("import"), Some(path)) => self.import(vec![PathBuf::from(path)]),
             (Some("demo"), _) => self.demo(),
             // from the input mappings: handled by the next update (or the next drawing for the edits)
-            (Some(x @ ("play" | "record" | "loop" | "marker" | "split" | "undo" | "redo")), _) => self.cmds.push(x.to_string()),
+            (Some(x @ ("play" | "record" | "loop" | "home" | "marker" | "split" | "undo" | "redo" | "zoom_in" | "zoom_out" | "fit")), _) => self.cmds.push(x.to_string()),
             (Some("master"), Some(v)) => self.cmds.push(format!("master\t{v}")),
             _ => {}
         }

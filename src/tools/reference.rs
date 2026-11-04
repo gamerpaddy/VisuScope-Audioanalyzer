@@ -255,7 +255,7 @@ impl Tool for Reference {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.ch, 0, RichText::new("L").color(CH_COLORS[0]));
             ui.selectable_value(&mut self.ch, 1, RichText::new("R").color(CH_COLORS[1]));
-            if ui.button("Capture live").on_hover_text("Store the averaged spectrum as a reference curve").clicked() {
+            if crate::mapping::btn(ui, "Capture live").on_hover_text("Store the averaged spectrum as a reference curve").clicked() {
                 let n = self.refs.len() + 1;
                 let ch = self.ch;
                 self.from_spectrum(format!("capture {n}"), |f| spec_at(cx.an, &cx.an.avg[ch], f));
@@ -302,10 +302,10 @@ impl Tool for Reference {
                     }
                     ui.add_enabled(r.limits.is_none(), egui::DragValue::new(&mut r.tol).range(0.1..=60.0).speed(0.1).prefix("+/-").suffix(" dB"));
                     ui.add(egui::DragValue::new(&mut r.offset).range(-200.0..=200.0).speed(0.1).prefix("shift ").suffix(" dB"));
-                    if ui.small_button("save").clicked() && self.save.is_none() {
+                    if crate::mapping::small_btn(ui, "save").clicked() && self.save.is_none() {
                         self.save = Some((dialogs::save("Save reference", "CSV", &["csv"], format!("{}.csv", r.name)), i));
                     }
-                    if ui.small_button("x").clicked() {
+                    if crate::mapping::small_btn(ui, "x").clicked() {
                         remove = Some(i);
                     }
                     ui.end_row();
@@ -360,10 +360,10 @@ impl Tool for Reference {
             pick(ui, "ref_b", &mut b);
             self.a = a;
             self.b = b;
-            if ui.button("swap").clicked() {
+            if crate::mapping::btn(ui, "swap").clicked() {
                 std::mem::swap(&mut self.a, &mut self.b);
             }
-            if ui.button("Align live to ref at 1 kHz").on_hover_text("Shift the selected mask / reference so it meets the live level at 1 kHz").clicked() {
+            if crate::mapping::btn(ui, "Align live to ref at 1 kHz").on_hover_text("Shift the selected mask / reference so it meets the live level at 1 kHz").clicked() {
                 if let (Some(i), Some(live)) = (self.mask.or(match self.b { Src::Ref(k) => Some(k), _ => None }), spec_at(cx.an, &cx.an.avg[self.ch], 1000.0)) {
                     if let Some(r) = self.refs.get_mut(i) {
                         if let Some(v) = interp(&r.pts, 1000.0) {

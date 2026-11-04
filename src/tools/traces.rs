@@ -233,7 +233,7 @@ impl Library {
             if let Some(r) = self.rel {
                 let name = self.items.get(r).map(|m| m.name.clone()).unwrap_or_default();
                 ui.label(RichText::new(format!("relative to {name}")).small().color(Color32::from_rgb(255, 214, 10)));
-                if ui.small_button("absolute").clicked() {
+                if crate::mapping::small_btn(ui, "absolute").clicked() {
                     self.rel = None;
                 }
             }
@@ -249,7 +249,7 @@ impl Library {
                     if ui.selectable_label(self.rel == Some(i), "ref").on_hover_text("Show every curve relative to this one (A - B)").clicked() {
                         self.rel = if self.rel == Some(i) { None } else { Some(i) };
                     }
-                    if ui.small_button("x").clicked() {
+                    if crate::mapping::small_btn(ui, "x").clicked() {
                         del = Some(i);
                     }
                 });

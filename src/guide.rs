@@ -183,7 +183,7 @@ impl App {
                     ui.add(egui::DragValue::new(&mut w.in_l).range(1..=32));
                     ui.label("Right / B channel");
                     ui.add(egui::DragValue::new(&mut w.in_r).range(1..=32));
-                    if ui.small_button("same for both").on_hover_text("One microphone: use its channel for left and right").clicked() {
+                    if crate::mapping::small_btn(ui, "same for both").on_hover_text("One microphone: use its channel for left and right").clicked() {
                         w.in_r = w.in_l;
                     }
                 });
@@ -210,7 +210,7 @@ impl App {
                             w.cal_dlg = Some((slot, dialogs::open("Microphone calibration file", "Calibration", &["txt", "cal", "csv", "frd"])));
                         }
                         ui.label(RichText::new(shown.unwrap_or_else(|| "none".into())).small().weak());
-                        if w.cal[slot].is_some() && ui.small_button("x").clicked() {
+                        if w.cal[slot].is_some() && crate::mapping::small_btn(ui, "x").clicked() {
                             w.cal[slot] = None;
                         }
                     });
@@ -281,18 +281,18 @@ impl App {
                 back = true;
             }
             if step == Step::Review {
-                if ui.button(RichText::new("Set up").strong()).clicked() {
+                if crate::mapping::btn(ui, RichText::new("Set up").strong()).clicked() {
                     finish = true;
                 }
             } else {
-                if step == Step::Calibration && w.cal.iter().all(|c| c.is_none()) && ui.button("Skip").clicked() {
+                if step == Step::Calibration && w.cal.iter().all(|c| c.is_none()) && crate::mapping::btn(ui, "Skip").clicked() {
                     next = true;
                 }
-                if ui.button(RichText::new("Next").strong()).clicked() {
+                if crate::mapping::btn(ui, RichText::new("Next").strong()).clicked() {
                     next = true;
                 }
             }
-            if ui.button("Cancel").clicked() {
+            if crate::mapping::btn(ui, "Cancel").clicked() {
                 cancel = true;
             }
         });

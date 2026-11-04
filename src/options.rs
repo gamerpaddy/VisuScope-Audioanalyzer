@@ -88,9 +88,10 @@ impl App {
             // the size is applied with the button: the slider itself would grow or shrink under the pointer while it is dragged
             let mut v = self.ui_scale_edit.unwrap_or(self.ui_scale);
             ui.horizontal(|ui| {
-                let mut ch = ui.add(egui::Slider::new(&mut v, 0.7..=3.0).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)).text("text and widgets")).changed();
+                let sr = ui.add(egui::Slider::new(&mut v, 0.7..=3.0).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)).text("text and widgets"));
+                let mut ch = sr.changed() | crate::slider::reset(ui, &sr, &mut v, 1.0);
                 for (label, p) in [("100", 1.0f32), ("150", 1.5), ("200", 2.0), ("250", 2.5)] {
-                    if ui.small_button(label).clicked() {
+                    if crate::mapping::small_btn(ui, label).clicked() {
                         v = p;
                         ch = true;
                     }
@@ -105,7 +106,7 @@ impl App {
                     self.ui_scale = v;
                     self.ui_scale_edit = None;
                 }
-                if pending && ui.button("Cancel").clicked() {
+                if pending && crate::mapping::btn(ui, "Cancel").clicked() {
                     self.ui_scale_edit = None;
                 }
                 ui.label(RichText::new(format!("now {:.0} %", self.ui_scale * 100.0)).small().weak());
@@ -113,14 +114,13 @@ impl App {
             ui.label(RichText::new("Makes everything larger or smaller, for high-resolution screens (Ctrl + plus / Ctrl + minus do the same at once). The windows keep their arrangement.").small().weak());
             ui.separator();
             ui.label(RichText::new("Routing").strong());
-            ui.checkbox(&mut self.graph_on, "Routing graph (node editor)").on_hover_text("Connect all inputs and outputs in one window, with effects in between. The separate input / output pickers of the other windows are hidden while it is on.");
-            ui.label(RichText::new("Off by default. Inputs, generators, the timeline and the output devices become nodes; the analysers read what you connect to the Analyzer node.").small().weak());
+            ui.label(RichText::new("Inputs, generators, the timeline and the output devices are nodes in the Routing window; the analysers read what you connect to the Analyzer node. The Presets menu there sets up a patch for a task.").small().weak());
             ui.separator();
             ui.label(RichText::new("Safety buffer").strong());
             ui.horizontal(|ui| {
-                ui.add(egui::Slider::new(&mut self.safety_ms, 0..=500).suffix(" ms").text("extra delay"));
+                { let r = ui.add(egui::Slider::new(&mut self.safety_ms, 0..=500).suffix(" ms").text("extra delay")); crate::slider::reset(ui, &r, &mut self.safety_ms, 0); }
                 for (label, v) in [("off", 0u32), ("40", 40), ("100", 100), ("250", 250)] {
-                    if ui.small_button(label).clicked() {
+                    if crate::mapping::small_btn(ui, label).clicked() {
                         self.safety_ms = v;
                     }
                 }
@@ -128,13 +128,13 @@ impl App {
             ui.label(RichText::new("Holds back that much audio before it is played (output devices, monitor, timeline playback) and cushions the sources of the routing graph, so short stalls of the system do not become gaps or crackles. It adds the same amount of delay: raise it when the Profiler reports an output that ran dry.").small().weak());
             ui.separator();
             ui.label(RichText::new("Performance").strong());
-            ui.add(egui::Slider::new(&mut self.fps_cap, 15.0..=241.0).text("UI frame rate cap").custom_formatter(|v, _| if v > 240.0 { "max".into() } else { format!("{v:.0}") }));
-            ui.add(egui::Slider::new(&mut self.readout_hz, 0.5..=10.0).text("Readout update rate (Hz)"));
+            { let r = ui.add(egui::Slider::new(&mut self.fps_cap, 15.0..=241.0).text("UI frame rate cap").custom_formatter(|v, _| if v > 240.0 { "max".into() } else { format!("{v:.0}") })); crate::slider::reset(ui, &r, &mut self.fps_cap, 60.0); }
+            { let r = ui.add(egui::Slider::new(&mut self.readout_hz, 0.5..=10.0).text("Readout update rate (Hz)")); crate::slider::reset(ui, &r, &mut self.readout_hz, 3.0); }
             ui.checkbox(&mut self.readout_hold, "Hold the numeric readouts");
             ui.separator();
             ui.label(RichText::new("Input mappings").strong());
             ui.horizontal(|ui| {
-                if ui.button("Keys, MIDI and controllers...").on_hover_text("Bind keys, MIDI notes and controllers, game controller and joystick buttons and axes to actions and sliders").clicked() {
+                if crate::mapping::btn(ui, "Keys, MIDI and controllers...").on_hover_text("Bind keys, MIDI notes and controllers, game controller and joystick buttons and axes to actions and sliders").clicked() {
                     self.map.open = true;
                 }
                 ui.label(RichText::new(format!("{} bound", self.map.bindings.len())).small().weak());
@@ -145,7 +145,7 @@ impl App {
             ui.horizontal(|ui| {
                 let dir = crate::tools::dialogs::last_dir().map(|d| d.display().to_string()).unwrap_or_else(|| "none yet (Documents)".into());
                 ui.label(RichText::new(format!("Open / save dialogs start in: {dir}")).small());
-                if ui.small_button("Forget").clicked() {
+                if crate::mapping::small_btn(ui, "Forget").clicked() {
                     crate::tools::dialogs::forget_dir();
                 }
             });

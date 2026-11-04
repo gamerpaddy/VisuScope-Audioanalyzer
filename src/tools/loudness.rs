@@ -295,7 +295,7 @@ impl Tool for Loudness {
     fn ui(&mut self, ui: &mut Ui, _cx: &mut Ctx) {
         let target = self.target();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Reset").on_hover_text("Restart the integrated measurement and peaks").clicked() {
+            if crate::mapping::btn(ui, "Reset").on_hover_text("Restart the integrated measurement and peaks").clicked() {
                 if let Some(e) = &mut self.eng {
                     e.reset();
                 }

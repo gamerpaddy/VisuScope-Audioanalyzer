@@ -94,6 +94,13 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
             t.in_ms,
             t.invert as u8
         );
+        if t.draw {
+            let _ = writeln!(out, "drawtrack {}", t.id);
+            if !t.curve.is_empty() {
+                let pts: Vec<String> = t.curve.iter().map(|(f, v)| format!("{f}:{v}")).collect();
+                let _ = writeln!(out, "curve {}|{}", t.id, pts.join(","));
+            }
+        }
         if !t.auto.is_empty() {
             let pts: Vec<String> = t.auto.iter().map(|(f, d)| format!("{f}:{d}")).collect();
             let _ = writeln!(out, "auto {}|{}", t.id, pts.join(","));
@@ -142,6 +149,24 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
             proj.sr = v.trim().parse().unwrap_or(48000).clamp(8000, 384000);
         } else if let Some(v) = l.strip_prefix("master ") {
             proj.master_db = v.trim().parse().unwrap_or(0.0);
+        } else if let Some(r) = l.strip_prefix("drawtrack ") {
+            if let Some(ti) = r.trim().parse::<u32>().ok().and_then(|id| proj.track_index(id)) {
+                proj.tracks[ti].draw = true;
+            }
+        } else if let Some(r) = l.strip_prefix("curve ") {
+            if let Some((id, pts)) = r.split_once('|') {
+                if let Some(ti) = id.trim().parse::<u32>().ok().and_then(|id| proj.track_index(id)) {
+                    for pt in pts.split(',') {
+                        if let Some((fr, v)) = pt.split_once(':') {
+                            if let (Ok(fr), Ok(v)) = (fr.trim().parse::<i64>(), v.trim().parse::<f32>()) {
+                                if v.is_finite() && fr >= 0 {
+                                    proj.tracks[ti].curve_set(fr.min(i64::MAX / 4), v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         } else if let Some(r) = l.strip_prefix("auto ") {
             if let Some((id, pts)) = r.split_once('|') {
                 if let Some(ti) = id.trim().parse::<u32>().ok().and_then(|id| proj.track_index(id)) {
@@ -193,6 +218,8 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 invert: f.get(17) == Some(&"1"),
                 input: Input { dev: unesc(f[8]), mode: mode_parse(f[9]) },
                 h: f[7].parse::<u8>().unwrap_or(1).min(2),
+                draw: false,
+                curve: Vec::new(),
             });
         } else if let Some(r) = l.strip_prefix("clip ") {
             let f: Vec<&str> = r.split('|').collect();
