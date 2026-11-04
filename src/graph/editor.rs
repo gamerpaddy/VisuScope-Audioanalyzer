@@ -945,9 +945,15 @@ impl Routing {
     }
 
     fn param_row(ui: &mut Ui, n: &mut Node, i: usize, label_w: f32) -> bool {
+        Self::param_row_max(ui, n, i, label_w, None)
+    }
+
+    /// A parameter row; `max` limits the upper end of the slider (the channels of the device, for instance).
+    fn param_row_max(ui: &mut Ui, n: &mut Node, i: usize, label_w: f32, max: Option<f32>) -> bool {
         let z = ui.spacing().interact_size.y / 16.0;
         let defs = n.kind.info().params;
         let Some(d) = defs.get(i) else { return false };
+        let hi = max.map_or(d.max, |m| m.min(d.max).max(d.min + 0.01));
         if n.p.len() <= i {
             n.p.resize(i + 1, d.def);
         }
@@ -987,12 +993,12 @@ impl Routing {
                 }
             } else {
                 // the value box next to the slider takes the width of the longest value it will show
-                let digits = if d.unit == " us" { 7 } else { format!("{:.1}", d.max.abs().max(d.min.abs())).len() + usize::from(d.min < 0.0) };
+                let digits = if d.unit == " us" { 7 } else { format!("{:.1}", hi.abs().max(d.min.abs())).len() + usize::from(d.min < 0.0) };
                 let value_w = (digits + d.unit.len()) as f32 * 7.4 + 22.0;
                 ui.spacing_mut().slider_width = (ui.available_width() - value_w * z - 8.0 * z).max(30.0 * z);
-                let int = d.unit.is_empty() && d.max - d.min >= 1.0 && d.min.fract() == 0.0 && d.def.fract() == 0.0;
+                let int = d.unit.is_empty() && hi - d.min >= 1.0 && d.min.fract() == 0.0 && d.def.fract() == 0.0;
                 // right-click the track: back to the default; right-click the value box: reset, follow a signal, bind to an input
-                let t = crate::mapping::Target::slider(format!("node:{}:{}", n.id, i), format!("{} #{}: {}", n.kind.info().name, n.id, d.name), d.min, d.max, d.log, d.unit);
+                let t = crate::mapping::Target::slider(format!("node:{}:{}", n.id, i), format!("{} #{}: {}", n.kind.info().name, n.id, d.name), d.min, hi, d.log, d.unit);
                 let nid = n.id;
                 let fmt = if int {
                     crate::slider::Fmt { int: true, ..crate::slider::Fmt::new(d.unit, 0) }
@@ -1007,12 +1013,12 @@ impl Routing {
                 if followed {
                     // the slider shows the value the signal gives it, live (what is dragged here does not count)
                     let mut shown = super::engine::MOD_LIVE.lock().iter().find(|m| m.0 == nid && m.1 == i).map(|m| m.2).filter(|v| v.is_finite()).unwrap_or(n.p[i]);
-                    crate::slider::bound(ui, &mut shown, d.min, d.max, d.log, d.def, &t, fmt, |_| {});
+                    crate::slider::bound(ui, &mut shown, d.min, hi, d.log, d.def, &t, fmt, |_| {});
                 } else {
-                    changed |= crate::slider::bound(ui, &mut n.p[i], d.min, d.max, d.log, d.def, &t, fmt, |_| {});
+                    changed |= crate::slider::bound(ui, &mut n.p[i], d.min, hi, d.log, d.def, &t, fmt, |_| {});
                 }
                 // the control input of the value: at the left edge of the node, in the row
-                param_port(ui, z, pos2(ui.max_rect().left() - 10.0 * z, ui.min_rect().center().y), nid, i, (d.min, d.max, d.log, d.unit));
+                param_port(ui, z, pos2(ui.max_rect().left() - 10.0 * z, ui.min_rect().center().y), nid, i, (d.min, hi, d.log, d.unit));
             }
         });
         changed
@@ -1059,7 +1065,8 @@ impl Routing {
                     if let Some(c) = ch_n {
                         n.p[i] = n.p[i].min(c as f32);
                     }
-                    ch |= Self::param_row(ui, n, i, 52.0);
+                    // (the slider ends at the last channel of the device)
+                    ch |= Self::param_row_max(ui, n, i, 52.0, ch_n.map(|c| c as f32));
                 }
                 ch |= Self::param_row(ui, n, 2, 52.0);
                 ch |= Self::param_row(ui, n, 3, 52.0);

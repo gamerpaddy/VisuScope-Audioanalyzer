@@ -122,7 +122,7 @@ impl ScopeState {
             last_trig: long_ago,
             meas: Default::default(),
             meas_t: long_ago,
-            grade: false,
+            grade: std::env::var_os("VISUSCOPE_GRADE").is_some(),
             grade_n: 24.0,
             grade_gain: 1.0,
             heat: Default::default(),
@@ -296,11 +296,12 @@ impl ScopeState {
             return;
         }
         self.heat_look = look;
-        let k = self.grade_gain.max(0.01) * (1.0 - decay_of(self.grade_n)) * 6.0;
-        // heat -> brightness through a table (an exponential and a power per pixel would take too long every frame)
+        // the brightest pixel is full brightness (whatever the signal: a steady sine and a busy mix look alike); gain > 1 lets the
+        // brightest 1 / gain of that reach it. The table maps heat to brightness (a power per pixel would take too long every frame).
+        let maxh = self.heat.iter().flat_map(|m| m.iter().copied()).fold(0f32, f32::max);
+        let top = (maxh / self.grade_gain.max(0.05)).max(1e-3);
         const LUT_N: usize = 1024;
-        let top = 4.0 / k;
-        let lut: Vec<f32> = (0..=LUT_N).map(|i| (1.0 - (-(i as f32 / LUT_N as f32 * top) * k).exp()).powf(0.8)).collect();
+        let lut: Vec<f32> = (0..=LUT_N).map(|i| (i as f32 / LUT_N as f32).powf(0.55)).collect();
         let at = |v: f32| lut[((v / top * LUT_N as f32) as usize).min(LUT_N)];
         let cols = [CH_COLORS[0], CH_COLORS[1]];
         let mut px = Vec::with_capacity(w * h);
@@ -451,6 +452,21 @@ impl App {
         });
 
         let sh = self.sh.clone();
+        // test hook (screenshots): VISUSCOPE_SCOPE_DEMO=1 feeds a sine with a little noise and a second tone into the analysis
+        if std::env::var_os("VISUSCOPE_SCOPE_DEMO").is_some() {
+            use std::sync::atomic::AtomicU64;
+            static PH: AtomicU64 = AtomicU64::new(0);
+            sh.sr.store(48000, Relaxed);
+            let start = PH.fetch_add(800, Relaxed);
+            let mut r = sh.ring.lock();
+            let mut x = start as u32 ^ 0x9E37_79B9;
+            for i in 0..800u64 {
+                let t = (start + i) as f32 / 48000.0;
+                x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                let n = ((x >> 8) as f32 / 8388608.0 - 1.0) * 0.03;
+                r.push(0.6 * (std::f32::consts::TAU * 500.0 * t).sin() + n, 0.4 * (std::f32::consts::TAU * 1500.0 * t).sin() + 0.2 * (std::f32::consts::TAU * 500.0 * t).sin());
+            }
+        }
         self.scope.acquire(&sh, scale);
         self.scope.update_meas(scale);
 
