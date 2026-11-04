@@ -597,6 +597,9 @@ impl Run {
                 stack.extend(g.edges.iter().filter(|e| e.to == n).map(|e| e.from));
             }
         }
+        // a change of a setting rebuilds the running graph while the sound goes on: only a graph that starts from nothing restarts
+        // the clock (resetting it on every change lost the time since the last block, and a slider that is dragged changes 60 times a second)
+        let fresh = self.nodes.is_empty();
         let mut old: HashMap<NodeId, RtNode> = self.nodes.drain(..).map(|n| (n.id, n)).collect();
         let mut idx: HashMap<NodeId, usize> = HashMap::new();
         let mut nodes: Vec<RtNode> = Vec::new();
@@ -653,8 +656,10 @@ impl Run {
         let want: Vec<u32> = g.nodes.iter().filter(|n| n.kind == Kind::TimelineOut).filter_map(|n| n.s.parse().ok()).collect();
         *bus().want_tracks.lock() = want;
         bus().on.store(true, Relaxed);
-        self.carry = 0.0;
-        self.last_tick = Instant::now();
+        if fresh {
+            self.carry = 0.0;
+            self.last_tick = Instant::now();
+        }
         let (a, b) = (self.nodes.iter().filter(|n| n.kind == Kind::Input).count(), self.nodes.len());
         *self.e.status.lock() = format!("{} Hz, {b} nodes, {a} inputs", self.rate);
     }
@@ -1666,6 +1671,27 @@ mod tests {
                 println!("{:28} {:7.2} ms per second of audio", kind.name(), ms);
             }
         }
+    }
+
+    #[test]
+    fn changing_a_setting_does_not_restart_the_clock() {
+        // a graph without an input runs on the clock of the engine: a rebuild for a changed setting (60 times a second while a slider
+        // is dragged) must not throw away the time that has passed since the last block
+        let mut g = Graph::default();
+        let gn = g.add(Kind::Generator, 0.0, 0.0);
+        let gain = g.add(Kind::Gain, 0.0, 0.0);
+        let an = g.add(Kind::Analyzer, 0.0, 0.0);
+        g.connect(gn, gain, 0).unwrap();
+        g.connect(gain, an, 0).unwrap();
+        let (mut run, _sh) = engine_with(g.clone(), vec![GenParams { on: true, ..GenParams::default() }]);
+        let before = Instant::now() - Duration::from_millis(3);
+        run.last_tick = before;
+        run.carry = 0.37;
+        let mut g2 = g.clone();
+        g2.node_mut(gain).unwrap().p[0] = -9.0;
+        run.rebuild(&g2);
+        assert_eq!(run.last_tick, before);
+        assert_eq!(run.carry, 0.37);
     }
 
     #[test]
