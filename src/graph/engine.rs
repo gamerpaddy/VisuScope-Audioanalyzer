@@ -4,7 +4,7 @@
 //! frames); without one the engine follows the wall clock.
 
 use super::dsp::*;
-use super::fx::{ConvUnit, NoiseRedUnit, PhaseUnit};
+use super::fx::{ConvUnit, NoiseRedUnit, PhaseUnit, ShiftUnit};
 use super::model::*;
 use crate::prof;
 use crate::shared::Shared;
@@ -220,6 +220,7 @@ enum Rt {
     Dly(DelayUnit),
     Dist(DistUnit),
     Phase(PhaseUnit),
+    Shift(Box<ShiftUnit>),
     Conv { u: Box<ConvUnit>, path: String, loading: Option<IrLoad> },
     Nr(Box<NoiseRedUnit>),
     Fuzz(FuzzUnit),
@@ -404,6 +405,7 @@ impl Run {
             Kind::Delay => Rt::Dly(DelayUnit::new(2.0, fs)),
             Kind::Distortion => Rt::Dist(DistUnit::default()),
             Kind::Phase => Rt::Phase(PhaseUnit::default()),
+            Kind::Shifter => Rt::Shift(Box::new(ShiftUnit::new())),
             Kind::Convolver => Rt::Conv { u: Box::new(ConvUnit::new()), path: String::new(), loading: None },
             Kind::NoiseRed => Rt::Nr(Box::new(NoiseRedUnit::new())),
             Kind::Fuzz => Rt::Fuzz(FuzzUnit::default()),
@@ -463,6 +465,10 @@ impl Run {
             Rt::Gate(u) => u.set(&pv, fs),
             Rt::Dly(u) => u.set(&pv, fs),
             Rt::Dist(u) => u.set(&pv, fs),
+            Rt::Shift(u) => {
+                u.set(&pv, fs);
+                self.e.node_status.lock().insert(n.id, format!("delays the signal by {:.1} ms", u.latency() as f32 * 1000.0 / fs));
+            }
             Rt::Phase(u) => {
                 u.set(&pv, fs);
                 let ms = u.latency() as f32 * 1000.0 / fs;
@@ -1016,6 +1022,7 @@ impl Run {
                             Rt::Dly(u) => u.process(l, r),
                             Rt::Dist(u) => u.process(l, r),
                             Rt::Phase(u) => u.process(l, r),
+                            Rt::Shift(u) => u.process(l, r),
                             Rt::Conv { u, .. } => u.process(l, r),
                             Rt::Nr(u) => u.process(l, r),
                             Rt::Fuzz(u) => u.process(l, r),
@@ -1167,7 +1174,7 @@ mod tests {
         let (l, r) = ring_tail(&sh, 4096);
         assert!(l.iter().chain(r.iter()).all(|v| v.abs() < 1e-5), "the inverted copy cancels the original");
         // every new effect passes a signal without blowing up (with no file loaded the convolution passes the signal)
-        for kind in [Kind::Phase, Kind::Convolver, Kind::NoiseRed, Kind::Distortion] {
+        for kind in [Kind::Phase, Kind::Shifter, Kind::Convolver, Kind::NoiseRed, Kind::Distortion] {
             let mut g = Graph::default();
             let gn = g.add(Kind::Generator, 0.0, 0.0);
             let fx = g.add(kind, 0.0, 0.0);

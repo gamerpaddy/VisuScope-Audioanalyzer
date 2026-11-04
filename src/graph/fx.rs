@@ -97,6 +97,186 @@ impl PhaseUnit {
     }
 }
 
+// ---------------------------------------------------------------------- frequency shifter
+
+/// A Hilbert transformer of `taps` (odd) taps, windowed; `taps / 2` is its delay.
+fn hilbert_taps(taps: usize) -> Vec<f32> {
+    let d = (taps - 1) / 2;
+    (0..taps)
+        .map(|k| {
+            let m = k as isize - d as isize;
+            if m % 2 == 0 {
+                return 0.0;
+            }
+            let x = k as f32 / (taps - 1) as f32;
+            let w = 0.42 - 0.5 * (2.0 * PI * x).cos() + 0.08 * (4.0 * PI * x).cos();
+            2.0 / (PI * m as f32) * w
+        })
+        .collect()
+}
+
+const DEEP_TAPS: usize = 16383;
+const DEEP_BLOCK: usize = 512;
+
+/// Frequency shifter: every frequency of the signal moves by the same number of Hz (single sideband: the analytic signal times a
+/// rotating phasor). Down by 30 kHz makes a 40 kHz bat call a 10 kHz chirp, up by 100 Hz makes 10 Hz infrasound audible as 110 Hz.
+/// What would fall below 0 Hz (shifting down) or above half the sample rate (shifting up) is filtered off first.
+pub struct ShiftUnit {
+    up: bool,
+    shift: f64,
+    mix: f32,
+    deep: bool,
+    filter: bool,
+    fs: f32,
+    theta: f64,
+    pre: super::dsp::FilterUnit,
+    key: (bool, u32),
+    // the short Hilbert transformer (direct form)
+    hilbert: Vec<f32>,
+    hist: [Vec<f32>; 2],
+    pos: usize,
+    // the long one (partitioned convolution) and the dry signal delayed to match
+    conv: Option<ConvUnit>,
+    dry: [Vec<f32>; 2],
+    dpos: usize,
+    scratch: [Vec<f32>; 2],
+    scratch_im: [Vec<f32>; 2],
+}
+
+const SHORT_TAPS: usize = 511;
+
+impl ShiftUnit {
+    pub fn new() -> Self {
+        Self {
+            up: false,
+            shift: 1000.0,
+            mix: 1.0,
+            deep: false,
+            filter: true,
+            fs: 48000.0,
+            theta: 0.0,
+            pre: Default::default(),
+            key: (false, 0),
+            hilbert: hilbert_taps(SHORT_TAPS),
+            hist: [vec![0.0; SHORT_TAPS * 2], vec![0.0; SHORT_TAPS * 2]],
+            pos: 0,
+            conv: None,
+            dry: [Vec::new(), Vec::new()],
+            dpos: 0,
+            scratch: [Vec::new(), Vec::new()],
+            scratch_im: [Vec::new(), Vec::new()],
+        }
+    }
+
+    /// `p`: direction (0 down, 1 up), shift in Hz, quality (0 short, 1 deep), filter (0 on), mix in %.
+    pub fn set(&mut self, p: &[f32], fs: f32) {
+        self.fs = fs;
+        self.up = p.first().copied().unwrap_or(0.0) >= 0.5;
+        self.shift = (p.get(1).copied().unwrap_or(1000.0) as f64).clamp(0.0, fs as f64 * 0.49);
+        let deep = p.get(2).copied().unwrap_or(0.0) >= 0.5;
+        self.filter = p.get(3).copied().unwrap_or(0.0) < 0.5;
+        self.mix = p.get(4).copied().unwrap_or(100.0) * 0.01;
+        if deep != self.deep || (deep && self.conv.is_none()) || self.key.1 != fs as u32 {
+            self.deep = deep;
+            self.key.1 = fs as u32;
+            if deep {
+                let mut c = ConvUnit::with_block(DEEP_BLOCK);
+                let h = hilbert_taps(DEEP_TAPS);
+                c.load(vec![h.clone(), h], 1.0, DEEP_BLOCK, DEEP_TAPS as f32 / fs);
+                c.set(&[100.0, 0.0]);
+                self.conv = Some(c);
+                let len = self.latency();
+                self.dry = [vec![0.0; len], vec![0.0; len]];
+                self.dpos = 0;
+            } else {
+                self.conv = None;
+            }
+        }
+        // what would fold over is removed before shifting
+        if self.filter {
+            let (low, f) = if self.up { (true, fs as f64 * 0.5 - self.shift) } else { (false, self.shift) };
+            if f > 20.0 && f < fs as f64 * 0.47 {
+                self.pre.set(&[if low { 1.0 } else { 0.0 }, f as f32, 1.0], fs);
+            } else {
+                self.pre = Default::default();
+            }
+        } else {
+            self.pre = Default::default();
+        }
+    }
+
+    /// Frames the node delays the signal by.
+    pub fn latency(&self) -> usize {
+        if self.deep { (DEEP_TAPS - 1) / 2 + DEEP_BLOCK } else { (SHORT_TAPS - 1) / 2 }
+    }
+
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        if self.filter {
+            self.pre.process(l, r);
+        }
+        let n = l.len();
+        // the analytic signal: the input delayed by the latency (re) and its Hilbert transform (im)
+        // (buffers kept between blocks: nothing is allocated while audio runs)
+        let (mut re, mut im) = ([std::mem::take(&mut self.scratch[0]), std::mem::take(&mut self.scratch[1])], [std::mem::take(&mut self.scratch_im[0]), std::mem::take(&mut self.scratch_im[1])]);
+        for c in 0..2 {
+            re[c].clear();
+            re[c].resize(n, 0.0);
+            im[c].clear();
+            im[c].resize(n, 0.0);
+        }
+        if let Some(conv) = self.conv.as_mut() {
+            im[0].copy_from_slice(l);
+            im[1].copy_from_slice(r);
+            let [i0, i1] = &mut im;
+            conv.process(i0, i1);
+            let len = self.dry[0].len();
+            for (c, x) in [&*l, &*r].into_iter().enumerate() {
+                let mut p = self.dpos;
+                for i in 0..n {
+                    re[c][i] = self.dry[c][p];
+                    self.dry[c][p] = x[i];
+                    p = (p + 1) % len;
+                }
+            }
+            self.dpos = (self.dpos + n) % len;
+        } else {
+            let (start, d) = (self.pos, (SHORT_TAPS - 1) / 2);
+            let mut end = start;
+            for (c, x) in [&*l, &*r].into_iter().enumerate() {
+                let h = &mut self.hist[c];
+                let mut w = start;
+                for i in 0..n {
+                    w = (w + 1) % SHORT_TAPS;
+                    h[w] = x[i];
+                    h[w + SHORT_TAPS] = x[i];
+                    let win = &h[w + 1..w + 1 + SHORT_TAPS];
+                    let mut acc = 0f32;
+                    for (a, b) in win.iter().step_by(2).zip(self.hilbert.iter().rev().step_by(2)) {
+                        acc += a * b;
+                    }
+                    re[c][i] = win[SHORT_TAPS - 1 - d];
+                    im[c][i] = acc;
+                }
+                end = w;
+            }
+            self.pos = end;
+        }
+        // the rotation: up = x cos - H sin, down = x cos + H sin
+        let w = 2.0 * std::f64::consts::PI * self.shift / self.fs as f64;
+        let sgn = if self.up { -1.0f32 } else { 1.0 };
+        let mix = self.mix;
+        for i in 0..n {
+            let (s, c) = (self.theta.sin() as f32, self.theta.cos() as f32);
+            self.theta = (self.theta + w) % (2.0 * std::f64::consts::PI);
+            let (a, b) = (re[0][i] * c + sgn * im[0][i] * s, re[1][i] * c + sgn * im[1][i] * s);
+            l[i] = re[0][i] * (1.0 - mix) + a * mix;
+            r[i] = re[1][i] * (1.0 - mix) + b * mix;
+        }
+        self.scratch = re;
+        self.scratch_im = im;
+    }
+}
+
 // ---------------------------------------------------------------------- convolution
 
 /// Uniformly partitioned convolution with an impulse response (overlap-save, one FFT per block and channel).
@@ -188,7 +368,12 @@ impl ConvUnit {
         let secs = len as f32 / fs as f32;
         let energy: f32 = chans.iter().map(|c| c.iter().map(|v| v * v).sum::<f32>()).sum::<f32>() / 2.0;
         let norm = if energy > 1e-12 { 1.0 / energy.sqrt() } else { 1.0 };
-        let block = Self::block_for(secs);
+        self.load(chans, norm, Self::block_for(secs), secs);
+    }
+
+    /// Install two channels of taps as they are (no scaling) and with a given block size.
+    fn load(&mut self, chans: Vec<Vec<f32>>, norm: f32, block: usize, secs: f32) {
+        let len = chans[0].len().max(chans[1].len());
         let (mix, gain) = (self.mix, self.gain);
         *self = Self::with_block(block);
         self.mix = mix;
@@ -702,6 +887,13 @@ mod chunking {
                 Box::new(move |l, r| u.process(l, r))
             });
         }
+        for deep in [0.0f32, 1.0] {
+            same_for_every_block_size(&format!("frequency shifter {deep}"), || {
+                let mut u = ShiftUnit::new();
+                u.set(&[0.0, 1234.5, deep, 0.0, 80.0], fs);
+                Box::new(move |l, r| u.process(l, r))
+            });
+        }
         same_for_every_block_size("noise reduction", || {
             let mut u = NoiseRedUnit::new();
             u.set(&[15.0, 60.0, 0.0]);
@@ -717,6 +909,51 @@ mod chunking {
             u.set(&[18.0, 3.0, 9000.0, 100.0, -6.0, 0.0, 0.0, 0.0], fs);
             Box::new(move |l, r| u.process(l, r))
         });
+    }
+
+    #[test]
+    fn the_frequency_shifter_moves_every_frequency_by_the_same_amount() {
+        let level = |x: &[f32], f: f32, fs: f32| {
+            let (mut re, mut im) = (0f64, 0f64);
+            for (i, v) in x.iter().enumerate() {
+                let w = 2.0 * std::f64::consts::PI * f as f64 * i as f64 / fs as f64;
+                re += *v as f64 * w.cos();
+                im += *v as f64 * w.sin();
+            }
+            (2.0 * (re * re + im * im).sqrt() / x.len() as f64) as f32
+        };
+        let run = |fs: f32, f_in: f32, p: [f32; 5], secs: f32| {
+            let mut u = ShiftUnit::new();
+            u.set(&p, fs);
+            let n = (fs * secs) as usize;
+            let mut l: Vec<f32> = (0..n).map(|i| 0.5 * (2.0 * PI * f_in * i as f32 / fs).sin()).collect();
+            let mut r = l.clone();
+            for (a, b) in l.chunks_mut(480).zip(r.chunks_mut(480)) {
+                u.process(a, b);
+            }
+            let skip = n / 2;
+            l[skip..].to_vec()
+        };
+        // up by 300 Hz at 48 kHz: 1000 Hz becomes 1300 Hz, nothing is left at 700 Hz (that would be a ring modulator) or at 1000 Hz
+        let y = run(48000.0, 1000.0, [1.0, 300.0, 0.0, 0.0, 100.0], 1.0);
+        let n = y.len();
+        let (a, img, orig) = (level(&y[n - 24000..], 1300.0, 48000.0), level(&y[n - 24000..], 700.0, 48000.0), level(&y[n - 24000..], 1000.0, 48000.0));
+        assert!(a > 0.4 && img < 0.03 && orig < 0.03, "up: shifted {a} image {img} original {orig}");
+        // down by 20 kHz at 96 kHz: a 25 kHz bat call becomes 5 kHz; a 3 kHz tone below the shift is filtered, not folded
+        let y = run(96000.0, 25000.0, [0.0, 20000.0, 0.0, 0.0, 100.0], 0.5);
+        let n = y.len();
+        assert!(level(&y[n - 20000..], 5000.0, 96000.0) > 0.4, "ultrasound heard at 5 kHz");
+        let y = run(96000.0, 3000.0, [0.0, 20000.0, 0.0, 0.0, 100.0], 0.5);
+        let n = y.len();
+        assert!(level(&y[n - 20000..], 17000.0, 96000.0) < 0.05, "what falls below 0 Hz is filtered, not folded to 17 kHz");
+        // the deep mode reaches infrasound: 20 Hz up by 200 Hz is 220 Hz
+        let y = run(48000.0, 20.0, [1.0, 200.0, 1.0, 0.0, 100.0], 2.0);
+        let n = y.len();
+        let (a, img) = (level(&y[n - 24000..], 220.0, 48000.0), level(&y[n - 24000..], 180.0, 48000.0));
+        assert!(a > 0.38 && img < 0.06, "infrasound: {a} / image {img}");
+        // a zero shift with the mix at 0 % is the delayed input
+        let y = run(48000.0, 1000.0, [1.0, 1.0, 0.0, 1.0, 0.0], 0.5);
+        assert!(level(&y[y.len() - 10000..], 1000.0, 48000.0) > 0.45);
     }
 
     #[test]

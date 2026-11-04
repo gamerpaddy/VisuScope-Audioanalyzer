@@ -1116,7 +1116,7 @@ impl Routing {
                         ch |= Self::param_row(ui, n, i, 56.0);
                     }
                 }
-                if matches!(n.kind, Kind::Phase | Kind::NoiseRed) {
+                if matches!(n.kind, Kind::Phase | Kind::NoiseRed | Kind::Shifter) {
                     if let Some(s) = status.filter(|s| !s.is_empty()) {
                         ui.label(RichText::new(s).small().color(Color32::from_gray(120)));
                     }

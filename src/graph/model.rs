@@ -25,6 +25,7 @@ pub enum Kind {
     Stereo,
     Utility,
     Phase,
+    Shifter,
     Convolver,
     NoiseRed,
     Mixer,
@@ -106,6 +107,13 @@ const P_PHASE: &[ParamDef] = &[
     l("Freq", 20.0, 20000.0, 1000.0, " Hz"),
     l("Q", 0.1, 10.0, 0.7, ""),
 ];
+const P_SHIFT: &[ParamDef] = &[
+    c("Direction", 0, &["Down", "Up"]),
+    l("Shift", 1.0, 96000.0, 1000.0, " Hz"),
+    c("Quality", 0, &["Low delay (above ~400 Hz)", "Deep (down to ~20 Hz, long delay)"]),
+    c("Filter", 0, &["on", "off"]),
+    s("Mix", 0.0, 100.0, 100.0, " %"),
+];
 const P_CONV: &[ParamDef] = &[s("Mix", 0.0, 100.0, 30.0, " %"), s("Level", -24.0, 24.0, 0.0, " dB")];
 const P_NR: &[ParamDef] = &[s("Reduce", 0.0, 40.0, 12.0, " dB"), s("Strength", 0.0, 100.0, 50.0, " %"), c("Noise", 0, &["follow", "learn", "frozen"])];
 const P_FUZZ: &[ParamDef] = &[s("Fuzz", 0.0, 100.0, 70.0, " %"), s("Gate", 0.0, 100.0, 10.0, " %"), l("Tone", 300.0, 20000.0, 5000.0, " Hz"), s("Output", -36.0, 12.0, -10.0, " dB")];
@@ -141,7 +149,7 @@ const FX: (u8, u8, u8) = (90, 110, 170);
 const SNK: (u8, u8, u8) = (170, 100, 80);
 
 impl Kind {
-    pub const ALL: [Kind; 27] = [
+    pub const ALL: [Kind; 28] = [
         Kind::Input,
         Kind::Generator,
         Kind::TimelineOut,
@@ -160,6 +168,7 @@ impl Kind {
         Kind::Stereo,
         Kind::Utility,
         Kind::Phase,
+        Kind::Shifter,
         Kind::Convolver,
         Kind::NoiseRed,
         Kind::Mixer,
@@ -192,6 +201,7 @@ impl Kind {
             Kind::Stereo => k("Stereo width", "Effect", "width balance pan mid side", 1, 1, P_STEREO, FX),
             Kind::Utility => k("Channel utility", "Effect", "mono swap invert left right channel phase", 1, 1, P_UTIL, FX),
             Kind::Phase => k("Phase shift / invert", "Effect", "phase invert polarity shift allpass hilbert rotate null", 1, 1, P_PHASE, FX),
+            Kind::Shifter => k("Frequency shifter", "Effect", "frequency shift spectrum shifter ultrasonic ultrasound infrasonic infrasound bat heterodyne single sideband move transpose", 1, 1, P_SHIFT, FX),
             Kind::Convolver => k("Convolution (IR / reverb)", "Effect", "convolution impulse response ir reverb cabinet room load wav", 1, 1, P_CONV, FX),
             Kind::NoiseRed => k("Noise reduction", "Effect", "denoise noise reduction hiss hum spectral subtraction gate profile", 1, 1, P_NR, FX),
             Kind::Mixer => k("Mixer", "Routing", "mix sum combine merge bus", MIX_MAX, 1, P_MIXER, (150, 120, 70)),
@@ -228,6 +238,7 @@ impl Kind {
             Kind::Stereo => "wid",
             Kind::Utility => "util",
             Kind::Phase => "phase",
+            Kind::Shifter => "shift",
             Kind::Convolver => "conv",
             Kind::NoiseRed => "nr",
             Kind::Mixer => "mix",
@@ -411,7 +422,7 @@ impl Graph {
             Kind::Dual => upstream(self, 0),
             Kind::Utility => matches!(n.param(0).round() as usize, 1..=3) || upstream(self, 0),
             // the same processing on both sides keeps identical sides identical
-            Kind::Gain | Kind::Eq | Kind::Filter | Kind::Comp | Kind::Limiter | Kind::Gate | Kind::Delay | Kind::Distortion | Kind::Fuzz | Kind::Crusher | Kind::Jitter | Kind::Tremolo | Kind::Phase | Kind::NoiseRed => upstream(self, 0),
+            Kind::Gain | Kind::Eq | Kind::Filter | Kind::Comp | Kind::Limiter | Kind::Gate | Kind::Delay | Kind::Distortion | Kind::Fuzz | Kind::Crusher | Kind::Jitter | Kind::Tremolo | Kind::Phase | Kind::Shifter | Kind::NoiseRed => upstream(self, 0),
             Kind::Stereo => n.param(1).abs() < 1e-6 && upstream(self, 0),
             Kind::Mixer => {
                 let used: Vec<u8> = (0..n.inputs() as u8).filter(|p| self.edge_into(from, *p).is_some()).collect();
