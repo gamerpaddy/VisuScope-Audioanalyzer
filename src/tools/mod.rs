@@ -154,6 +154,8 @@ pub struct Requests {
     pub note: Option<String>,
     /// use the audio input and output of the connected DATS V3 for the measurements
     pub use_dats: bool,
+    /// set up generator, output and input nodes for the DATS in the routing graph
+    pub dats_nodes: bool,
 }
 
 /// Read-only view of the app state plus the few things tools may change.

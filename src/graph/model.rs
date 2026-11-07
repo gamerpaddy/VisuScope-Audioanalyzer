@@ -598,6 +598,66 @@ impl Graph {
         live
     }
 
+    /// Nodes for measuring with a DATS V3: a generator into an output node on its output, its input as an input node (reference on
+    /// channel 2, terminals on channel 1) into the analyzer. Nothing is deleted; other output nodes on the DATS output are muted, so the
+    /// signal is not doubled. What an earlier press made (still in its place, unmuted) is reused, so pressing twice changes nothing.
+    /// Returns what was done, for the note.
+    pub fn setup_dats(&mut self, in_id: &str, out_id: &str) -> String {
+        let below = self.nodes.iter().map(|n| n.y).fold(-100.0, f32::max) + 180.0;
+        let (mut made, mut muted, mut rewired) = (0, 0, false);
+        if !out_id.is_empty() {
+            let fed = |g: &Graph, n: &Node| n.kind == Kind::Output && n.s == out_id && n.x == 360.0 && n.p.get(1).copied().unwrap_or(0.0) < 0.5 && g.edge_into(n.id, 0).and_then(|e| g.node(e.from)).is_some_and(|f| f.kind == Kind::Generator);
+            let ready = self.nodes.iter().any(|n| fed(self, n));
+            if !ready {
+                let ids: Vec<NodeId> = self.nodes.iter().filter(|n| n.kind == Kind::Output && n.s == out_id).map(|n| n.id).collect();
+                for id in ids {
+                    if let Some(n) = self.node_mut(id) {
+                        if n.p.len() > 1 && n.p[1] < 0.5 {
+                            n.p[1] = 1.0;
+                            muted += 1;
+                        }
+                    }
+                }
+                let g = self.add(Kind::Generator, 40.0, below);
+                let o = self.add(Kind::Output, 360.0, below);
+                if let Some(n) = self.node_mut(o) {
+                    n.s = out_id.to_string();
+                }
+                let _ = self.connect(g, o, 0);
+                made += 2;
+            }
+        }
+        if !in_id.is_empty() {
+            let existing = self.nodes.iter().find(|n| n.kind == Kind::Input && n.s == in_id).map(|n| n.id);
+            let i = match existing {
+                Some(i) => i,
+                None => {
+                    let i = self.add(Kind::Input, 40.0, below + 150.0);
+                    if let Some(n) = self.node_mut(i) {
+                        n.s = in_id.to_string();
+                        n.p[0] = 1.0;
+                        n.p[1] = 2.0;
+                    }
+                    made += 1;
+                    i
+                }
+            };
+            // an input that goes nowhere is wired to the analyzer (taking it from what fed it before: wires are not nodes)
+            if !self.edges.iter().any(|e| e.from == i) {
+                let a = self.add(Kind::Analyzer, 360.0, below + 150.0);
+                let _ = self.connect(i, a, 0);
+                rewired = true;
+            }
+        }
+        let tail = if rewired { "; the analyzer now listens to the DATS input" } else { "" };
+        match (made, muted) {
+            (0, _) if !rewired => "The nodes for the DATS are already there".to_string(),
+            (0, _) => "The analyzer now listens to the DATS input".to_string(),
+            (m, 0) => format!("Added {m} node(s) for the DATS{tail}"),
+            (m, k) => format!("Added {m} node(s) for the DATS and muted {k} other output node(s) on its output{tail}"),
+        }
+    }
+
     /// The graph a new user starts with: the chosen input straight into the analyzer.
     pub fn starter(dev: &str, rate_hint: Option<u32>) -> Graph {
         let _ = rate_hint;

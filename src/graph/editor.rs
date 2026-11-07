@@ -483,6 +483,8 @@ pub struct Routing {
     bound_tog: Vec<(NodeId, usize, Option<bool>)>,
     /// devices for the first input / output node (true: input), from a request of the application
     bound_dev: Vec<(bool, String)>,
+    /// DATS set-up requests: (input device, output device)
+    bound_dats: Vec<(String, String)>,
 }
 
 type Vec2 = egui::Vec2;
@@ -575,7 +577,7 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, search_n: 0, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), bound_tog: Vec::new(), bound_dev: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, search_n: 0, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), bound_tog: Vec::new(), bound_dev: Vec::new(), bound_dats: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     /// Values and mutes that input bindings set (a knob moves many times a frame: only the last value counts).
@@ -584,6 +586,7 @@ impl Routing {
         let mutes = std::mem::take(&mut self.bound_mute);
         let togs = std::mem::take(&mut self.bound_tog);
         let devs = std::mem::take(&mut self.bound_dev);
+        let dats = std::mem::take(&mut self.bound_dats);
         let mut changed = false;
         for ((id, p), v) in sets {
             if let Some(n) = self.g.node_mut(id) {
@@ -602,6 +605,11 @@ impl Routing {
                     }
                 }
             }
+        }
+        for (i, o) in dats {
+            self.note = self.g.setup_dats(&i, &o);
+            self.fit_next = true;
+            changed = true;
         }
         for (input, dev) in devs {
             let kind = if input { Kind::Input } else { Kind::Output };
@@ -1739,9 +1747,10 @@ impl Routing {
         }
         let bg = ui.interact(canvas, ui.scope_id().with("routing_bg"), Sense::click_and_drag());
         let shift = ui.input(|i| i.modifiers.shift);
-        // pan with the background, or select with a band while Shift is held
+        let hand = ui.input(|i| i.modifiers.alt || i.key_down(egui::Key::Space));
+        // a drag on the background selects with a band; Alt or Space with the drag (or the middle or right button) moves the view
         if bg.dragged_by(egui::PointerButton::Primary) && self.wire.is_none() {
-            if shift {
+            if !hand {
                 if self.band.is_none() {
                     self.band = ui.input(|i| i.pointer.press_origin());
                 }
@@ -1749,7 +1758,7 @@ impl Routing {
                 self.pan += bg.drag_delta();
             }
         }
-        if bg.dragged_by(egui::PointerButton::Middle) {
+        if bg.dragged_by(egui::PointerButton::Middle) || bg.dragged_by(egui::PointerButton::Secondary) {
             self.pan += bg.drag_delta();
         }
         // the wheel only zooms the node window, about the pointer, wherever it is (also over a node and over the graph of an
@@ -1772,7 +1781,7 @@ impl Routing {
             if (factor - 1.0).abs() > 1e-4 {
                 // the spot under the pointer stays where it is
                 let m = (p - origin) / self.zoom;
-                self.zoom = (self.zoom * factor).clamp(0.4, 1.8);
+                self.zoom = (self.zoom * factor).clamp(0.15, 1.8);
                 self.pan = p - canvas.min - m * self.zoom;
             }
         }
@@ -2117,7 +2126,9 @@ impl Routing {
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_rgb(140, 185, 255)), egui::StrokeKind::Inside);
                 painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(110, 160, 255, 24));
                 if ui.input(|i| i.pointer.any_released()) {
-                    self.sel.clear();
+                    if !ui.input(|i| i.modifiers.shift) {
+                        self.sel.clear();
+                    }
                     for n in &self.g.nodes {
                         let nr = Rect::from_min_size(sp(pos2(n.x, n.y)), vec2(node_w(n.kind), 60.0) * z);
                         if r.intersects(nr) {
@@ -2264,7 +2275,7 @@ impl Routing {
             // zoom out when everything does not fit, but never in beyond 100 %
             let size = (hi - lo).max(vec2(1.0, 1.0));
             if std::env::var_os("VISUSCOPE_ZOOM").is_none() {
-                self.zoom = ((canvas.width() / size.x).min(canvas.height() / size.y) * 0.92).clamp(0.4, 1.0);
+                self.zoom = ((canvas.width() / size.x).min(canvas.height() / (size.y + 40.0)) * 0.92).clamp(0.15, 1.0);
             }
             self.pan = canvas.size() * 0.5 - centre * self.zoom;
         }
@@ -2293,6 +2304,11 @@ impl Tool for Routing {
             ["setdev", which, id] => {
                 if self.bound_dev.len() < 8 {
                     self.bound_dev.push((*which == "in", id.to_string()));
+                }
+            }
+            ["datsnodes", i, o] => {
+                if self.bound_dats.len() < 4 {
+                    self.bound_dats.push((i.to_string(), o.to_string()));
                 }
             }
             ["togp", n, p, v] => {
@@ -2714,6 +2730,36 @@ mod tests {
         let (sn, mn) = (g.node(s).unwrap(), g.node(m).unwrap());
         assert!((out_pos(sn, 1).y - out_pos(sn, 0).y - ROW).abs() < 1e-4);
         assert!((in_pos(mn, 1).y - in_pos(mn, 0).y - ROW).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_dats_set_up_adds_nodes_and_mutes_the_old_output() {
+        let mut r = Routing::new();
+        let i0 = r.g.add(Kind::Input, 0.0, 0.0);
+        let a0 = r.g.add(Kind::Analyzer, 0.0, 0.0);
+        let g0 = r.g.add(Kind::Generator, 0.0, 0.0);
+        let o0 = r.g.add(Kind::Output, 0.0, 0.0);
+        r.g.node_mut(o0).unwrap().s = "wasapi:dats".into();
+        r.g.connect(i0, a0, 0).unwrap();
+        r.g.connect(g0, o0, 0).unwrap();
+        // the old output is a plain generator output: it gets muted and the nodes are made
+        r.command("datsnodes	wasapi:datsin	wasapi:dats");
+        r.apply_bound();
+        let n = r.g.nodes.len();
+        assert_eq!(n, 4 + 3, "{}", r.note);
+        assert!(r.g.node(o0).unwrap().p[1] >= 0.5 || r.g.nodes.iter().filter(|x| x.kind == Kind::Output && x.s == "wasapi:dats").count() == 2);
+        let new_out = r.g.nodes.iter().filter(|x| x.kind == Kind::Output && x.s == "wasapi:dats" && x.id != o0).next().unwrap();
+        assert!(new_out.p[1] < 0.5);
+        assert_eq!(r.g.node(g0).map(|x| x.kind), Some(Kind::Generator));
+        assert!(r.g.nodes.iter().any(|x| x.kind == Kind::Input && x.s == "wasapi:datsin"));
+        // the DATS input is wired to the analyzer (the old input node stays)
+        let di = r.g.nodes.iter().find(|x| x.kind == Kind::Input && x.s == "wasapi:datsin").unwrap().id;
+        assert_eq!(r.g.edge_into(a0, 0).unwrap().from, di);
+        assert!(r.g.node(i0).is_some());
+        // pressing it again changes nothing
+        r.command("datsnodes	wasapi:datsin	wasapi:dats");
+        r.apply_bound();
+        assert_eq!(r.g.nodes.len(), n, "{}", r.note);
     }
 
     #[test]

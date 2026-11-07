@@ -5,6 +5,7 @@ mod asio;
 mod assistant;
 mod audio;
 mod cal;
+mod clip;
 mod colormap;
 mod dsp;
 mod eq;

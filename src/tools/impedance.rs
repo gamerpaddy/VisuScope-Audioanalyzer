@@ -11,7 +11,7 @@
 //! device. One channel: only L across the device, with the voltages of the output and the input known (calibration). A known
 //! resistor in place of the device calibrates the level.
 
-use super::plot::{canvas, inset, Plot};
+use super::plot::{canvas_h, inset, Plot};
 use super::sweep::{State, SweepResult};
 use super::traces::Library;
 use super::ts::{self, FreeAir, VasMethod};
@@ -182,6 +182,11 @@ pub fn two_point_calibration(open: f32, with_r: f32, known: f32) -> Option<(f32,
     (h1 > 1e-6 && h1 < 0.99999).then(|| (gain, known * (1.0 / h1 - 1.0)))
 }
 
+fn cal_path() -> std::path::PathBuf {
+    let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("visuscope").join("impedance_cal.txt")
+}
+
 fn fmt_ohm(z: f32) -> String {
     if z >= 1000.0 {
         format!("{:.2} kΩ", z / 1000.0)
@@ -210,6 +215,9 @@ pub struct Impedance {
     /// the input channel of the device under test with the DATS V3 (0 = L)
     dats_ch: usize,
     dats_seen: bool,
+    /// the driver measured and the conditions, for the report
+    name: String,
+    cond: String,
     /// the short circuit of the leads, taken off every measurement
     short: Option<ZShort>,
     // Thiele-Small parameters: the piston diameter (mm), the method for Vas and its numbers
@@ -290,7 +298,9 @@ impl Impedance {
                 demo = Some(ZCurve { f, db, phase_deg: ph });
             }
         }
-        Self { curve: demo, mode: 0, r_ref: 100.0, r_out: 0.0, out_v: 1.0, in_v: 1.0, cal_gain: None, cal_rs: None, cal_open: None, cal_pt: None, dats_ch: 0, dats_seen: false, short: None, d_mm: 76.2, method: 0, box_l: 10.0, add_g: 10.0, spl: 85.0, mmd_g: 10.0, intent: 0, free: None, fs2: None, ts_note: String::new(), cal_r: 100.0, smooth: 1, show_phase: true, auto: true, y_lo: -10.0, y_hi: 50.0, armed: false, start_id: 0, seen_id: 0, note: String::new(), save: None, lib }
+        let mut me = Self { curve: demo, mode: 0, r_ref: 100.0, r_out: 0.0, out_v: 1.0, in_v: 1.0, cal_gain: None, cal_rs: None, cal_open: None, cal_pt: None, dats_ch: 0, dats_seen: false, name: String::new(), cond: String::new(), short: None, d_mm: 76.2, method: 0, box_l: 10.0, add_g: 10.0, spl: 85.0, mmd_g: 10.0, intent: 0, free: None, fs2: None, ts_note: String::new(), cal_r: 100.0, smooth: 1, show_phase: true, auto: true, y_lo: -10.0, y_hi: 50.0, armed: false, start_id: 0, seen_id: 0, note: String::new(), save: None, lib };
+        me.load_cal();
+        me
     }
 
     fn setup(&self) -> Setup {
@@ -345,7 +355,11 @@ impl Impedance {
     /// The parameters as lines of text (for the clipboard and the report).
     fn ts_text(&self) -> Option<String> {
         let a = self.free?;
-        let mut s = format!("Re = {:.3} ohm\nFs = {:.2} Hz\nQms = {:.3}\nQes = {:.3}\nQts = {:.3}\nLe (1 kHz) = {:.3} mH\nLe (10 kHz) = {:.3} mH\nZmax = {:.2} ohm\n", a.re, a.fs, a.qms, a.qes, a.qts, a.le_1k * 1e3, a.le_10k * 1e3, a.zmax);
+        let mut s = if self.name.trim().is_empty() { String::new() } else { format!("Driver: {}\n", self.name.trim()) };
+        if !self.cond.trim().is_empty() {
+            s += &format!("Conditions: {}\n", self.cond.trim());
+        }
+        s += &format!("Re = {:.3} ohm\nFs = {:.2} Hz\nQms = {:.3}\nQes = {:.3}\nQts = {:.3}\nLe (1 kHz) = {:.3} mH\nLe (10 kHz) = {:.3} mH\nZmax = {:.2} ohm\n", a.re, a.fs, a.qms, a.qes, a.qts, a.le_1k * 1e3, a.le_10k * 1e3, a.zmax);
         if let Some(rt) = self.short.as_ref().map(|sh| sh.at(100.0).0) {
             s += &format!("Rt (test leads) = {rt:.3} ohm\n");
         }
@@ -353,6 +367,56 @@ impl Impedance {
             s += &format!("Vas = {:.2} l ({:.3} cu ft)\nMms = {:.2} g\nCms = {:.3} mm/N\nBl = {:.2} T m\nRms = {:.3} kg/s\nEta0 = {:.3} %\nSPL (1 W / 1 m) = {:.1} dB\nSd = {:.1} cm2\n", m.vas * 1e3, m.vas * 35.3147, m.mms * 1e3, m.cms * 1e3, m.bl, m.rms, m.eta0 * 100.0, m.spl, ts::piston_area(self.d_mm * 1e-3) * 1e4);
         }
         Some(s)
+    }
+
+    /// The two point calibration from the open and the 1 kΩ measurement (when both are there), then saved.
+    fn apply_cal(&mut self) {
+        self.cal_rs = None;
+        self.cal_gain = None;
+        if let (Some(o), Some(p)) = (self.cal_open, self.cal_pt) {
+            if let Some((g, rs)) = two_point_calibration(o, p, 1000.0) {
+                self.cal_gain = Some(g);
+                self.cal_rs = Some(rs);
+            }
+        }
+        self.save_cal();
+    }
+
+    /// The calibration lives in a file of its own, written when it changes: it survives restarts whatever happens to the settings.
+    fn save_cal(&self) {
+        if cfg!(test) || crate::prof::test_mode() {
+            return;
+        }
+        let mut t = String::new();
+        for (k, v) in [("open", self.cal_open), ("pt", self.cal_pt), ("rs", self.cal_rs), ("gain", self.cal_gain)] {
+            if let Some(v) = v {
+                t += &format!("{k}={v}\n");
+            }
+        }
+        if let Some(sh) = &self.short {
+            t += &format!("short={}\n", sh.encode());
+        }
+        let path = cal_path();
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(path, t);
+    }
+
+    fn load_cal(&mut self) {
+        let Ok(t) = std::fs::read_to_string(cal_path()) else { return };
+        for l in t.lines() {
+            let Some((k, v)) = l.split_once('=') else { continue };
+            let f = v.trim().parse::<f32>().ok().filter(|x| x.is_finite() && *x > 0.0 && *x < 1e7);
+            match k {
+                "open" => self.cal_open = f,
+                "pt" => self.cal_pt = f,
+                "rs" => self.cal_rs = f,
+                "gain" => self.cal_gain = f,
+                "short" => self.short = ZShort::decode(v.trim()),
+                _ => {}
+            }
+        }
     }
 
     fn rebuild(&mut self, cx: &Ctx) {
@@ -389,6 +453,27 @@ impl Tool for Impedance {
             match std::mem::take(&mut self.intent) {
                 1 => self.take_ts(false),
                 2 => self.take_ts(true),
+                3 => {
+                    self.cal_open = cx.sweep.result.as_ref().and_then(median_ratio);
+                    self.apply_cal();
+                    self.note = "Open kept".into();
+                }
+                4 => {
+                    self.cal_r = 1000.0;
+                    self.cal_pt = cx.sweep.result.as_ref().and_then(median_ratio);
+                    self.apply_cal();
+                    self.note = "1 kΩ kept".into();
+                }
+                5 => {
+                    if let Some(r) = cx.sweep.result.as_ref() {
+                        // (what the short reads with the calibration as it is now and nothing taken off)
+                        let (f, z) = z_points(r, self.setup());
+                        self.short = Some(ZShort { f, re: z.iter().map(|v| v.0).collect(), im: z.iter().map(|v| v.1).collect() });
+                        self.save_cal();
+                        self.rebuild(cx);
+                        self.note = "Leads kept".into();
+                    }
+                }
                 _ => {}
             }
         }
@@ -415,6 +500,112 @@ impl Tool for Impedance {
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
+        // (the window scrolls; the plot gets a height of its own)
+        let h = (ui.available_height() * 0.6).clamp(240.0, 560.0);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.body(ui, cx, h));
+    }
+
+    fn report(&self, _cx: &Ctx) -> Vec<crate::report::Section> {
+        use crate::report::*;
+        let Some(c) = &self.curve else { return Vec::new() };
+        let ppo = LOG_N as f32 / (c.f[c.f.len() - 1] / c.f[0]).log2();
+        let db = super::response::smooth_log(&c.db, ppo, SMOOTH[self.smooth].0);
+        let x = (c.f[0], *c.f.last().unwrap());
+        let mag = vec![Series { name: "impedance".into(), color: COLORS[0], pts: c.f.iter().copied().zip(db.iter().copied()).collect() }];
+        let y = auto_range(&mag, 3.0, 6.0);
+        let ph = vec![Series { name: String::new(), color: COLORS[1], pts: c.f.iter().copied().zip(c.phase_deg.iter().copied()).collect() }];
+        vec![Section {
+            id: "Impedance",
+            title: "Impedance".into(),
+            blocks: vec![
+                Block::Text(format!("Series resistor {} (+ {} output impedance). Magnitude in dB re 1 ohm: 0 dB is 1 ohm, 20 dB is 10 ohm.", fmt_ohm(self.r_ref), fmt_ohm(self.r_out))),
+                Block::Plot(PlotSpec { title: "Impedance magnitude".into(), xlog: true, xlabel: "Hz".into(), ylabel: "dB re 1 ohm".into(), x, y, series: mag }),
+                Block::Plot(PlotSpec { title: "Impedance phase".into(), xlog: true, xlabel: "Hz".into(), ylabel: "degrees".into(), x, y: (-90.0, 90.0), series: ph }),
+            ]
+            .into_iter()
+            .chain(self.ts_text().map(|t| Block::Text(format!("Thiele-Small parameters\n{t}"))))
+            .collect(),
+        }]
+    }
+
+    fn save(&self, o: &mut SettingsOut) {
+        o.put("mode", self.mode);
+        o.put("r_ref", self.r_ref);
+        o.put("r_out", self.r_out);
+        o.put("out_v", self.out_v);
+        o.put("in_v", self.in_v);
+        o.put("cal_r", self.cal_r);
+        o.put("dats_ch", self.dats_ch);
+        o.put("d_mm", self.d_mm);
+        o.put("name", self.name.chars().filter(|c| !c.is_control()).collect::<String>());
+        o.put("cond", self.cond.chars().filter(|c| !c.is_control()).collect::<String>());
+        o.put("method", self.method);
+        o.put("box_l", self.box_l);
+        o.put("add_g", self.add_g);
+        o.put("spl", self.spl);
+        o.put("mmd_g", self.mmd_g);
+        if let Some(sh) = &self.short {
+            o.put("short", sh.encode());
+        }
+        if let Some(v) = self.cal_rs {
+            o.put("cal_rs", v);
+        }
+        if let Some(v) = self.cal_open {
+            o.put("cal_open", v);
+        }
+        if let Some(v) = self.cal_pt {
+            o.put("cal_pt", v);
+        }
+        if let Some(g) = self.cal_gain {
+            o.put("cal_gain", g);
+        }
+        o.put("smooth", self.smooth);
+        o.put("phase", self.show_phase);
+        o.put("auto", self.auto);
+        o.put("y_lo", self.y_lo);
+        o.put("y_hi", self.y_hi);
+    }
+
+    fn load(&mut self, i: &SettingsIn) {
+        if let Some(v) = i.get::<usize>("mode") {
+            self.mode = v.min(2);
+        }
+        for (k, dst, lo, hi) in [("r_ref", &mut self.r_ref, 0.1, 100_000.0), ("r_out", &mut self.r_out, 0.0, 1000.0), ("out_v", &mut self.out_v, 0.001, 100.0), ("in_v", &mut self.in_v, 0.001, 100.0), ("cal_r", &mut self.cal_r, 0.1, 100_000.0)] {
+            if let Some(v) = i.get::<f32>(k) {
+                *dst = v.clamp(lo, hi);
+            }
+        }
+        self.dats_ch = i.get::<usize>("dats_ch").unwrap_or(0).min(1);
+        for (k, dst, lo, hi) in [("d_mm", &mut self.d_mm, 10.0, 800.0), ("box_l", &mut self.box_l, 0.1, 1000.0), ("add_g", &mut self.add_g, 0.1, 1000.0), ("spl", &mut self.spl, 50.0, 130.0), ("mmd_g", &mut self.mmd_g, 0.1, 2000.0)] {
+            if let Some(v) = i.get::<f32>(k) {
+                *dst = v.clamp(lo, hi);
+            }
+        }
+        self.name = i.str("name").unwrap_or_default();
+        self.cond = i.str("cond").unwrap_or_default();
+        self.method = i.get::<usize>("method").unwrap_or(0).min(3);
+        if let Some(v) = i.str("short").and_then(|v| ZShort::decode(&v)) {
+            self.short = Some(v);
+        }
+        for (k, dst) in [("cal_rs", &mut self.cal_rs), ("cal_open", &mut self.cal_open), ("cal_pt", &mut self.cal_pt), ("cal_gain", &mut self.cal_gain)] {
+            if let Some(v) = i.get::<f32>(k).filter(|g| *g > 0.0 && *g < 1e7) {
+                *dst = Some(v);
+            }
+        }
+        if let Some(v) = i.get::<usize>("smooth") {
+            self.smooth = v.min(SMOOTH.len() - 1);
+        }
+        i.set("phase", &mut self.show_phase);
+        i.set("auto", &mut self.auto);
+        i.set("y_lo", &mut self.y_lo);
+        i.set("y_hi", &mut self.y_hi);
+        self.y_hi = self.y_hi.clamp(-50.0, 120.0);
+        self.y_lo = self.y_lo.clamp(-60.0, self.y_hi - 5.0);
+    }
+}
+
+impl Impedance {
+    fn body(&mut self, ui: &mut Ui, cx: &mut Ctx, plot_h: f32) {
         let busy = cx.sweep.busy();
         ui.horizontal_wrapped(|ui| {
             let b = egui::Button::new(RichText::new(if busy { "Stop" } else { "Measure" }).strong()).min_size(egui::vec2(96.0, 26.0));
@@ -446,13 +637,12 @@ impl Tool for Impedance {
                 ui.label(RichText::new(&self.note).small().weak());
             }
         });
-        egui::CollapsingHeader::new("Set-up and calibration").default_open(self.curve.is_none()).show(ui, |ui| {
-            ui.label(RichText::new("generator out ---[ R ref ]---+--- device under test --- ground      (the inputs measure at the +)").small().monospace().weak());
-            if let Some(d) = cx.dats.clone() {
+        egui::CollapsingHeader::new("Set-up").default_open(self.curve.is_none()).show(ui, |ui| {
+                        if let Some(d) = cx.dats.clone() {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Dayton DATS V3 connected: {}", d.label)).color(Color32::from_rgb(120, 220, 140)));
-                    if crate::mapping::btn(ui, "Use it").on_hover_text("Take its audio input and output for the measurements (the first input and output node of the routing graph)").clicked() {
-                        cx.req.use_dats = true;
+                    ui.label(RichText::new(format!("DATS V3: {}", d.label)).color(Color32::from_rgb(120, 220, 140)));
+                    if crate::mapping::btn(ui, "Set up nodes").on_hover_text("Routing graph: generator and output node on the DATS output, input node on its input, wired to the analyzer. Nothing is deleted; other output nodes on the DATS output are muted.").clicked() {
+                        cx.req.dats_nodes = true;
                         self.mode = 2;
                         if self.cal_r == 100.0 {
                             self.cal_r = 1000.0;
@@ -470,7 +660,7 @@ impl Tool for Impedance {
                     ui.label("Series resistor");
                     ui.add(egui::DragValue::new(&mut self.r_ref).range(0.1..=100_000.0).speed(0.5).suffix(" Ω"));
                     ui.end_row();
-                    ui.label("Output impedance of the interface");
+                    ui.label("Output impedance");
                     ui.add(egui::DragValue::new(&mut self.r_out).range(0.0..=1000.0).speed(0.05).suffix(" Ω")).on_hover_text("Adds to the series resistor (a line output is often 50 to 100 Ω, a headphone output a few ohm)");
                     ui.end_row();
                 }
@@ -483,19 +673,21 @@ impl Tool for Impedance {
                     ui.end_row();
                 }
                 if self.mode != 2 {
-                ui.label("Known resistor");
+                ui.label("Known R");
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut self.cal_r).range(0.1..=100_000.0).speed(0.5).suffix(" Ω"));
                     let ok = cx.sweep.result.is_some() && !busy;
                     if ui.add_enabled(ok, egui::Button::new("Calibrate")).on_hover_text("Connect a resistor of this value in place of the device, press Measure, then Calibrate: the level is set so that it reads this value").clicked() {
                         if let Some(g) = cx.sweep.result.as_ref().and_then(|r| calibration_gain(r, self.r_ref + self.r_out, self.cal_r)) {
                             self.cal_gain = Some(g);
+                            self.save_cal();
                             self.rebuild(cx);
                             self.note = format!("Calibrated with {}", fmt_ohm(self.cal_r));
                         }
                     }
                     if self.cal_gain.is_some() && crate::mapping::small_btn(ui, "Reset").clicked() {
                         self.cal_gain = None;
+                        self.save_cal();
                         self.rebuild(cx);
                     }
                 });
@@ -504,64 +696,43 @@ impl Tool for Impedance {
             });
             if self.mode == 2 {
                 ui.separator();
-                ui.label(RichText::new("DATS V3 calibration (once, and when you want to check it)").strong());
-                ui.label(RichText::new("Measured with the box: the R input carries the generator side of its series resistor (the reference), the L input the test terminals.").small().weak());
-                if self.cal_rs.is_none() {
-                    ui.label(RichText::new(format!("Without a calibration of your own the values of a DATS V3 that was measured are used: series resistance {DATS_RS} Ω, input gain {DATS_GAIN:.4}. A calibration (below) finds those of your unit.")).small().color(Color32::from_rgb(120, 200, 255)));
-                }
-                ui.label(RichText::new("1. Nothing on the test terminals: press Measure, then Keep as open.\n2. The built-in 1 kΩ calibration resistor on the terminals: Measure, then Keep as 1 kΩ.\n3. The two test leads clamped together (the leads you measure with): Measure, then Keep as short. Their resistance and inductance are taken off from then on.").small());
-                let ok = cx.sweep.result.is_some() && !busy;
+                let ok = !busy;
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(ok, egui::Button::new("Keep as open")).clicked() {
-                        self.cal_open = cx.sweep.result.as_ref().and_then(median_ratio);
-                        self.cal_rs = None;
-                    }
-                    if ui.add_enabled(ok, egui::Button::new("Keep as 1 kΩ")).on_hover_text("The built-in calibration resistor is 1 kΩ (0.1 %)").clicked() {
-                        self.cal_r = 1000.0;
-                        self.cal_pt = cx.sweep.result.as_ref().and_then(median_ratio);
-                    }
-                    if let (Some(o), Some(p)) = (self.cal_open, self.cal_pt) {
-                        if let Some((g, rs)) = two_point_calibration(o, p, self.cal_r) {
-                            self.cal_gain = Some(g);
-                            self.cal_rs = Some(rs);
-                        }
-                    }
-                    if ui.add_enabled(ok, egui::Button::new("Keep as short")).on_hover_text("The leads touching each other: what is measured is their own impedance, which is subtracted from the measurements").clicked() {
-                        if let Some(r) = cx.sweep.result.as_ref() {
-                            // (what the short reads, with the calibration as it is now and nothing taken off yet)
-                            let (f, z) = z_points(r, self.setup());
-                            self.short = Some(ZShort { f, re: z.iter().map(|v| v.0).collect(), im: z.iter().map(|v| v.1).collect() });
-                            self.rebuild(cx);
-                        }
-                    }
-                    if (self.cal_open.is_some() || self.cal_pt.is_some()) && crate::mapping::small_btn(ui, "Clear").clicked() {
+                    ui.label(RichText::new("Calibration").strong()).on_hover_text("Once is enough: it is saved. Without it the values of a DATS V3 that was measured are used (series resistance 94.2 Ω, gain 0.9989). R input = generator side of the series resistor, L input = test terminals.");
+                    if (self.cal_open.is_some() || self.cal_pt.is_some() || self.short.is_some()) && crate::mapping::small_btn(ui, "Reset").clicked() {
                         self.cal_open = None;
                         self.cal_pt = None;
                         self.cal_rs = None;
                         self.cal_gain = None;
+                        self.short = None;
+                        self.save_cal();
                     }
                 });
-                ui.label(RichText::new(format!("open: {}   1 kΩ: {}   short: {}", if self.cal_open.is_some() { "kept" } else { "-" }, if self.cal_pt.is_some() { "kept" } else { "-" }, if self.short.is_some() { "kept" } else { "-" })).small().weak());
-                if let Some(txt) = self.short.as_ref().map(|sh| {
-                    let (re, im) = sh.at(1000.0);
-                    format!("The leads: {:.3} Ω and {:.2} µH (at 1 kHz {:.3} + j {:.3} Ω)", sh.at(100.0).0, sh.at(10000.0).1 / (2.0 * std::f32::consts::PI * 10000.0) * 1e6, re, im)
-                }) {
+                for (k, name, what, hint) in [(3, "Open", "terminals empty", "Nothing on the test terminals: gives the input gain"), (4, "1 kΩ", "built-in resistor", "The built-in 1 kΩ resistor on the terminals: gives the series resistance"), (5, "Leads", "clamped together", "The two test leads you measure with, clamped together: their resistance and inductance are taken off every measurement")] {
+                    let done = match k {
+                        3 => self.cal_open.is_some(),
+                        4 => self.cal_pt.is_some(),
+                        _ => self.short.is_some(),
+                    };
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(txt).small().color(Color32::from_rgb(120, 220, 140)));
-                        if crate::mapping::small_btn(ui, "Forget the short").clicked() {
-                            self.short = None;
-                            self.rebuild(cx);
+                        ui.label(RichText::new("•").color(if done { Color32::from_rgb(120, 220, 140) } else { Color32::GRAY }));
+                        ui.label(RichText::new(name).strong()).on_hover_text(hint);
+                        ui.label(RichText::new(what).small().weak());
+                        if ui.add_enabled(ok, egui::Button::new(if done { "Redo" } else { "Measure" })).on_hover_text(hint).clicked() {
+                            self.intent = k;
+                            self.start_measure(cx);
                         }
                     });
                 }
                 if let (Some(g), Some(rs)) = (self.cal_gain, self.cal_rs) {
-                    ui.label(RichText::new(format!("Calibrated: series resistance {}, gain {g:.4}", fmt_ohm(rs))).small().color(Color32::from_rgb(120, 220, 140)));
+                    let leads = self.short.as_ref().map(|sh| format!("   leads {:.2} Ω, {:.1} µH", sh.at(100.0).0, sh.at(10000.0).1 / (2.0 * std::f32::consts::PI * 10000.0) * 1e6)).unwrap_or_default();
+                    ui.label(RichText::new(format!("{}  gain {g:.4}{leads}", fmt_ohm(rs))).small().color(Color32::from_rgb(120, 220, 140)));
                 }
             }
             if let Some(g) = self.cal_gain.filter(|_| self.mode != 2) {
                 ui.label(RichText::new(format!("Calibrated: the measured voltage ratio is multiplied by {g:.4}")).small().color(Color32::from_rgb(120, 220, 140)));
             }
-            ui.label(RichText::new("The sweep settings (level, range, length) are those of the Frequency response window. Use a low level: -30 to -20 dBFS keeps a speaker linear.").small().weak());
+            ui.label(RichText::new("Sweep settings: Frequency response window (-30 to -20 dBFS for a speaker).").small().weak());
         });
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Smooth").small().weak());
@@ -581,23 +752,32 @@ impl Tool for Impedance {
             if ui.add_enabled(self.curve.is_some() && self.save.is_none(), egui::Button::new("CSV")).on_hover_text("Export the impedance, phase, resistance and reactance").clicked() {
                 self.save = Some(dialogs::save("Export impedance", "CSV", &["csv"], "impedance.csv".into()));
             }
+            if ui.add_enabled(self.curve.is_some(), egui::Button::new("Report")).on_hover_text("Save an HTML report with the plots and the parameters, and open it").clicked() {
+                cx.req.report = Some(ReportReq { title: if self.name.trim().is_empty() { "Impedance measurement".to_string() } else { format!("Impedance: {}", self.name.trim()) }, notes: self.cond.trim().to_string(), include: vec!["Impedance".to_string()], open: true, path: None });
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Driver").small().weak());
+            ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(150.0).hint_text("name of the driver"));
+            ui.label(RichText::new("Conditions").small().weak());
+            ui.add(egui::TextEdit::singleline(&mut self.cond).desired_width(220.0).hint_text("free air, 20 °C, -25 dBFS ...")).on_hover_text("Both go into the report and the copied parameters");
         });
         let store = self.curve.as_ref().map(|c| (c.f.clone(), c.db.clone(), c.phase_deg.clone()));
         self.lib.ui(ui, store);
-        egui::CollapsingHeader::new("Driver parameters (Thiele-Small)").default_open(self.free.is_some()).id_salt("imp_ts").show(ui, |ui| {
+        egui::CollapsingHeader::new("Driver (Thiele-Small)").default_open(self.free.is_some()).id_salt("imp_ts").show(ui, |ui| {
             let busy = cx.sweep.busy();
-            ui.label(RichText::new("Free air: the driver hanging in the air on its leads (nothing against the cone), measured from a low frequency (a quarter of its resonance or lower) up to 20 kHz.").small().weak());
+            ui.label(RichText::new("Free air: the driver hanging on its leads, from below a quarter of Fs up to 20 kHz.").small().weak());
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!busy, egui::Button::new("Measure free-air parameters")).on_hover_text("Runs the sweep and takes Re, Fs, Qms, Qes, Qts and Le from it").clicked() {
+                if ui.add_enabled(!busy, egui::Button::new("Measure")).on_hover_text("Runs the sweep and takes Re, Fs, Qms, Qes, Qts and Le from it").clicked() {
                     self.intent = 1;
                     self.start_measure(cx);
                 }
-                if ui.add_enabled(self.curve.is_some(), egui::Button::new("Use the curve shown")).on_hover_text("The impedance below as the free-air measurement").clicked() {
+                if ui.add_enabled(self.curve.is_some(), egui::Button::new("Use previous")).on_hover_text("The impedance below as the free-air measurement").clicked() {
                     self.take_ts(false);
                 }
             });
             ui.separator();
-            ui.label(RichText::new("V(as) and M(ms): one more piece of information is needed").strong());
+            ui.label(RichText::new("V(as) and M(ms)").strong()).on_hover_text("One more piece of information is needed: choose how");
             ui.horizontal_wrapped(|ui| {
                 for (k, name) in ["Test box", "Added mass", "Specified SPL", "Specified Mmd"].into_iter().enumerate() {
                     ui.radio_value(&mut self.method, k, name);
@@ -612,12 +792,12 @@ impl Tool for Impedance {
                 ui.end_row();
                 match self.method {
                     0 => {
-                        ui.label("Volume of the test box");
+                        ui.label("Box volume");
                         ui.add(egui::DragValue::new(&mut self.box_l).range(0.1..=1000.0).speed(0.1).suffix(" l")).on_hover_text("A sealed box, well filled with damping, about the volume of the driver's Vas");
                         ui.end_row();
                     }
                     1 => {
-                        ui.label("Mass added to the cone");
+                        ui.label("Added mass");
                         ui.add(egui::DragValue::new(&mut self.add_g).range(0.1..=1000.0).speed(0.1).suffix(" g")).on_hover_text("Modelling clay stuck evenly around the dust cap; weigh it. About the mass of the cone or less.");
                         ui.end_row();
                     }
@@ -627,7 +807,7 @@ impl Tool for Impedance {
                         ui.end_row();
                     }
                     _ => {
-                        ui.label("Moving mass of the cone, M(md)");
+                        ui.label("M(md)");
                         ui.add(egui::DragValue::new(&mut self.mmd_g).range(0.1..=2000.0).speed(0.1).suffix(" g")).on_hover_text("The cone, the coil and half of the surround without the air load: from the data sheet");
                         ui.end_row();
                     }
@@ -636,15 +816,15 @@ impl Tool for Impedance {
             if self.method < 2 {
                 ui.horizontal_wrapped(|ui| {
                     let what = if self.method == 0 { "the driver in the test box" } else { "the driver with the mass on the cone" };
-                    if ui.add_enabled(!busy, egui::Button::new("Measure V(as)")).on_hover_text(format!("Runs the sweep with {what} and takes its resonance")).clicked() {
+                    if ui.add_enabled(!busy, egui::Button::new("Measure")).on_hover_text(format!("Runs the sweep with {what} and takes its resonance")).clicked() {
                         self.intent = 2;
                         self.start_measure(cx);
                     }
-                    if ui.add_enabled(self.curve.is_some(), egui::Button::new("Use the curve shown")).on_hover_text(format!("The impedance below is {what}")).clicked() {
+                    if ui.add_enabled(self.curve.is_some(), egui::Button::new("Use as V(as)")).on_hover_text(format!("The impedance below is {what}")).clicked() {
                         self.take_ts(true);
                     }
                     if let Some(f) = self.fs2 {
-                        ui.label(RichText::new(format!("second resonance {f:.1} Hz")).small().weak());
+                        ui.label(RichText::new(format!("F(s2) {f:.1} Hz")).small().weak());
                     }
                 });
             }
@@ -678,7 +858,9 @@ impl Tool for Impedance {
                 ui.horizontal(|ui| {
                     if crate::mapping::small_btn(ui, "Copy").on_hover_text("The parameters as text").clicked() {
                         if let Some(t) = self.ts_text() {
-                            ui.ctx().copy_text(t);
+                            if crate::clip::copy(&t) {
+                                self.note = "Copied".into();
+                            }
                         }
                     }
                     if crate::mapping::small_btn(ui, "Clear").clicked() {
@@ -690,7 +872,7 @@ impl Tool for Impedance {
         });
         let Some(c) = &self.curve else {
             ui.add_space(8.0);
-            ui.label(RichText::new("Wire the generator output through the series resistor to the device, the inputs as in the picture above, and press Measure.\nEvery measurement can be stored (Store) and overlaid with the others; the list below manages them.").weak());
+            ui.label(RichText::new("Press Measure. Store keeps a curve to overlay.").weak());
             return;
         };
         let ppo = LOG_N as f32 / (c.f[c.f.len() - 1] / c.f[0]).log2();
@@ -700,7 +882,7 @@ impl Tool for Impedance {
         let (lo, hi) = layers.iter().flat_map(|(_, _, v)| v.iter()).chain(cur_db.iter()).filter(|x| x.is_finite()).fold((f32::MAX, f32::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
         let (y0, y1) = if self.auto && lo < hi { ((lo - 3.0).floor(), (hi + 3.0).ceil()) } else { (self.y_lo, self.y_hi) };
 
-        let (resp, painter, rect) = canvas(ui, 160.0);
+        let (resp, painter, rect) = canvas_h(ui, plot_h);
         let split = if self.show_phase { rect.height() * 0.70 } else { rect.height() };
         let top = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), split));
         let pr = inset(top);
@@ -794,97 +976,6 @@ impl Tool for Impedance {
             painter.line_segment([Pos2::new(h.x, pr.top()), Pos2::new(h.x, rect.bottom() - 18.0)], Stroke::new(1.0, Color32::from_white_alpha(50)));
         }
         let _ = (self.seen_id, cx.gen_running);
-    }
-
-    fn report(&self, _cx: &Ctx) -> Vec<crate::report::Section> {
-        use crate::report::*;
-        let Some(c) = &self.curve else { return Vec::new() };
-        let ppo = LOG_N as f32 / (c.f[c.f.len() - 1] / c.f[0]).log2();
-        let db = super::response::smooth_log(&c.db, ppo, SMOOTH[self.smooth].0);
-        let x = (c.f[0], *c.f.last().unwrap());
-        let mag = vec![Series { name: "impedance".into(), color: COLORS[0], pts: c.f.iter().copied().zip(db.iter().copied()).collect() }];
-        let y = auto_range(&mag, 3.0, 6.0);
-        let ph = vec![Series { name: String::new(), color: COLORS[1], pts: c.f.iter().copied().zip(c.phase_deg.iter().copied()).collect() }];
-        vec![Section {
-            id: "Impedance",
-            title: "Impedance".into(),
-            blocks: vec![
-                Block::Text(format!("Series resistor {} (+ {} output impedance). Magnitude in dB re 1 ohm: 0 dB is 1 ohm, 20 dB is 10 ohm.", fmt_ohm(self.r_ref), fmt_ohm(self.r_out))),
-                Block::Plot(PlotSpec { title: "Impedance magnitude".into(), xlog: true, xlabel: "Hz".into(), ylabel: "dB re 1 ohm".into(), x, y, series: mag }),
-                Block::Plot(PlotSpec { title: "Impedance phase".into(), xlog: true, xlabel: "Hz".into(), ylabel: "degrees".into(), x, y: (-90.0, 90.0), series: ph }),
-            ]
-            .into_iter()
-            .chain(self.ts_text().map(|t| Block::Text(format!("Thiele-Small parameters\n{t}"))))
-            .collect(),
-        }]
-    }
-
-    fn save(&self, o: &mut SettingsOut) {
-        o.put("mode", self.mode);
-        o.put("r_ref", self.r_ref);
-        o.put("r_out", self.r_out);
-        o.put("out_v", self.out_v);
-        o.put("in_v", self.in_v);
-        o.put("cal_r", self.cal_r);
-        o.put("dats_ch", self.dats_ch);
-        o.put("d_mm", self.d_mm);
-        o.put("method", self.method);
-        o.put("box_l", self.box_l);
-        o.put("add_g", self.add_g);
-        o.put("spl", self.spl);
-        o.put("mmd_g", self.mmd_g);
-        if let Some(sh) = &self.short {
-            o.put("short", sh.encode());
-        }
-        if let Some(v) = self.cal_rs {
-            o.put("cal_rs", v);
-        }
-        if let Some(v) = self.cal_open {
-            o.put("cal_open", v);
-        }
-        if let Some(v) = self.cal_pt {
-            o.put("cal_pt", v);
-        }
-        if let Some(g) = self.cal_gain {
-            o.put("cal_gain", g);
-        }
-        o.put("smooth", self.smooth);
-        o.put("phase", self.show_phase);
-        o.put("auto", self.auto);
-        o.put("y_lo", self.y_lo);
-        o.put("y_hi", self.y_hi);
-    }
-
-    fn load(&mut self, i: &SettingsIn) {
-        if let Some(v) = i.get::<usize>("mode") {
-            self.mode = v.min(2);
-        }
-        for (k, dst, lo, hi) in [("r_ref", &mut self.r_ref, 0.1, 100_000.0), ("r_out", &mut self.r_out, 0.0, 1000.0), ("out_v", &mut self.out_v, 0.001, 100.0), ("in_v", &mut self.in_v, 0.001, 100.0), ("cal_r", &mut self.cal_r, 0.1, 100_000.0)] {
-            if let Some(v) = i.get::<f32>(k) {
-                *dst = v.clamp(lo, hi);
-            }
-        }
-        self.dats_ch = i.get::<usize>("dats_ch").unwrap_or(0).min(1);
-        for (k, dst, lo, hi) in [("d_mm", &mut self.d_mm, 10.0, 800.0), ("box_l", &mut self.box_l, 0.1, 1000.0), ("add_g", &mut self.add_g, 0.1, 1000.0), ("spl", &mut self.spl, 50.0, 130.0), ("mmd_g", &mut self.mmd_g, 0.1, 2000.0)] {
-            if let Some(v) = i.get::<f32>(k) {
-                *dst = v.clamp(lo, hi);
-            }
-        }
-        self.method = i.get::<usize>("method").unwrap_or(0).min(3);
-        self.short = i.str("short").and_then(|v| ZShort::decode(&v));
-        self.cal_rs = i.get::<f32>("cal_rs").filter(|g| *g > 0.0 && *g < 1e7);
-        self.cal_open = i.get::<f32>("cal_open").filter(|g| *g > 0.0 && *g < 1e6);
-        self.cal_pt = i.get::<f32>("cal_pt").filter(|g| *g > 0.0 && *g < 1e6);
-        self.cal_gain = i.get::<f32>("cal_gain").filter(|g| *g > 0.0 && *g < 1e6);
-        if let Some(v) = i.get::<usize>("smooth") {
-            self.smooth = v.min(SMOOTH.len() - 1);
-        }
-        i.set("phase", &mut self.show_phase);
-        i.set("auto", &mut self.auto);
-        i.set("y_lo", &mut self.y_lo);
-        i.set("y_hi", &mut self.y_hi);
-        self.y_hi = self.y_hi.clamp(-50.0, 120.0);
-        self.y_lo = self.y_lo.clamp(-60.0, self.y_hi - 5.0);
     }
 }
 

@@ -89,7 +89,7 @@ impl Tool for Profiler {
                     for e in &events {
                         s += &format!("{}  {}  -> {}\n", mmss(e.t), e.what, e.cause);
                     }
-                    ui.ctx().copy_text(s);
+                    crate::clip::copy(&s);
                 }
             });
             if !ok {

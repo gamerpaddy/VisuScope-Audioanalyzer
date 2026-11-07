@@ -29,6 +29,12 @@ impl App {
         if req.use_dats {
             self.use_dats();
         }
+        if req.dats_nodes {
+            if let Some(d) = self.dats.clone() {
+                self.graph_on = true;
+                self.tool_command("Routing", &format!("datsnodes	{}	{}", d.in_id.clone().unwrap_or_default(), d.out_id.clone().unwrap_or_default()));
+            }
+        }
         if let Some(code) = req.exit {
             self.save_settings(true);
             self.lib.save_auto();
