@@ -144,6 +144,12 @@ pub struct App {
     pub center_at: Option<u32>,
     pub scan_slot: Arc<parking_lot::Mutex<Option<(Vec<DevInfo>, Vec<DevInfo>)>>>,
     pub scanning: bool,
+    /// a DATS V3 appeared since the Impedance window looked
+    pub dats_new: bool,
+    /// a Dayton DATS V3 that is connected (its USB audio device), found by name at every scan
+    pub dats: Option<DatsDev>,
+    /// when the devices were last scanned by themselves (a device that is plugged in shows up within seconds)
+    pub auto_scan: std::time::Instant,
     pub tg: GenParams,
     pub gen_sent: GenParams,
     pub gen_shared: Arc<parking_lot::Mutex<GenParams>>,
@@ -387,6 +393,10 @@ impl App {
             center_at: None,
             scan_slot: Arc::new(parking_lot::Mutex::new(None)),
             scanning: false,
+            dats_new: std::env::var_os("VISUSCOPE_DATS_DEMO").is_some(),
+            // test hook (screenshots): VISUSCOPE_DATS_DEMO=1 pretends a DATS V3 is connected
+            dats: std::env::var_os("VISUSCOPE_DATS_DEMO").map(|_| DatsDev { label: "Microphone (DATS V3 USB Audio)".into(), in_id: Some("demo-in".into()), out_id: Some("demo-out".into()) }),
+            auto_scan: std::time::Instant::now(),
             tg: GenParams::default(),
             gen_sent: GenParams::default(),
             gen_shared: Arc::new(parking_lot::Mutex::new(GenParams::default())),
@@ -553,6 +563,9 @@ impl App {
         kv("sc_src", &sc.trig_src);
         kv("sc_hf", &sc.hf_reject);
         kv("sc_hf_hz", &sc.hf_hz);
+        kv("sc_blend", &sc.blend);
+        kv("sc_col_l", &format!("{:02x}{:02x}{:02x}", sc.col[0].r(), sc.col[0].g(), sc.col[0].b()));
+        kv("sc_col_r", &format!("{:02x}{:02x}{:02x}", sc.col[1].r(), sc.col[1].g(), sc.col[1].b()));
         kv("sc_l", &sc.show[0]);
         kv("sc_r", &sc.show[1]);
         for (i, w) in self.wins.iter().enumerate() {
@@ -766,6 +779,12 @@ impl App {
         self.push_mic();
         set!(self.scope.rising, "sc_rising");
         set!(self.scope.hf_reject, "sc_hf");
+        set!(self.scope.blend, "sc_blend");
+        for (k, i) in [("sc_col_l", 0), ("sc_col_r", 1)] {
+            if let Some(v) = m.get(k).map(|v| v.trim()).filter(|v| v.len() == 6).and_then(|v| u32::from_str_radix(v, 16).ok()) {
+                self.scope.col[i] = Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
+            }
+        }
         if let Some(v) = get::<f32>(&m, "sc_hf_hz") {
             self.scope.hf_hz = v.clamp(100.0, 96000.0);
         }
@@ -774,7 +793,7 @@ impl App {
         set!(self.scope.level, "sc_level");
         set!(self.scope.v_off, "sc_v_off");
         if let Some(v) = get::<f32>(&m, "sc_t_div") {
-            self.scope.t_div = v.clamp(1e-6, 20.0);
+            self.scope.t_div = v.clamp(1e-6, 120.0);
         }
         if let Some(v) = get::<f32>(&m, "sc_v_div") {
             if v.is_finite() && v > 0.0 {
@@ -883,6 +902,20 @@ impl App {
             self.sel_dev = cur_in.and_then(|id| self.devices.iter().position(|d| d.id == id)).unwrap_or(0);
             self.gen_sel = cur_out.and_then(|id| self.gen_devs.iter().position(|d| d.id == id)).unwrap_or(0);
             self.scanning = false;
+            let mut now = find_dats(&self.devices, &self.gen_devs);
+            if now.is_none() && std::env::var_os("VISUSCOPE_DATS_DEMO").is_some() {
+                now = self.dats.clone();
+            }
+            if now.is_some() && self.dats.is_none() {
+                let d = now.as_ref().unwrap();
+                crate::log::log(&format!("DATS V3 found: {} (input {:?}, output {:?})", d.label, d.in_id, d.out_id));
+                self.note = format!("Dayton DATS V3 detected ({}): open Tools > Measure > Impedance to use it", d.label);
+                self.dats_new = true;
+            }
+            if now.is_none() && self.dats.is_some() {
+                self.note = "The DATS V3 was disconnected".into();
+            }
+            self.dats = now;
         }
     }
 
@@ -1605,6 +1638,11 @@ impl eframe::App for App {
         self.handle_screenshot();
         self.sync_graph_mode();
         self.poll_scan();
+        // a device that is plugged in later is found without a click on Rescan (not while a measurement runs)
+        if self.auto_scan.elapsed() > std::time::Duration::from_secs(4) && !self.scanning && !self.sweep.busy() {
+            self.auto_scan = std::time::Instant::now();
+            self.request_scan();
+        }
         self.poll_mic_dialog();
         self.manage_monitor();
         self.tools_update();
@@ -1675,6 +1713,28 @@ impl eframe::App for App {
     }
 }
 
+/// A Dayton Audio DATS V3 on the USB: its audio input and output (found by the name Windows shows).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DatsDev {
+    pub label: String,
+    pub in_id: Option<String>,
+    pub out_id: Option<String>,
+}
+
+/// The DATS V3 among the devices. Windows shows it as "USB AUDIO  CODEC" (the USB audio chip of the box, a PCM2902: input
+/// "Line (USB AUDIO  CODEC)", output "Speakers (USB AUDIO  CODEC)"), a name with "DATS" in it is taken too.
+pub fn find_dats(inputs: &[DevInfo], outputs: &[DevInfo]) -> Option<DatsDev> {
+    let is = |l: &str| {
+        let l = l.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+        l.contains("usb audio codec") || l.contains("dats")
+    };
+    let i = inputs.iter().find(|d| is(&d.label) && !d.label.starts_with("[Loopback]"));
+    let o = outputs.iter().find(|d| is(&d.label));
+    let label = i.or(o)?.label.clone();
+    let label = label.trim_start_matches("[Input] ").trim_end_matches(" (default)").to_string();
+    Some(DatsDev { label, in_id: i.map(|d| d.id.clone()), out_id: o.map(|d| d.id.clone()) })
+}
+
 pub const CH_COLORS: [Color32; 2] = [Color32::from_rgb(70, 200, 255), Color32::from_rgb(255, 100, 160)];
 pub const CUR_A: Color32 = Color32::from_rgb(255, 230, 80);
 pub const CUR_B: Color32 = Color32::from_rgb(120, 255, 140);
@@ -1720,4 +1780,28 @@ pub fn pan_view(lo: &mut f32, hi: &mut f32, delta: f32) {
     let nlo = (*lo + delta).clamp(0.0, 1.0 - w);
     *lo = nlo;
     *hi = nlo + w;
+}
+
+#[cfg(test)]
+mod dats_tests {
+    use super::*;
+
+    fn dev(id: &str, label: &str) -> DevInfo {
+        DevInfo { id: id.into(), label: label.into() }
+    }
+
+    #[test]
+    fn a_dats_v3_is_found_by_the_name_of_its_usb_audio_device() {
+        let ins = vec![dev("a", "[Input] Microphone (USB Audio)"), dev("b", "[Input] Line (USB AUDIO  CODEC)"), dev("c", "[Loopback] Lautsprecher (USB AUDIO  CODEC)")];
+        let outs = vec![dev("x", "Speakers (Realtek)"), dev("y", "Lautsprecher (USB AUDIO  CODEC) (default)")];
+        let d = find_dats(&ins, &outs).unwrap();
+        assert_eq!(d.in_id.as_deref(), Some("b"));
+        assert_eq!(d.out_id.as_deref(), Some("y"));
+        assert!(d.label.contains("USB AUDIO"));
+        // nothing connected
+        assert!(find_dats(&ins[..1], &outs[..1]).is_none());
+        // only the playback side shows
+        let d = find_dats(&ins[..1], &outs).unwrap();
+        assert!(d.in_id.is_none() && d.out_id.is_some());
+    }
 }

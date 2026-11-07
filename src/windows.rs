@@ -263,6 +263,68 @@ pub fn tile_rects(items: &[(usize, f32)], area: Rect, gap: f32) -> Vec<(usize, R
     out
 }
 
+/// Lay windows out in `area` the way `cur` has them relative to each other: split the set by a line that no window crosses (or, where
+/// they overlap, at the median), give each side the share of the area its windows had, and go on inside each half.
+fn arrange_like(cur: &[(usize, Rect)], area: Rect, gap: f32, out: &mut Vec<(usize, Rect)>) {
+    if cur.len() == 1 {
+        out.push((cur[0].0, area));
+        return;
+    }
+    let size = |g: &[(usize, Rect)]| -> f32 { g.iter().map(|(_, r)| r.width() * r.height()).sum::<f32>().max(1.0) };
+    // the best clean cut along one axis: windows sorted by their centres, the cut after k where nothing crosses it
+    let mut best: Option<(f32, bool, usize, Vec<(usize, Rect)>)> = None;
+    for vertical in [true, false] {
+        let mut v: Vec<(usize, Rect)> = cur.to_vec();
+        v.sort_by(|a, b| {
+            let (ca, cb) = if vertical { (a.1.center().x, b.1.center().x) } else { (a.1.center().y, b.1.center().y) };
+            ca.total_cmp(&cb)
+        });
+        for k in 1..v.len() {
+            let (a, b) = v.split_at(k);
+            let (a_end, b_start) = if vertical {
+                (a.iter().map(|x| x.1.max.x).fold(f32::MIN, f32::max), b.iter().map(|x| x.1.min.x).fold(f32::MAX, f32::min))
+            } else {
+                (a.iter().map(|x| x.1.max.y).fold(f32::MIN, f32::max), b.iter().map(|x| x.1.min.y).fold(f32::MAX, f32::min))
+            };
+            // a clean cut (a few pixels of slack for the gaps) that splits the area as evenly as it can
+            let slack = gap * 3.0 + 2.0;
+            if a_end <= b_start + slack {
+                let balance = (size(a) / size(&v) - 0.5).abs();
+                // (a cut that leaves a clean space between the halves is worth more than a touching one)
+                if best.as_ref().is_none_or(|bb| balance < bb.0) {
+                    best = Some((balance, vertical, k, v.clone()));
+                }
+            }
+        }
+    }
+    let (vertical, k, v) = match best {
+        Some((_, vertical, k, v)) => (vertical, k, v),
+        None => {
+            // overlapping windows: cut across the axis they are spread over most, at the median
+            let spread = |f: &dyn Fn(&Rect) -> f32| {
+                let (lo, hi) = cur.iter().fold((f32::MAX, f32::MIN), |(l, h), (_, r)| (l.min(f(r)), h.max(f(r))));
+                hi - lo
+            };
+            let vertical = spread(&|r: &Rect| r.center().x) >= spread(&|r: &Rect| r.center().y);
+            let mut v = cur.to_vec();
+            v.sort_by(|a, b| if vertical { a.1.center().x.total_cmp(&b.1.center().x) } else { a.1.center().y.total_cmp(&b.1.center().y) });
+            let k = v.len() / 2;
+            (vertical, k.max(1), v)
+        }
+    };
+    let (a, b) = v.split_at(k);
+    let frac = (size(a) / size(&v)).clamp(0.12, 0.88);
+    let (ra, rb) = if vertical {
+        let cut = area.min.x + (area.width() - gap) * frac;
+        (Rect::from_min_max(area.min, pos2(cut, area.max.y)), Rect::from_min_max(pos2(cut + gap, area.min.y), area.max))
+    } else {
+        let cut = area.min.y + (area.height() - gap) * frac;
+        (Rect::from_min_max(area.min, pos2(area.max.x, cut)), Rect::from_min_max(pos2(area.min.x, cut + gap), area.max))
+    };
+    arrange_like(a, ra, gap, out);
+    arrange_like(b, rb, gap, out);
+}
+
 impl App {
     pub fn win_title(&self, i: usize) -> &'static str {
         match i {
@@ -291,7 +353,31 @@ impl App {
         if items.is_empty() {
             return;
         }
-        for (i, r) in tile_rects(&items, area, GAP) {
+        // keep the arrangement: the windows stay where they are relative to each other (the spectrum left of the scope stays
+        // left of it), only moved and scaled to fill the area. A window that is new takes half of the biggest one.
+        let mut cur: Vec<(usize, Rect)> = items.iter().filter_map(|&(i, _)| self.wins[i].rect.map(|r| (i, r))).collect();
+        let fresh: Vec<usize> = items.iter().map(|x| x.0).filter(|i| self.wins[*i].rect.is_none()).collect();
+        let known = cur.len();
+        let placed: Vec<(usize, Rect)> = if known == 0 || !cur.iter().all(|(_, r)| r.is_positive() && r.width() > 20.0 && r.height() > 20.0) {
+            tile_rects(&items, area, GAP)
+        } else {
+            for i in fresh {
+                if let Some(k) = (0..cur.len()).max_by(|&a, &b| (cur[a].1.width() * cur[a].1.height()).total_cmp(&(cur[b].1.width() * cur[b].1.height()))) {
+                    let r = cur[k].1;
+                    let (a, b) = if r.width() >= r.height() {
+                        (Rect::from_min_max(r.min, pos2(r.center().x, r.max.y)), Rect::from_min_max(pos2(r.center().x, r.min.y), r.max))
+                    } else {
+                        (Rect::from_min_max(r.min, pos2(r.max.x, r.center().y)), Rect::from_min_max(pos2(r.min.x, r.center().y), r.max))
+                    };
+                    cur[k].1 = a;
+                    cur.push((i, b));
+                }
+            }
+            let mut out = Vec::new();
+            arrange_like(&cur, area.shrink(GAP), GAP, &mut out);
+            out
+        };
+        for (i, r) in placed {
             if self.prof {
                 eprintln!("tile {i} {}: {:?}", self.win_title(i), r);
             }
@@ -970,11 +1056,6 @@ impl App {
                 if fb.clicked() {
                     self.p.paused = !self.p.paused;
                 }
-                let pb = crate::mapping::btn(ui, "PNG").on_hover_text("Save a screenshot");
-                crate::mapping::button_menu(&pb, &crate::mapping::Target::toggle("png", "Save a screenshot", false));
-                if pb.clicked() {
-                    self.request_png(ui.ctx());
-                }
                 if crate::mapping::btn(ui, "Options").on_hover_text("Frame rate, window behaviour, folders ...").clicked() {
                     self.opts_open = !self.opts_open;
                 }
@@ -1064,6 +1145,27 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_tiling_keeps_the_windows_where_they_are_relative_to_each_other() {
+        let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
+        // the scope on the left, the spectrum in the middle, the spectrogram on the right, the timeline below them
+        let cur = vec![(4usize, r(0.0, 0.0, 300.0, 300.0)), (0, r(310.0, 0.0, 900.0, 300.0)), (1, r(910.0, 0.0, 1200.0, 300.0)), (15, r(0.0, 310.0, 1200.0, 600.0))];
+        let area = r(0.0, 0.0, 2000.0, 1000.0);
+        let mut out = Vec::new();
+        arrange_like(&cur, area, 4.0, &mut out);
+        let get = |i: usize| out.iter().find(|x| x.0 == i).unwrap().1;
+        assert!(get(4).max.x <= get(0).min.x + 1.0 && get(0).max.x <= get(1).min.x + 1.0, "left to right: scope, spectrum, spectrogram");
+        assert!(get(4).max.y <= get(15).min.y + 1.0, "the timeline stays below");
+        // the area is filled (the areas add up to nearly all of it) and nothing overlaps
+        let total: f32 = out.iter().map(|x| x.1.width() * x.1.height()).sum();
+        assert!(total > 0.93 * area.width() * area.height(), "{total}");
+        for (i, a) in out.iter().enumerate() {
+            for b in out.iter().skip(i + 1) {
+                assert!(!a.1.shrink(1.0).intersects(b.1.shrink(1.0)), "{:?} {:?}", a, b);
+            }
+        }
+    }
+
     use super::*;
 
     fn area() -> Rect {

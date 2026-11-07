@@ -15,13 +15,24 @@ const HILBERT_DELAY: usize = (HILBERT_TAPS - 1) / 2;
 
 /// Phase shift node: a polarity switch plus, optionally, a constant shift of every frequency (a Hilbert transformer,
 /// which delays the signal by `latency()` frames) or an all-pass at a chosen frequency.
+struct Layer {
+    unit: Option<ConvUnit>,
+    w: f32,
+}
+
 pub struct PhaseUnit {
     sign: f32,
     /// 0 polarity only, 1 constant shift, 2 all-pass, 3 drawn curve
     mode: usize,
-    /// the drawn curve as a linear-phase FIR (mode 3), with the curve and rate it was made from
-    curve: Option<ConvUnit>,
+    /// the drawn curve as linear-phase FIRs (mode 3). A change of the curve adds a layer that fades in over the older ones (a hard
+    /// switch would cut the sound and make it stutter); the weights always add up to 1. `None` as the filter is the dry signal.
+    layers: Vec<Layer>,
+    /// the curve and rate the newest layer was made from
     curve_key: (String, u32),
+    /// scratch: what each layer made of the block
+    sc: Vec<[Vec<f32>; 2]>,
+    /// the most recent input, to run a new filter over before it takes over (it would start from silence otherwise)
+    recent: [Vec<f32>; 2],
     cos: f32,
     sin: f32,
     ap: Biquad,
@@ -45,7 +56,7 @@ impl Default for PhaseUnit {
                 2.0 / (PI * m as f32) * w
             })
             .collect();
-        Self { sign: 1.0, mode: 0, curve: None, curve_key: (String::new(), 0), cos: 1.0, sin: 0.0, ap: Biquad::default(), hilbert, hist: [vec![0.0; HILBERT_TAPS * 2], vec![0.0; HILBERT_TAPS * 2]], pos: 0 }
+        Self { sign: 1.0, mode: 0, layers: Vec::new(), curve_key: (String::new(), 0), sc: Vec::new(), recent: [Vec::new(), Vec::new()], cos: 1.0, sin: 0.0, ap: Biquad::default(), hilbert, hist: [vec![0.0; HILBERT_TAPS * 2], vec![0.0; HILBERT_TAPS * 2]], pos: 0 }
     }
 }
 
@@ -98,7 +109,7 @@ impl PhaseUnit {
     /// Make the filter of a drawn curve (only in that mode, and only when the curve or the rate changed).
     pub fn set_curve(&mut self, s: &str, fs: f32) {
         if self.mode != 3 {
-            self.curve = None;
+            self.layers.clear();
             self.curve_key = (String::new(), 0);
             return;
         }
@@ -106,10 +117,11 @@ impl PhaseUnit {
         if self.curve_key == key {
             return;
         }
+        let first = self.layers.is_empty();
         self.curve_key = key.clone();
         // a flat curve is "off": no filter, no delay
         if s.is_empty() {
-            self.curve = None;
+            self.add_layer(None, first);
             return;
         }
         let v = curve_parse(s);
@@ -135,15 +147,39 @@ impl PhaseUnit {
         let mut u = ConvUnit::new();
         u.load(vec![taps.clone(), taps], 1.0, 256, n as f32 / fs);
         u.set(&[100.0, 0.0]);
-        self.curve = Some(u);
-        self.curve_key = key;
+        // warm up on the recent input: its filter state is what the signal was a moment ago, not silence
+        if !first {
+            let (mut a, mut b) = (self.recent[0].clone(), self.recent[1].clone());
+            u.process(&mut a, &mut b);
+        }
+        self.add_layer(Some(u), first);
+    }
+
+    /// A new filter takes over: at once for the first one, else it fades in over about 80 ms.
+    fn add_layer(&mut self, unit: Option<ConvUnit>, first: bool) {
+        if first {
+            self.layers.clear();
+            self.layers.push(Layer { unit, w: 1.0 });
+            return;
+        }
+        self.layers.push(Layer { unit, w: 0.0 });
+        // (a hand that draws changes the curve every frame: do not pile up layers)
+        while self.layers.len() > 5 {
+            let last = self.layers.len() - 1;
+            if let Some((i, _)) = self.layers[..last].iter().enumerate().min_by(|a, b| a.1.w.total_cmp(&b.1.w)) {
+                let w = self.layers.remove(i).w;
+                // its weight goes to the newest older layer, so the sum stays 1
+                let k = self.layers.len() - 2;
+                self.layers[k].w += w;
+            }
+        }
     }
 
     /// Frames of delay the node adds in its current mode.
     pub fn latency(&self) -> usize {
         match self.mode {
             1 => HILBERT_DELAY,
-            3 => self.curve.as_ref().map_or(0, |c| c.latency() + CURVE_TAPS / 2),
+            3 => self.layers.last().and_then(|l| l.unit.as_ref()).map_or(0, |c| c.latency() + CURVE_TAPS / 2),
             _ => 0,
         }
     }
@@ -152,8 +188,59 @@ impl PhaseUnit {
         match self.mode {
             2 => self.ap.process(l, r),
             3 => {
-                if let Some(c) = &mut self.curve {
-                    c.process(l, r);
+                // (remember the input: a new filter is run over it before it takes over)
+                for (h, x) in self.recent.iter_mut().zip([&*l, &*r]) {
+                    h.extend_from_slice(x);
+                    let keep = CURVE_TAPS + 1024;
+                    if h.len() > keep {
+                        h.drain(..h.len() - keep);
+                    }
+                }
+                let n = l.len();
+                if self.layers.len() <= 1 {
+                    if let Some(c) = self.layers.last_mut().and_then(|x| x.unit.as_mut()) {
+                        c.process(l, r);
+                    }
+                } else {
+                    let step = 1.0 / (0.08 * self.curve_key.1.max(8000) as f32);
+                    let count = self.layers.len();
+                    self.sc.resize_with(count, Default::default);
+                    for (layer, sc) in self.layers.iter_mut().zip(self.sc.iter_mut()) {
+                        for (dst, src) in sc.iter_mut().zip([&*l, &*r]) {
+                            dst.clear();
+                            dst.extend_from_slice(src);
+                        }
+                        if let Some(u) = layer.unit.as_mut() {
+                            let [a, b] = sc;
+                            u.process(a, b);
+                        }
+                    }
+                    let last = count - 1;
+                    for k in 0..n {
+                        let prev = self.layers[last].w;
+                        let now = (prev + step).min(1.0);
+                        let scale = if prev < 1.0 { (1.0 - now) / (1.0 - prev) } else { 1.0 };
+                        let (mut ol, mut or) = (0f32, 0f32);
+                        for (i, (layer, sc)) in self.layers.iter_mut().zip(self.sc.iter()).enumerate() {
+                            layer.w = if i == last { now } else { layer.w * scale };
+                            ol += sc[0][k] * layer.w;
+                            or += sc[1][k] * layer.w;
+                        }
+                        l[k] = ol;
+                        r[k] = or;
+                    }
+                    // the layers that have faded out are dropped; when only the newest is left it goes on alone
+                    let last = self.layers.len() - 1;
+                    let mut i = 0;
+                    self.layers.retain(|x| {
+                        i += 1;
+                        i - 1 == last || x.w > 1e-4
+                    });
+                    if self.layers.last().is_some_and(|x| x.w >= 0.9999) {
+                        let keep = self.layers.pop().unwrap();
+                        self.layers.clear();
+                        self.layers.push(Layer { unit: keep.unit, w: 1.0 });
+                    }
                 }
             }
             1 => {
@@ -1101,6 +1188,49 @@ mod chunking {
         u2.set_curve(&s, fs);
         let d100 = phase_of(&mut u2, 100.0, true) - phase_of(&mut u2, 100.0, false);
         assert!(d100.abs() < 6.0, "100 Hz turned by {d100}");
+    }
+
+    #[test]
+    fn changing_the_drawn_curve_fades_instead_of_cutting_the_sound() {
+        let fs = 48000.0;
+        let mut u = PhaseUnit::default();
+        u.set(&[0.0, 3.0, 0.0, 1000.0, 0.7], fs);
+        let mut v = vec![0.0f32; CURVE_N];
+        for d in v.iter_mut() {
+            *d = 90.0;
+        }
+        u.set_curve(&curve_encode(&v), fs);
+        let blk = 480;
+        let mut worst = 0f32;
+        let mut prev = 0f32;
+        let mut t = 0usize;
+        let mut out_all = Vec::new();
+        for k in 0..400 {
+            // the curve changes every few blocks, like while it is drawn
+            if k % 7 == 3 {
+                for d in v.iter_mut() {
+                    *d = (*d + 25.0).min(180.0) % 180.0;
+                }
+                u.set_curve(&curve_encode(&v), fs);
+            }
+            let mut l: Vec<f32> = (0..blk).map(|i| 0.5 * (2.0 * PI * 500.0 * (t + i) as f32 / fs).sin()).collect();
+            let mut r = l.clone();
+            u.process(&mut l, &mut r);
+            t += blk;
+            for x in &l {
+                if k > 60 {
+                    worst = worst.max((x - prev).abs());
+                }
+                prev = *x;
+            }
+            out_all.extend_from_slice(&l);
+        }
+        // a 500 Hz sine of 0.5 moves by at most 0.033 per sample; a cut or a restart would jump far more than that
+        assert!(worst < 0.12, "jump {worst}");
+        // and the sound never dies out
+        let tail = &out_all[out_all.len() - 24000..];
+        let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+        assert!(rms > 0.2, "rms {rms}");
     }
 
     #[test]

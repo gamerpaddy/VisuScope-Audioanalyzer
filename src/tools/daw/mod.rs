@@ -4,6 +4,8 @@
 //! loudness ...) works on the timeline too.
 
 mod analysis;
+mod edit;
+mod edit_ui;
 pub mod capture;
 mod file;
 mod ops;
@@ -188,7 +190,8 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
 enum Job {
     /// `target`: put the audio on this track at `at` instead of on new tracks
     Imported { name: String, res: Result<Vec<Arc<Source>>, String>, at: i64, target: Option<u32> },
-    Recorded(Vec<(u32, Arc<Source>, i64)>, bool),
+    /// the takes (track, audio, where it starts), whether a gap was possible, and the punch range
+    Recorded(Vec<(u32, Arc<Source>, i64)>, bool, Option<(i64, i64)>),
     Analysis(AnKey, Arc<AnalysisOut>),
     Saved(Result<PathBuf, String>, bool),
     Loaded(Result<file::Loaded, String>, bool, PathBuf),
@@ -196,6 +199,8 @@ enum Job {
     /// the mix of several tracks: the new source, where it starts, the tracks it replaces (may be empty), and where
     /// the new track goes (index of the first track that was merged)
     Merged(Arc<Source>, i64, Vec<u32>, usize),
+    /// the audio of clips was processed: (clip, new source, its length, length ratio), and what to say about it
+    Edited(Vec<(u32, Arc<Source>, usize, f64)>, String),
     Done(String),
 }
 
@@ -353,6 +358,13 @@ pub struct Daw {
     an_running: bool,
     spg_tex: Option<TextureHandle>,
     spg_ptr: usize,
+    /// recording keeps only the selected range
+    punch: bool,
+    /// tracks that show their shelved takes
+    takes_view: BTreeSet<u32>,
+    // offline edits
+    spec: Option<edit_ui::SpecEd>,
+    stretch: Option<edit_ui::StretchDlg>,
     // files
     path: Option<PathBuf>,
     last_autosave: Instant,
@@ -466,6 +478,10 @@ impl Daw {
             an_running: false,
             spg_tex: None,
             spg_ptr: 0,
+            punch: false,
+            takes_view: BTreeSet::new(),
+            spec: None,
+            stretch: None,
             path: None,
             last_autosave: Instant::now(),
             note: String::new(),
@@ -777,6 +793,7 @@ impl Daw {
         let ids = self.src_ids.clone();
         let plan = rec.plan;
         let start = rec.start;
+        let punch = if self.punch { self.range.filter(|r| r.1 > r.0) } else { None };
         self.spawn_job("daw-take", move |jobs| {
             let dir = docs_dir().join("Timeline");
             let _ = std::fs::create_dir_all(&dir);
@@ -820,7 +837,7 @@ impl Daw {
                 }
                 out.push((r.track_id, Arc::new(s), place));
             }
-            jobs.lock().push(Job::Recorded(out, gap));
+            jobs.lock().push(Job::Recorded(out, gap, punch));
         });
     }
 
@@ -986,6 +1003,7 @@ impl Daw {
                             let mut target = target.and_then(|t| p.track_index(t));
                             for s in srcs {
                                 // the first source of a targeted import lands on that track
+                                let was_target = target.is_some();
                                 let ti = match target.take() {
                                     Some(ti) => ti,
                                     None => {
@@ -995,6 +1013,8 @@ impl Daw {
                                         p.add_track(Some(s.name.clone()), Input { dev: String::new(), mode: Mode::Mix })
                                     }
                                 };
+                                // into a track that has audio already: after it, not on top of it (a new track starts at `at`)
+                                let at = if was_target { p.tracks[ti].clips.iter().map(|c| c.end()).max().map_or(at, |end| at.max(end)) } else { at };
                                 let id = p.add_clip(ti, s, at);
                                 first.get_or_insert(id);
                             }
@@ -1004,13 +1024,14 @@ impl Daw {
                         self.note = format!("Loaded {name} ({n} track{})", if n == 1 { "" } else { "s" });
                     }
                 },
-                Job::Recorded(items, gap) => {
+                Job::Recorded(items, gap, punch) => {
                     let n = items.len();
                     let mut last = None;
                     self.with_proj(|p| {
                         for (tid, src, start) in items {
                             if let Some(ti) = p.track_index(tid) {
-                                last = Some(p.add_clip(ti, src, start));
+                                // (what the take covers goes to the shelf as an older take; with a punch only its range is used)
+                                last = p.record_over(ti, src, start, punch).or(last);
                             }
                         }
                     });
@@ -1080,6 +1101,7 @@ impl Daw {
                     self.sel_tracks.clear();
                     self.note = if n > 0 { format!("Merged {n} tracks into one") } else { "Mixed the tracks to a new track".into() };
                 }
+                Job::Edited(items, note) => self.finish_edit(items, note),
                 Job::Done(m) => self.note = m,
             }
         }

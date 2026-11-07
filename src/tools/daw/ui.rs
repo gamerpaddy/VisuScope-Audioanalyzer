@@ -247,6 +247,7 @@ impl Daw {
         self.an_hidden = self.an_open && an_h == 0.0 && an_w == 0.0;
         let body = Rect::from_min_max(avail.min, pos2(avail.max.x - an_w, avail.max.y - an_h));
         self.keys(ui, cx, &mut p, whole);
+        self.edit_windows(ui, &p);
         for c in std::mem::take(&mut self.edit_cmds) {
             match c.as_str() {
                 "marker" => {
@@ -320,6 +321,7 @@ impl Daw {
             }
             ui.toggle_value(&mut self.follow, "Follow").on_hover_text("Scroll the view with the playhead");
             ui.toggle_value(&mut self.show_clip, "Clip").on_hover_text("Show samples above full scale in red on the waveforms and in the track meters (switch off to see the plain waveform)");
+            ui.toggle_value(&mut self.punch, "Punch").on_hover_text("Punch in / out: a recording keeps only the selected time range (the audio it replaces stays on the track as an older take). Select the range first.");
             ui.toggle_value(&mut self.snap, "Snap").on_hover_text("Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Alt to move freely, hold Shift while selecting to snap to the beat of the tracks that show it)");
             if ui.add_enabled_ui(self.range.is_some(), |ui| crate::mapping::small_btn(ui, "Selection to new track")).inner.on_hover_text("A new track with the selected time range: the clips of the selected track cut to it (the originals stay), or with no track selected the whole mix over that range").clicked() {
                 self.act_track_from_range(p);
@@ -569,6 +571,31 @@ impl Daw {
             self.act_trim_to_range(p);
             ui.close();
         }
+        ui.menu_button("Process", |ui| {
+            let ids: Vec<u32> = self.sel.iter().copied().collect();
+            if ui.add_enabled(self.sel.len() == 1, egui::Button::new("Spectral editor...")).on_hover_text("Mark regions on the spectrogram of the clip and attenuate or remove them").clicked() {
+                if let Some(id) = ids.first() {
+                    self.open_spec(p, *id);
+                }
+                ui.close();
+            }
+            if ui.add_enabled(has_sel, egui::Button::new("Time-stretch / pitch-shift...")).clicked() {
+                self.stretch = Some(edit_ui::StretchDlg { tempo_pct: 100.0, semis: 0.0, mode: 0 });
+                ui.close();
+            }
+            if ui.add_enabled(has_sel, egui::Button::new("Remove clicks")).clicked() {
+                self.act_process(p, ids.clone(), edit_ui::EditKind::Declick(12.0));
+                ui.close();
+            }
+            if ui.add_enabled(has_sel, egui::Button::new("Remove 50 Hz hum")).clicked() {
+                self.act_process(p, ids.clone(), edit_ui::EditKind::Dehum(50.0));
+                ui.close();
+            }
+            if ui.add_enabled(has_sel, egui::Button::new("Remove 60 Hz hum")).clicked() {
+                self.act_process(p, ids, edit_ui::EditKind::Dehum(60.0));
+                ui.close();
+            }
+        });
         if item(ui, "Normalize to -1 dBFS", "N", has_sel) {
             self.act_normalize(p);
             ui.close();
@@ -591,6 +618,16 @@ impl Daw {
             if ui.add_enabled(has_sel, egui::Button::new("Reset to 0 dB")).clicked() {
                 self.act_clip_prop(p, |c| c.gain_db = 0.0);
                 ui.close();
+            }
+        });
+        ui.menu_button("Crossfade length", |ui| {
+            ui.label(RichText::new("Where this clip overlaps another one on the track").small().weak());
+            let sr = p.sr as f32;
+            for (t, ms) in [("Default (12 ms)", 0.0f32), ("5 ms", 5.0), ("25 ms", 25.0), ("50 ms", 50.0), ("100 ms", 100.0), ("250 ms", 250.0), ("500 ms", 500.0), ("1 s", 1000.0), ("2 s", 2000.0)] {
+                if ui.add_enabled(has_sel, egui::Button::new(t)).clicked() {
+                    self.act_clip_prop(p, |c| c.xf = (ms * sr / 1000.0) as usize);
+                    ui.close();
+                }
             }
         });
         ui.menu_button("Fades", |ui| {
@@ -1288,6 +1325,21 @@ impl Daw {
             for c in &t.clips {
                 self.draw_clip(&lp, &view, lane, c, col, selected_ids.contains(&c.id), chans, t.ch_mute, dimmed, t.beats);
             }
+            // the shelved takes as thin bars along the bottom of the lane, one row per take
+            if !t.shelf.is_empty() && self.takes_view.contains(&t.id) {
+                let mut nums: Vec<u32> = t.shelf.iter().map(|(k, _)| *k).collect();
+                nums.sort_unstable();
+                nums.dedup();
+                for (k, c) in &t.shelf {
+                    let row = nums.iter().position(|n| n == k).unwrap_or(0).min(5) as f32;
+                    let r = Rect::from_min_max(pos2(view.x(c.start), lane.bottom() - 6.0 * (row + 1.0) - 1.0), pos2(view.x(c.end()).max(view.x(c.start) + 2.0), lane.bottom() - 6.0 * row - 1.0));
+                    lp.rect_filled(r, 1.0, col.gamma_multiply(0.75));
+                    lp.rect_stroke(r, 1.0, Stroke::new(1.0, Color32::from_black_alpha(160)), egui::StrokeKind::Inside);
+                    if r.width() > 14.0 {
+                        lp.text(r.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, format!("{k}"), FontId::proportional(8.0), Color32::from_rgb(10, 12, 16));
+                    }
+                }
+            }
             if t.draw {
                 self.draw_curve(&lp, &view, lane, row, t);
             }
@@ -1652,7 +1704,9 @@ impl Daw {
         if c.muted {
             label.push_str("   muted");
         }
-        cp.text(strip.min + vec2(5.0, 1.5), Align2::LEFT_TOP, label, FontId::proportional(10.0), Color32::from_rgb(10, 12, 16));
+        // (the name stays in view when the start of the clip is scrolled out of sight)
+        let nx = (strip.left().max(lane.left()) + 5.0).min((strip.right() - 40.0).max(strip.left() + 5.0));
+        cp.text(pos2(nx, strip.min.y + 1.5), Align2::LEFT_TOP, label, FontId::proportional(10.0), Color32::from_rgb(10, 12, 16));
         // waveform
         let inner = Rect::from_min_max(pos2(cr.left(), strip.bottom() + 1.0), pos2(cr.right(), cr.bottom() - 1.0));
         let chans: &[Option<usize>] = if c.src.stereo() { chans } else { &[None] };
@@ -1819,6 +1873,47 @@ impl Daw {
                 p.tracks[ti].auto.clear();
                 self.touch();
                 ui.close();
+            }
+            // takes: what a recording replaced is kept on the shelf of the track
+            if !p.tracks[ti].shelf.is_empty() {
+                let mut takes: Vec<u32> = p.tracks[ti].shelf.iter().map(|(k, _)| *k).collect();
+                takes.sort_unstable();
+                takes.dedup();
+                ui.menu_button(format!("Takes ({})", takes.len()), |ui| {
+                    let mut show = self.takes_view.contains(&id);
+                    if ui.checkbox(&mut show, "Show the takes under the track").changed() {
+                        if show { self.takes_view.insert(id); } else { self.takes_view.remove(&id); }
+                    }
+                    ui.separator();
+                    match self.range {
+                        Some((a, b)) if b > a => {
+                            ui.label(RichText::new("Use a take for the selected range:").small().weak());
+                            for k in &takes {
+                                let (lo, hi) = p.tracks[ti].shelf.iter().filter(|(t, _)| t == k).fold((i64::MAX, 0), |(lo, hi), (_, c)| (lo.min(c.start), hi.max(c.end())));
+                                let t = format!("Take {k}  ({} - {})", clock(lo as f32 / p.sr as f32), clock(hi as f32 / p.sr as f32));
+                                if crate::mapping::btn(ui, t).clicked() {
+                                    self.checkpoint(p);
+                                    if !p.comp_swap(ti, *k, a, b) {
+                                        self.note = format!("Take {k} has nothing in that range");
+                                    }
+                                    self.touch();
+                                    ui.close();
+                                }
+                            }
+                        }
+                        _ => {
+                            ui.label(RichText::new("Select a time range to use a take there").small().weak());
+                        }
+                    }
+                    ui.separator();
+                    if crate::mapping::btn(ui, "Delete the older takes").clicked() {
+                        self.checkpoint(p);
+                        p.tracks[ti].shelf.clear();
+                        self.takes_view.remove(&id);
+                        self.touch();
+                        ui.close();
+                    }
+                });
             }
             let mut bt = p.tracks[ti].beats;
             if ui.checkbox(&mut bt, "Beatmarkers").on_hover_text("Finds the beat of the music on this track and marks it on the waveform. Hold Shift while selecting to snap to the beat. Off by default.").changed() {

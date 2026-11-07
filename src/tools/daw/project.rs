@@ -237,6 +237,8 @@ pub struct Clip {
     pub reverse: bool,
     pub muted: bool,
     pub name: String,
+    /// length of the crossfade at the edges where this clip lies over (or under) another one, in frames; 0 is the default
+    pub xf: usize,
 }
 
 fn smooth(x: f32) -> f32 {
@@ -450,6 +452,8 @@ pub struct Track {
     pub invert: bool,
     /// show the beat of the audio on this track and snap to it (Shift while selecting)
     pub beats: bool,
+    /// takes that were recorded over (take number, the clip): they are not played, a range of one can be swapped in (comping)
+    pub shelf: Vec<(u32, Clip)>,
     /// volume automation: (frame, dB) points, sorted; the level is added to the fader and held beyond the ends
     pub auto: Vec<(i64, f32)>,
     pub input: Input,
@@ -623,7 +627,7 @@ impl Project {
     pub fn add_track(&mut self, name: Option<String>, input: Input) -> usize {
         let id = self.next();
         let n = self.tracks.len();
-        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, invert: false, beats: false, auto: Vec::new(), input, h: 1, draw: false, curve: Vec::new() });
+        self.tracks.push(Track { id, chan: Chan::Stereo, ch_db: [0.0; 2], ch_mute: [false; 2], in_db: 0.0, in_ms: 0.0, name: name.unwrap_or_else(|| format!("Track {}", id)), color: n % COLOR_COUNT, clips: Vec::new(), vol_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, invert: false, beats: false, shelf: Vec::new(), auto: Vec::new(), input, h: 1, draw: false, curve: Vec::new() });
         n
     }
 
@@ -680,7 +684,7 @@ impl Project {
         let id = self.next();
         let len = src.len().max(1);
         let name = src.name.clone();
-        self.tracks[ti].clips.push(Clip { id, src, start: start.max(0), off: 0, len, gain_db: 0.0, fade_in: 0, fade_out: 0, reverse: false, muted: false, name });
+        self.tracks[ti].clips.push(Clip { id, src, start: start.max(0), off: 0, len, gain_db: 0.0, fade_in: 0, fade_out: 0, reverse: false, muted: false, name, xf: 0 });
         id
     }
 
@@ -739,11 +743,12 @@ impl Project {
                 any = true;
                 // overlapping clips: the one that comes later in the list (moved last, drawn on top) replaces what is
                 // under it, with short fades at the edges of the overlap
-                let uppers: Vec<(i64, i64)> = t.clips.iter().enumerate().filter(|(j, o)| *j > ci && !o.muted && o.start < b && o.end() > a).map(|(_, o)| (o.start, o.end())).collect();
+                let uppers: Vec<(i64, i64, i64)> = t.clips.iter().enumerate().filter(|(j, o)| *j > ci && !o.muted && o.start < b && o.end() > a).map(|(_, o)| (o.start, o.end(), if o.xf > 0 { o.xf as i64 } else { xf })).collect();
                 let low_start = t.clips.iter().enumerate().any(|(j, o)| j < ci && !o.muted && o.start <= c.start && o.end() > c.start);
                 let low_end = t.clips.iter().enumerate().any(|(j, o)| j < ci && !o.muted && o.start < c.end() && o.end() >= c.end());
                 let crossing = !uppers.is_empty() || low_start || low_end;
-                let xlen = xf.min((c.len as i64 / 2).max(1));
+                let cxf = if c.xf > 0 { c.xf as i64 } else { xf };
+                let xlen = cxf.min((c.len as i64 / 2).max(1));
                 let g = db_to_lin(c.gain_db);
                 let two = c.src.stereo();
                 let (pl, pr) = pan_gains(t.pan, two && t.chan == Chan::Stereo);
@@ -760,9 +765,9 @@ impl Project {
                         if low_end && c.end() - f <= xlen {
                             e *= smooth((c.end() - f) as f32 / xlen as f32);
                         }
-                        for &(us, ue) in &uppers {
+                        for &(us, ue, uxf) in &uppers {
                             if f >= us && f < ue {
-                                let xu = xf.min((ue - us) / 2).max(1);
+                                let xu = uxf.min((ue - us) / 2).max(1);
                                 let cover = smooth((f - us) as f32 / xu as f32).min(smooth((ue - f) as f32 / xu as f32));
                                 e *= 1.0 - cover;
                             }
@@ -875,6 +880,86 @@ impl Project {
             }
             self.tracks[ti].clips.retain(|c| !(c.start >= a && c.end() <= b));
         }
+    }
+
+    /// Cut the clips of a track at `a` and `b` and take out the pieces inside `[a, b)`.
+    pub fn cut_main(&mut self, ti: usize, a: i64, b: i64) -> Vec<Clip> {
+        for t in [a, b] {
+            let ids: Vec<u32> = self.tracks[ti].clips.iter().filter(|c| c.start < t && c.end() > t).map(|c| c.id).collect();
+            for id in ids {
+                let nid = self.next();
+                let ci = self.tracks[ti].clips.iter().position(|c| c.id == id).unwrap();
+                if let Some(right) = self.tracks[ti].clips[ci].split_at(t, nid) {
+                    self.tracks[ti].clips.push(right);
+                }
+            }
+        }
+        let (mut inside, mut keep) = (Vec::new(), Vec::new());
+        for c in std::mem::take(&mut self.tracks[ti].clips) {
+            if c.start >= a && c.end() <= b { inside.push(c) } else { keep.push(c) }
+        }
+        self.tracks[ti].clips = keep;
+        inside
+    }
+
+    /// The same for the shelved takes of a track (`take`: only that take).
+    pub fn cut_shelf(&mut self, ti: usize, a: i64, b: i64, take: Option<u32>) -> Vec<(u32, Clip)> {
+        for t in [a, b] {
+            let ids: Vec<u32> = self.tracks[ti].shelf.iter().filter(|(k, c)| take.is_none_or(|x| x == *k) && c.start < t && c.end() > t).map(|(_, c)| c.id).collect();
+            for id in ids {
+                let nid = self.next();
+                let si = self.tracks[ti].shelf.iter().position(|(_, c)| c.id == id).unwrap();
+                let k = self.tracks[ti].shelf[si].0;
+                if let Some(right) = self.tracks[ti].shelf[si].1.split_at(t, nid) {
+                    self.tracks[ti].shelf.push((k, right));
+                }
+            }
+        }
+        let (mut inside, mut keep) = (Vec::new(), Vec::new());
+        for (k, c) in std::mem::take(&mut self.tracks[ti].shelf) {
+            if take.is_none_or(|x| x == k) && c.start >= a && c.end() <= b { inside.push((k, c)) } else { keep.push((k, c)) }
+        }
+        self.tracks[ti].shelf = keep;
+        inside
+    }
+
+    /// The number the next shelved take of a track gets.
+    pub fn next_take(&self, ti: usize) -> u32 {
+        self.tracks[ti].shelf.iter().map(|(k, _)| *k).max().unwrap_or(0) + 1
+    }
+
+    /// A recording is placed on a track: what it covers moves to the shelf as a take (it is still there to be swapped back in),
+    /// then the new clip goes in. With `punch` only that part of the take is used. Returns the new clip.
+    pub fn record_over(&mut self, ti: usize, src: Arc<Source>, start: i64, punch: Option<(i64, i64)>) -> Option<u32> {
+        let (mut a, mut b) = (start.max(0), start.max(0) + src.len() as i64);
+        if let Some((pa, pb)) = punch {
+            a = a.max(pa);
+            b = b.min(pb);
+        }
+        if a >= b {
+            return None;
+        }
+        let pieces = self.cut_main(ti, a, b);
+        if !pieces.is_empty() {
+            let take = self.next_take(ti);
+            self.tracks[ti].shelf.extend(pieces.into_iter().map(|c| (take, c)));
+        }
+        let id = self.add_clip(ti, src, start);
+        self.trim_clip_to(id, a, b);
+        Some(id)
+    }
+
+    /// Comping: the range `[a, b)` of the track is taken from shelved take `take`; what was there goes to the shelf as that take,
+    /// so doing it again swaps back. False when the take has nothing in the range.
+    pub fn comp_swap(&mut self, ti: usize, take: u32, a: i64, b: i64) -> bool {
+        let from_take = self.cut_shelf(ti, a, b, Some(take));
+        if from_take.is_empty() {
+            return false;
+        }
+        let from_main = self.cut_main(ti, a, b);
+        self.tracks[ti].clips.extend(from_take.into_iter().map(|(_, c)| c));
+        self.tracks[ti].shelf.extend(from_main.into_iter().map(|c| (take, c)));
+        true
     }
 
     /// Crop a clip to `[a, b)`; false when they do not overlap.
@@ -1207,6 +1292,63 @@ mod tests {
         q.add_clip(t2, flat(1.0, 1000), 100);
         let (m, _) = q.render(0, 1200, None);
         assert!((m[100] - pan).abs() < 1e-3 && (m[1099] - pan).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_crossfade_length_of_a_clip_can_be_set() {
+        let flat = |v: f32, n: usize| Arc::new(Source::new(9, "c".into(), vec![vec![v; n]]));
+        let level_at = |xf: usize, frame: usize| -> f32 {
+            let mut p = Project::new(48000);
+            let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+            p.add_clip(ti, flat(1.0, 20000), 0);
+            let top = p.add_clip(ti, flat(0.0, 10000), 5000);
+            p.tracks[ti].clips.iter_mut().find(|c| c.id == top).unwrap().xf = xf;
+            p.render(0, 20000, None).0[frame]
+        };
+        let pan = 1.0 / std::f32::consts::SQRT_2;
+        // 3000 frames into the overlap: with the default 12 ms the top clip covers everything, with 100 ms it is half way
+        assert!(level_at(0, 5000 + 3000) < 0.01 * pan);
+        let half = level_at(4800, 5000 + 2400) / pan;
+        assert!((half - 0.5).abs() < 0.05, "{half}");
+        // a long crossfade is smooth
+        let a = level_at(4800, 5000 + 1200) / pan;
+        let b = level_at(4800, 5000 + 3600) / pan;
+        assert!(a > half && half > b);
+    }
+
+    #[test]
+    fn recording_over_shelves_the_old_take_and_comping_swaps_ranges() {
+        let flat = |id: u32, v: f32, n: usize| Arc::new(Source::new(id, "c".into(), vec![vec![v; n]]));
+        let mut p = Project::new(48000);
+        let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        p.add_clip(ti, flat(1, 0.25, 10000), 0);
+        // a second take over the middle: the old audio there goes to the shelf, the rest stays
+        let id = p.record_over(ti, flat(2, 0.5, 4000), 3000, None).unwrap();
+        assert_eq!(p.tracks[ti].shelf.len(), 1);
+        assert_eq!(p.tracks[ti].shelf[0].0, 1);
+        let pan = 1.0 / std::f32::consts::SQRT_2;
+        let (l, _) = p.render(0, 10000, None);
+        assert!((l[1000] / pan - 0.25).abs() < 1e-3 && (l[4000] / pan - 0.5).abs() < 1e-3 && (l[8000] / pan - 0.25).abs() < 1e-3, "{} {} {}", l[1000], l[4000], l[8000]);
+        assert!(p.find_clip(id).is_some());
+        // comping: take 1 for the range 3500..5500: the swap puts the old audio back there
+        assert!(p.comp_swap(ti, 1, 3500, 5500));
+        let (l, _) = p.render(0, 10000, None);
+        assert!((l[4000] / pan - 0.25).abs() < 1e-3, "{}", l[4000]);
+        assert!((l[3200] / pan - 0.5).abs() < 1e-3, "outside the range the new take stays");
+        assert!((l[6500] / pan - 0.5).abs() < 1e-3 || (l[6500] / pan - 0.25).abs() < 1e-3);
+        // doing it again swaps back
+        assert!(p.comp_swap(ti, 1, 3500, 5500));
+        let (l, _) = p.render(0, 10000, None);
+        assert!((l[4000] / pan - 0.5).abs() < 1e-3, "{}", l[4000]);
+        // nothing to swap for a take that does not exist there
+        assert!(!p.comp_swap(ti, 9, 3500, 5500));
+        // punch: only the range of the take is used
+        let mut q = Project::new(48000);
+        let tq = q.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        q.add_clip(tq, flat(1, 0.25, 10000), 0);
+        q.record_over(tq, flat(2, 0.5, 10000), 0, Some((4000, 6000))).unwrap();
+        let (l, _) = q.render(0, 10000, None);
+        assert!((l[2000] / pan - 0.25).abs() < 1e-3 && (l[5000] / pan - 0.5).abs() < 1e-3 && (l[8000] / pan - 0.25).abs() < 1e-3);
     }
 
     #[test]

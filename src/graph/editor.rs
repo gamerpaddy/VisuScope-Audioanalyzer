@@ -481,6 +481,8 @@ pub struct Routing {
     bound_mute: Vec<(NodeId, usize, Option<bool>)>,
     /// on / off settings of nodes that an input switches (None: toggle)
     bound_tog: Vec<(NodeId, usize, Option<bool>)>,
+    /// devices for the first input / output node (true: input), from a request of the application
+    bound_dev: Vec<(bool, String)>,
 }
 
 type Vec2 = egui::Vec2;
@@ -573,7 +575,7 @@ fn file() -> std::path::PathBuf {
 
 impl Routing {
     pub fn new() -> Self {
-        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, search_n: 0, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), bound_tog: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+        Self { eng: None, g: Graph::default(), pan: vec2(20.0, 20.0), sel: HashSet::new(), sel_wire: None, wire: None, search: None, dirty: false, last_save: Instant::now(), rate_pref: 0, fit_next: true, note: String::new(), band: None, save_name: String::new(), cur_name: String::new(), del_arm: None, eq_draw: HashSet::new(), eq_new: None, sizes: HashMap::new(), tidy_pending: true, ir_dlg: None, ab: None, hist: History::default(), search_hook: false, cmds: Vec::new(), probe_on: false, search_n: 0, probe_dev: String::new(), probe_db: -6.0, probe_solo: true, probe_hover: None, probe_body: false, bound_set: HashMap::new(), bound_mute: Vec::new(), bound_tog: Vec::new(), bound_dev: Vec::new(), zoom: std::env::var("VISUSCOPE_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
 
     /// Values and mutes that input bindings set (a knob moves many times a frame: only the last value counts).
@@ -581,6 +583,7 @@ impl Routing {
         let sets = std::mem::take(&mut self.bound_set);
         let mutes = std::mem::take(&mut self.bound_mute);
         let togs = std::mem::take(&mut self.bound_tog);
+        let devs = std::mem::take(&mut self.bound_dev);
         let mut changed = false;
         for ((id, p), v) in sets {
             if let Some(n) = self.g.node_mut(id) {
@@ -597,6 +600,15 @@ impl Routing {
                         n.p[p] = v;
                         changed = true;
                     }
+                }
+            }
+        }
+        for (input, dev) in devs {
+            let kind = if input { Kind::Input } else { Kind::Output };
+            if let Some(id) = self.g.nodes.iter().filter(|n| n.kind == kind).map(|n| n.id).min() {
+                if let Some(n) = self.g.node_mut(id) {
+                    n.s = dev;
+                    changed = true;
                 }
             }
         }
@@ -2278,6 +2290,11 @@ impl Tool for Routing {
                     }
                 }
             }
+            ["setdev", which, id] => {
+                if self.bound_dev.len() < 8 {
+                    self.bound_dev.push((*which == "in", id.to_string()));
+                }
+            }
             ["togp", n, p, v] => {
                 if let (Ok(n), Ok(p)) = (n.parse::<NodeId>(), p.parse::<usize>()) {
                     let state = if *v == "t" { None } else { Some(v.parse::<f32>().unwrap_or(0.0) >= 0.5) };
@@ -2461,7 +2478,7 @@ impl Tool for Routing {
                         ui.selectable_value(&mut self.probe_dev, id.clone(), label);
                     }
                 }).response.on_hover_text("Where the probe plays");
-                ui.checkbox(&mut self.probe_solo, "mute outputs").on_hover_text("The normal output nodes are silent while the probe listens");
+                ui.checkbox(&mut self.probe_solo, "mute same device").on_hover_text("An output node that plays to the same device as the probe is silent while the probe listens (the other outputs go on)");
                 let name = self.probe_hover.and_then(|p| self.g.node(p.node).map(|n| format!("{} {}", n.kind.name(), if p.input { format!("in {}", p.port + 1) } else { format!("out {}", p.port + 1) })));
                 ui.label(RichText::new(name.map(|n| format!("listening: {n}")).unwrap_or_else(|| "hover a node or a dot".into())).small().color(Color32::from_rgb(120, 220, 230)));
             }
@@ -2697,6 +2714,21 @@ mod tests {
         let (sn, mn) = (g.node(s).unwrap(), g.node(m).unwrap());
         assert!((out_pos(sn, 1).y - out_pos(sn, 0).y - ROW).abs() < 1e-4);
         assert!((in_pos(mn, 1).y - in_pos(mn, 0).y - ROW).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_device_request_sets_the_first_input_and_output_node() {
+        let mut r = Routing::new();
+        let i2 = r.g.add(Kind::Input, 0.0, 0.0);
+        let _o = r.g.add(Kind::Output, 0.0, 0.0);
+        let i1_before = r.g.nodes.iter().find(|n| n.kind == Kind::Input).unwrap().id;
+        r.command("setdev	in	asio:DATS");
+        r.command("setdev	out	wasapi:out1");
+        r.apply_bound();
+        let first_in = r.g.nodes.iter().filter(|n| n.kind == Kind::Input).map(|n| n.id).min().unwrap();
+        assert_eq!(r.g.node(first_in).unwrap().s, "asio:DATS");
+        assert_eq!(r.g.nodes.iter().find(|n| n.kind == Kind::Output).unwrap().s, "wasapi:out1");
+        let _ = (i2, i1_before);
     }
 
     #[test]

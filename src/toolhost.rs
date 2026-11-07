@@ -13,7 +13,7 @@ macro_rules! make_ctx {
         let unit_off = [$s.unit_off(0), $s.unit_off(1)];
         let unit_name = $s.unit_name();
         let sr = $s.sr();
-        Ctx { sh: &$s.sh, an: &$s.an, sr, meas_ch: $s.meas_ch, unit_off, unit_name, snaps: &$s.snaps, gen_running: $s.gen_handle.is_some() || ($s.graph_on && crate::graph::bus().gen_live.load(std::sync::atomic::Ordering::Relaxed)), tg: &$s.tg, out_devs: &$s.gen_devs, graph_on: $s.graph_on, gens: &$s.gens_shared, default_in: $s.devices.get($s.sel_dev).map(|d| d.id.clone()).unwrap_or_default(), sweep: &mut $s.sweep, lib: &mut $s.lib, req: $req }
+        Ctx { sh: &$s.sh, an: &$s.an, sr, meas_ch: $s.meas_ch, unit_off, unit_name, snaps: &$s.snaps, gen_running: $s.gen_handle.is_some() || ($s.graph_on && crate::graph::bus().gen_live.load(std::sync::atomic::Ordering::Relaxed)), tg: &$s.tg, out_devs: &$s.gen_devs, graph_on: $s.graph_on, gens: &$s.gens_shared, default_in: $s.devices.get($s.sel_dev).map(|d| d.id.clone()).unwrap_or_default(), dats: $s.dats.clone(), dats_new: &mut $s.dats_new, sweep: &mut $s.sweep, lib: &mut $s.lib, req: $req }
     }};
 }
 
@@ -25,6 +25,9 @@ impl App {
     fn apply_requests(&mut self, req: Requests) {
         if req.start_gen && self.gen_handle.is_none() {
             self.start_gen();
+        }
+        if req.use_dats {
+            self.use_dats();
         }
         if let Some(code) = req.exit {
             self.save_settings(true);
@@ -59,6 +62,31 @@ impl App {
         if let Some(n) = req.note {
             self.note = n;
         }
+    }
+
+    /// Take the audio input and output of the connected DATS V3 for the measurements (the routing graph: its first input and output node).
+    fn use_dats(&mut self) {
+        let Some(d) = self.dats.clone() else { return };
+        if self.graph_on {
+            if let Some(i) = &d.in_id {
+                self.tool_command("Routing", &format!("setdev\tin\t{i}"));
+            }
+            if let Some(o) = &d.out_id {
+                self.tool_command("Routing", &format!("setdev\tout\t{o}"));
+            }
+        } else {
+            if let Some(k) = d.in_id.as_ref().and_then(|id| self.devices.iter().position(|x| &x.id == id)) {
+                self.sel_dev = k;
+                self.start_selected();
+            }
+            if let Some(k) = d.out_id.as_ref().and_then(|id| self.gen_devs.iter().position(|x| &x.id == id)) {
+                self.gen_sel = k;
+                if self.tg.on || self.gen_handle.is_some() {
+                    self.start_gen();
+                }
+            }
+        }
+        self.note = format!("Using the {} for the measurements", d.label);
     }
 
     /// Log-spaced points (max-pooled where a pixel covers several bins) of a spectrum in dB.

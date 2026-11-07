@@ -116,7 +116,7 @@ impl App {
         }
     }
 
-    fn tool_command(&mut self, short: &str, cmd: &str) {
+    pub(crate) fn tool_command(&mut self, short: &str, cmd: &str) {
         if let Some(k) = (0..crate::tools::TOOL_COUNT).find(|&k| crate::tools::INFO[k].short == short) {
             self.tools[k].command(cmd);
         }

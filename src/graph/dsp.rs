@@ -821,13 +821,19 @@ pub struct JitterUnit {
     rng: u32,
     from: f32,
     to: f32,
+    /// each channel with a clock of its own (the right one has its own phase and random walk)
+    split: bool,
+    phase_r: f32,
+    rng_r: u32,
+    from_r: f32,
+    to_r: f32,
 }
 
 impl JitterUnit {
     pub fn new(fs: f32) -> Self {
         // room for the delay at the deepest setting: 50 ms either way of the centre
         let n = ((fs * 0.104) as usize + 64).next_power_of_two();
-        Self { buf: [vec![0.0; n], vec![0.0; n]], pos: 0, fs, depth: 0.0, rate: 8.0, sine: false, mix: 1.0, phase: 0.0, rng: 0x1234_5678, from: 0.0, to: 0.0 }
+        Self { buf: [vec![0.0; n], vec![0.0; n]], pos: 0, fs, depth: 0.0, rate: 8.0, sine: false, mix: 1.0, phase: 0.0, rng: 0x1234_5678, from: 0.0, to: 0.0, split: false, phase_r: 0.37, rng_r: 0x9E37_79B9, from_r: 0.0, to_r: 0.0 }
     }
 
     pub fn set(&mut self, p: &[f32]) {
@@ -836,6 +842,14 @@ impl JitterUnit {
         self.rate = p.get(1).copied().unwrap_or(8.0).max(0.05);
         self.sine = p.get(2).copied().unwrap_or(0.0) >= 0.5;
         self.mix = p.get(3).copied().unwrap_or(100.0) * 0.01;
+        self.split = p.get(4).copied().unwrap_or(0.0) >= 0.5;
+    }
+
+    fn rand_r(&mut self) -> f32 {
+        self.rng_r ^= self.rng_r << 13;
+        self.rng_r ^= self.rng_r >> 17;
+        self.rng_r ^= self.rng_r << 5;
+        (self.rng_r as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 
     fn rand(&mut self) -> f32 {
@@ -860,9 +874,20 @@ impl JitterUnit {
                 self.to = self.rand();
             }
             let m = if self.sine { (2.0 * PI * self.phase).sin() } else { self.from + (self.to - self.from) * self.phase };
-            let d = (self.depth + 2.0 + self.depth * m).clamp(1.0, mask as f32 - 2.0);
-            let (di, fr) = (d.floor() as usize, d.fract());
+            let mr = if self.split {
+                self.phase_r += self.rate / self.fs;
+                if self.phase_r >= 1.0 {
+                    self.phase_r -= 1.0;
+                    self.from_r = self.to_r;
+                    self.to_r = self.rand_r();
+                }
+                if self.sine { (2.0 * PI * self.phase_r).sin() } else { self.from_r + (self.to_r - self.from_r) * self.phase_r }
+            } else {
+                m
+            };
             for (c, v) in [&mut l[i], &mut r[i]].into_iter().enumerate() {
+                let d = (self.depth + 2.0 + self.depth * if c == 0 { m } else { mr }).clamp(1.0, mask as f32 - 2.0);
+                let (di, fr) = (d.floor() as usize, d.fract());
                 self.buf[c][self.pos & mask] = *v;
                 let a = self.buf[c][self.pos.wrapping_sub(di) & mask];
                 let b = self.buf[c][self.pos.wrapping_sub(di + 1) & mask];
@@ -905,6 +930,8 @@ pub struct TremUnit {
     shape: usize,
     phase: f32,
     fs: f32,
+    /// phase of the right channel against the left, as a fraction of a cycle
+    offset: f32,
 }
 
 impl TremUnit {
@@ -913,29 +940,75 @@ impl TremUnit {
         self.rate = p.first().copied().unwrap_or(5.0);
         self.depth = p.get(1).copied().unwrap_or(50.0) * 0.01;
         self.shape = p.get(2).copied().unwrap_or(0.0).round() as usize;
+        self.offset = match p.get(3).copied().unwrap_or(0.0).round() as usize {
+            1 => 0.5,
+            2 => 0.25,
+            _ => 0.0,
+        };
+    }
+
+    fn lfo(&self, phase: f32) -> f32 {
+        let phase = phase.fract();
+        let s = match self.shape {
+            1 => 1.0 - 4.0 * (phase - 0.5).abs(),
+            // a square wave with short ramps (no clicks)
+            2 => ((phase * 2.0 * PI).sin() * 8.0).clamp(-1.0, 1.0),
+            _ => (phase * 2.0 * PI).sin(),
+        };
+        1.0 - self.depth * 0.5 * (1.0 - s)
     }
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         for i in 0..l.len() {
             self.phase = (self.phase + self.rate / self.fs.max(1.0)).fract();
-            let s = match self.shape {
-                1 => 1.0 - 4.0 * (self.phase - 0.5).abs(),
-                2 => {
-                    // a square wave with short ramps (no clicks)
-                    ((self.phase * 2.0 * PI).sin() * 8.0).clamp(-1.0, 1.0)
-                }
-                _ => (self.phase * 2.0 * PI).sin(),
-            };
-            let g = 1.0 - self.depth * 0.5 * (1.0 - s);
-            l[i] *= g;
-            r[i] *= g;
+            l[i] *= self.lfo(self.phase);
+            r[i] *= if self.offset == 0.0 { self.lfo(self.phase) } else { self.lfo(self.phase + self.offset) };
         }
     }
 }
 // ---------------------------------------------------------------------- sample rate conversion
 
+/// Half width of the resampling kernel (input samples at a rate that is kept, more when a rate is lowered).
+const RS_T: f64 = 48.0;
+/// Table entries per input sample of the kernel.
+const RS_RES: usize = 512;
+
+fn bessel_i0(x: f64) -> f64 {
+    let (mut sum, mut term, mut k) = (1.0f64, 1.0f64, 1.0f64);
+    while term > 1e-12 * sum {
+        term *= (x / (2.0 * k)) * (x / (2.0 * k));
+        sum += term;
+        k += 1.0;
+    }
+    sum
+}
+
+/// The kernel of the resampler: a windowed sinc (Kaiser, about -100 dB stopband) that is flat to 0.47 of the source rate and
+/// down by more than 90 dB at half of it, sampled finely and read by linear interpolation.
+fn rs_table() -> &'static [f32] {
+    static T: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let fc = 0.47f64;
+        let beta = 9.5;
+        let n = (2.0 * RS_T * RS_RES as f64) as usize + 2;
+        let i0b = bessel_i0(beta);
+        (0..n)
+            .map(|i| {
+                let x = i as f64 / RS_RES as f64 - RS_T;
+                let u = x / RS_T;
+                if u.abs() >= 1.0 {
+                    return 0.0;
+                }
+                let sinc = if x.abs() < 1e-12 { 1.0 } else { (2.0 * std::f64::consts::PI * fc * x).sin() / (std::f64::consts::PI * 2.0 * fc * x) };
+                (2.0 * fc * sinc * bessel_i0(beta * (1.0 - u * u).sqrt()) / i0b) as f32
+            })
+            .collect()
+    })
+}
+
 /// Streaming resampler for one source: frames come in at the source rate, go out at the graph rate.
-/// Cubic (Catmull-Rom) interpolation when the rates differ, plain copying when they match.
+/// A windowed-sinc interpolation (`rs_table`): lowering a rate filters away what the new rate cannot hold, raising it leaves no
+/// images above the old Nyquist frequency. Plain copying when the rates match.
 pub struct Rs {
     buf: VecDeque<[f32; 2]>,
     pos: f64,
@@ -960,12 +1033,17 @@ impl Rs {
         self.buf.push_back(f);
     }
 
+    /// Input frames the kernel reaches to each side.
+    fn half(&self) -> usize {
+        (RS_T / (1.0 / self.ratio).min(1.0)).ceil() as usize
+    }
+
     /// Output frames that can be produced from what is queued.
     pub fn available(&self) -> usize {
         if self.same_rate() {
             return self.buf.len();
         }
-        let have = self.buf.len() as f64 - self.pos - 3.0;
+        let have = self.buf.len() as f64 - self.pos - self.half() as f64 - 2.0;
         if have <= 0.0 { 0 } else { (have / self.ratio) as usize }
     }
 
@@ -1005,25 +1083,31 @@ impl Rs {
             return k;
         }
         let k = n.min(self.available());
+        let half = self.half() as isize;
+        let scale = (1.0 / self.ratio).min(1.0);
+        let tab = rs_table();
+        let buf = self.buf.make_contiguous();
         for i in 0..k {
-            let base = self.pos.floor() as usize;
-            let t = (self.pos - base as f64) as f32;
-            for c in 0..2 {
-                // points p0..p3 around the position (the first output needs one frame of history: use p1 twice)
-                let p1 = self.buf[base][c];
-                let p0 = if base > 0 { self.buf[base - 1][c] } else { p1 };
-                let (p2, p3) = (self.buf[base + 1][c], self.buf[base + 2][c]);
-                let v = p1 + 0.5 * t * (p2 - p0 + t * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + t * (3.0 * (p1 - p2) + p3 - p0)));
-                if c == 0 {
-                    l[i] = v;
-                } else {
-                    r[i] = v;
+            let base = self.pos.floor() as isize;
+            let (mut al, mut ar) = (0f64, 0f64);
+            for j in (base - half + 1)..=(base + half) {
+                if j < 0 {
+                    continue;
                 }
+                let x = (j as f64 - self.pos) * scale;
+                let u = (x + RS_T) * RS_RES as f64;
+                let (ui, t) = (u.floor() as usize, (u - u.floor()) as f32);
+                let h = tab[ui] + (tab[ui + 1] - tab[ui]) * t;
+                let f = buf[j as usize];
+                al += (f[0] * h) as f64;
+                ar += (f[1] * h) as f64;
             }
+            l[i] = (al * scale) as f32;
+            r[i] = (ar * scale) as f32;
             self.pos += self.ratio;
         }
-        // forget the consumed frames but keep one of history
-        let drop = (self.pos.floor() as usize).saturating_sub(1).min(self.buf.len());
+        // forget the consumed frames but keep the history the kernel reaches back to
+        let drop = (self.pos.floor() as usize).saturating_sub(self.half() + 1).min(self.buf.len());
         self.buf.drain(..drop);
         self.pos -= drop as f64;
         k
@@ -1032,6 +1116,34 @@ impl Rs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tremolo_and_wow_flutter_can_work_on_each_channel_on_its_own() {
+        let fs = 48000.0;
+        // tremolo: opposite phase makes the two gains swing against each other
+        let mut t = TremUnit::default();
+        t.set(&[5.0, 100.0, 0.0, 1.0], fs);
+        let (mut l, mut r) = (vec![1.0f32; 48000], vec![1.0f32; 48000]);
+        t.process(&mut l, &mut r);
+        let worst = (0..48000).map(|i| (l[i] + r[i] - 1.0).abs()).fold(0f32, f32::max);
+        assert!(worst < 0.01, "at 100 % depth and 180 degrees the gains add up to 1: {worst}");
+        // linked: the same
+        let mut t = TremUnit::default();
+        t.set(&[5.0, 100.0, 0.0, 0.0], fs);
+        let (mut l, mut r) = (vec![1.0f32; 48000], vec![1.0f32; 48000]);
+        t.process(&mut l, &mut r);
+        assert_eq!(l, r);
+        // wow and flutter: linked channels move together, independent ones do not
+        let sig: Vec<f32> = (0..96000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        for (split, same) in [(0.0f32, true), (1.0, false)] {
+            let mut j = JitterUnit::new(fs);
+            j.set(&[2000.0, 8.0, 1.0, 100.0, split]);
+            let (mut l, mut r) = (sig.clone(), sig.clone());
+            j.process(&mut l, &mut r);
+            let diff = l.iter().zip(r.iter()).skip(20000).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            assert_eq!(diff < 1e-6, same, "split {split}: difference {diff}");
+        }
+    }
+
     use super::*;
 
     fn sine(f: f32, fs: f32, n: usize, amp: f32) -> Vec<f32> {
@@ -1304,6 +1416,85 @@ mod tests {
         assert_eq!((l[0], r[0]), (0.25, 0.5));
         utility(&mut l, &mut r, 1);
         assert_eq!(r[0], 0.25);
+    }
+
+    /// Level (dB) of a frequency in a signal (a single Fourier sum over the whole thing).
+    fn level_db(x: &[f32], f: f32, sr: f32) -> f32 {
+        let (mut re, mut im) = (0f64, 0f64);
+        for (i, v) in x.iter().enumerate() {
+            let a = 2.0 * std::f64::consts::PI * f as f64 * i as f64 / sr as f64;
+            re += *v as f64 * a.cos();
+            im += *v as f64 * a.sin();
+        }
+        20.0 * (2.0 * (re * re + im * im).sqrt() / x.len() as f64).max(1e-12).log10() as f32
+    }
+
+    #[test]
+    fn upsampling_has_no_images_and_keeps_the_top_of_the_band() {
+        // 48 kHz material played into a 192 kHz graph: a tone of 19 or 21 kHz stays at its level and has no copies above 24 kHz
+        for f in [1000.0f32, 15000.0, 19000.0, 21000.0] {
+            let x = sine(f, 48000.0, 48000, 0.5);
+            let mut rs = Rs::new(48000, 192000);
+            rs.push(&x, &x);
+            let (mut l, mut r) = (vec![0f32; 190000], vec![0f32; 190000]);
+            let n = rs.pull(&mut l, &mut r);
+            assert!(n > 180000, "{n}");
+            let y = &l[2000..n - 2000];
+            let main = level_db(y, f, 192000.0);
+            assert!((main - (-6.02)).abs() < 0.3, "{f} Hz comes out at {main} dB");
+            // images at 48k - f, 48k + f, 96k - f ...
+            for img in [48000.0 - f, 48000.0 + f, 96000.0 - f, 96000.0 + f] {
+                let im = level_db(y, img, 192000.0);
+                assert!(im < main - 85.0, "{f} Hz: image at {img} Hz is {im} dB (tone {main} dB)");
+            }
+        }
+    }
+
+    #[test]
+    fn downsampling_filters_what_the_new_rate_cannot_hold() {
+        // 192 kHz into a 48 kHz graph: 30 kHz must not fold back to 18 kHz
+        let x = sine(30000.0, 192000.0, 192000, 0.5);
+        let mut rs = Rs::new(192000, 48000);
+        rs.push(&x, &x);
+        let (mut l, mut r) = (vec![0f32; 47000], vec![0f32; 47000]);
+        let n = rs.pull(&mut l, &mut r);
+        let y = &l[1000..n - 1000];
+        let alias = level_db(y, 18000.0, 48000.0);
+        assert!(alias < -85.0, "30 kHz folds back to 18 kHz at {alias} dB");
+        // and a tone below Nyquist passes
+        let x = sine(20000.0, 192000.0, 192000, 0.5);
+        let mut rs = Rs::new(192000, 48000);
+        rs.push(&x, &x);
+        let n = rs.pull(&mut l, &mut r);
+        assert!((level_db(&l[1000..n - 1000], 20000.0, 48000.0) + 6.02).abs() < 0.3);
+    }
+
+    #[test]
+    fn the_resampler_gives_the_same_samples_however_it_is_fed_and_pulled() {
+        let x = sine(3000.0, 44100.0, 20000, 0.4);
+        let mut a = Rs::new(44100, 96000);
+        a.push(&x, &x);
+        let (mut la, mut ra) = (vec![0f32; 50000], vec![0f32; 50000]);
+        let na = a.pull(&mut la, &mut ra);
+        let mut b = Rs::new(44100, 96000);
+        let (mut lb, mut rb) = (Vec::new(), Vec::new());
+        for chunk in x.chunks(333) {
+            b.push(chunk, chunk);
+            let mut tl = vec![0f32; 177];
+            let mut tr = vec![0f32; 177];
+            loop {
+                let k = b.pull(&mut tl, &mut tr);
+                lb.extend_from_slice(&tl[..k]);
+                rb.extend_from_slice(&tr[..k]);
+                if k < 177 {
+                    break;
+                }
+            }
+        }
+        let m = na.min(lb.len());
+        assert!(m > 40000);
+        let diff = (0..m).map(|i| (la[i] - lb[i]).abs()).fold(0f32, f32::max);
+        assert!(diff < 1e-5, "{diff}");
     }
 
     #[test]

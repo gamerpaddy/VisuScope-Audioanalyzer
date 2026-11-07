@@ -52,11 +52,13 @@ pub struct Library {
     counter: usize,
     save_dlg: Option<dialogs::Pending>,
     load_dlg: Option<dialogs::Pending>,
+    /// the file the library keeps itself in (next to the settings); empty: traces.txt
+    pub file: String,
 }
 
-fn auto_path() -> std::path::PathBuf {
+fn auto_path(file: &str) -> std::path::PathBuf {
     let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
-    base.join("visuscope").join("traces.txt")
+    base.join("visuscope").join(if file.is_empty() { "traces.txt" } else { file })
 }
 
 /// Smooth a dB curve (NaN-tolerant) over 1/`n` octave on a log grid with `ppo` points per octave.
@@ -207,7 +209,7 @@ impl Library {
     }
 
     pub fn load_auto(&mut self) {
-        if let Ok(t) = std::fs::read_to_string(auto_path()) {
+        if let Ok(t) = std::fs::read_to_string(auto_path(&self.file)) {
             self.items = Self::parse(&t, "trace");
             self.counter = self.items.len();
         }
@@ -217,7 +219,7 @@ impl Library {
         if !self.dirty {
             return;
         }
-        let p = auto_path();
+        let p = auto_path(&self.file);
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }

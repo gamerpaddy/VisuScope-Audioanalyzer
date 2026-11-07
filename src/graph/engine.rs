@@ -935,7 +935,13 @@ impl Run {
         let prime = rate as usize * (25 + safety) / 1000;
         let probe = *self.e.probe.lock();
         let probe_at = probe.and_then(|p| self.nodes.iter().position(|n| n.id == p.node).map(|i| (i, p)));
-        let mute_outputs = probe_at.is_some() && self.e.probe_solo.load(Relaxed);
+        // the probe plays on a device of its own: only the output nodes that play to that very device are silent meanwhile
+        // (two streams on one device would play both), every other output goes on
+        let mute_dev: Option<String> = (probe_at.is_some() && self.e.probe_solo.load(Relaxed)).then(|| match bus().probe_dev.lock().as_str() {
+            "" => bus().first_out.lock().clone(),
+            PROBE_DEFAULT => String::new(),
+            d => d.to_string(),
+        });
         if !self.mods.is_empty() {
             // the level of each followed signal over the block before (the signal is a block ahead of its parameter at most)
             let e = self.e.clone();
@@ -1074,7 +1080,8 @@ impl Run {
                         }
                     }
                 }
-                Rt::Out { q, gain, mute, band, buf, aa, aa_for, .. } => {
+                Rt::Out { q, gain, mute, band, buf, aa, aa_for, dev, .. } => {
+                    let mute_outputs = mute_dev.as_deref().is_some_and(|d| d == dev.as_str());
                     // scratch buffers of the node: nothing is allocated per block
                     let [bl, br] = buf;
                     let separate = node.src.len() == 2;

@@ -46,28 +46,25 @@ pub struct ScopeState {
     last_trig: Instant,
     meas: [Meas; 2],
     meas_t: Instant,
-    /// intensity grading: the traces of many triggers are added up per pixel, the brighter the more often the signal went there
-    pub grade: bool,
-    /// how many triggers it takes to fade (persistence)
-    pub grade_n: f32,
-    pub grade_gain: f32,
-    heat: [Vec<f32>; 2],
-    heat_key: Vec<u32>,
-    heat_dim: (usize, usize),
-    /// counts the frames that were acquired, and the last one that went into the heat map
-    frame_id: u64,
-    heat_frame: u64,
-    heat_tex: Option<egui::TextureHandle>,
-    /// what the picture was made with: rebuilt only when the map or the look changed
-    heat_look: (u64, u32, u32),
+    /// the colours of the two traces, and whether they add up where they overlap (the colours mix into a third one)
+    pub col: [Color32; 2],
+    pub blend: bool,
+    /// roll mode over minutes: min / max per millisecond of the last ten minutes (L min, L max, R min, R max)
+    roll: Vec<[f32; 4]>,
+    roll_n: u64,
+    roll_total: u64,
+    roll_acc: [f32; 4],
+    roll_cnt: f64,
+    /// width of the plot in pixels (what the long roll is reduced to)
+    plot_w: usize,
 }
+
+/// Columns of the long roll history and their rate.
+const ROLL_CAP: usize = 600_000;
+const ROLL_RATE: f64 = 1000.0;
 
 /// 4th-order Butterworth-style low-pass applied forwards and backwards (zero phase, so the trigger
 /// point does not move relative to the displayed signal).
-fn decay_of(n: f32) -> f32 {
-    1.0 - 1.0 / n.max(1.0)
-}
-
 fn lowpass_zero_phase(x: &[f32], fc: f32, sr: f32) -> Vec<f32> {
     let fc = fc.clamp(10.0, sr * 0.45) as f64;
     let w0 = std::f64::consts::TAU * fc / sr as f64;
@@ -122,21 +119,109 @@ impl ScopeState {
             last_trig: long_ago,
             meas: Default::default(),
             meas_t: long_ago,
-            grade: std::env::var_os("VISUSCOPE_GRADE").is_some(),
-            grade_n: 24.0,
-            grade_gain: 1.0,
-            heat: Default::default(),
-            heat_key: Vec::new(),
-            heat_dim: (0, 0),
-            frame_id: 0,
-            heat_frame: 0,
-            heat_tex: None,
-            heat_look: (u64::MAX, 0, 0),
+            col: CH_COLORS,
+            blend: false,
+            roll: Vec::new(),
+            roll_n: 0,
+            roll_total: 0,
+            roll_acc: [f32::MAX, f32::MIN, f32::MAX, f32::MIN],
+            roll_cnt: 0.0,
+            plot_w: 800,
         }
     }
 
     fn n_win(&self, sr: f32) -> usize {
+        if self.mode == 3 {
+            // roll mode goes on to minutes (the history of the last ten)
+            return ((10.0 * self.t_div * sr).round() as usize).clamp(64, (ROLL_CAP as f64 / ROLL_RATE * sr as f64) as usize);
+        }
         ((10.0 * self.t_div * sr).round() as usize).clamp(64, RING_CAP / 2 - 16)
+    }
+
+    /// The window of the roll is longer than the ring of samples holds: it is drawn from the history.
+    fn long_roll(&self, sr: f32) -> bool {
+        self.mode == 3 && self.n_win(sr) > RING_CAP / 2 - 16
+    }
+
+    /// The longest time per division of the current mode.
+    pub fn max_t_div_for(&self, sr: f32) -> f32 {
+        if self.mode == 3 { (ROLL_CAP as f64 / ROLL_RATE / 10.0) as f32 } else { Self::max_t_div(sr) }
+    }
+
+    /// Fold the samples that came in since the last call into the history (one min / max pair per millisecond).
+    fn roll_feed(&mut self, sh: &Shared, sr: f32) {
+        if self.roll.is_empty() {
+            self.roll = vec![[0.0; 4]; ROLL_CAP];
+        }
+        let (a, b);
+        let total;
+        {
+            let Some(ring) = sh.ring.try_lock() else { return };
+            total = ring.total;
+            if self.roll_total == 0 || total < self.roll_total {
+                self.roll_total = total;
+                return;
+            }
+            let new = ((total - self.roll_total).min(RING_CAP as u64)) as usize;
+            if new == 0 {
+                return;
+            }
+            let (mut x, mut y) = (vec![0f32; new], vec![0f32; new]);
+            ring.copy_last(&mut x, &mut y);
+            (a, b) = (x, y);
+        }
+        self.roll_total = total;
+        let spc = sr as f64 / ROLL_RATE;
+        for i in 0..a.len() {
+            let acc = &mut self.roll_acc;
+            acc[0] = acc[0].min(a[i]);
+            acc[1] = acc[1].max(a[i]);
+            acc[2] = acc[2].min(b[i]);
+            acc[3] = acc[3].max(b[i]);
+            self.roll_cnt += 1.0;
+            if self.roll_cnt >= spc {
+                self.roll_cnt -= spc;
+                let slot = (self.roll_n % ROLL_CAP as u64) as usize;
+                self.roll[slot] = *acc;
+                self.roll_n += 1;
+                *acc = [f32::MAX, f32::MIN, f32::MAX, f32::MIN];
+            }
+        }
+    }
+
+    /// The window of a long roll reduced to one min / max pair per pixel of the plot.
+    fn build_long(&mut self, sr: f32) {
+        let w = self.plot_w.clamp(100, 4000);
+        let ncols = ((self.n_win(sr) as f64 / sr as f64) * ROLL_RATE).round().max(1.0);
+        let newest = self.roll_n as f64;
+        let oldest = (self.roll_n.saturating_sub(ROLL_CAP as u64)) as f64;
+        for c in 0..2 {
+            self.frame[c].clear();
+            self.frame[c].reserve(2 * w);
+        }
+        for px in 0..w {
+            let (r0, r1) = (newest - ncols + px as f64 * ncols / w as f64, newest - ncols + (px + 1) as f64 * ncols / w as f64);
+            // (before the first recorded column there is nothing)
+            let c0 = r0.floor().max(oldest);
+            let c1 = if r1 <= oldest { c0 } else { r1.ceil().min(newest).max(c0 + 1.0).min(newest) };
+            let mut m = [f32::MAX, f32::MIN, f32::MAX, f32::MIN];
+            let mut c = c0;
+            // (a long span is sampled sparsely: a few hundred columns per pixel are plenty)
+            let step = ((c1 - c0) / 256.0).max(1.0);
+            while c < c1 {
+                let col = self.roll[(c as u64 % ROLL_CAP as u64) as usize];
+                m[0] = m[0].min(col[0]);
+                m[1] = m[1].max(col[1]);
+                m[2] = m[2].min(col[2]);
+                m[3] = m[3].max(col[3]);
+                c += step;
+            }
+            for k in 0..2 {
+                let (lo, hi) = if m[2 * k] > m[2 * k + 1] { (0.0, 0.0) } else { (m[2 * k], m[2 * k + 1]) };
+                self.frame[k].push(lo);
+                self.frame[k].push(hi);
+            }
+        }
     }
 
     pub fn min_t_div(sr: f32) -> f32 {
@@ -147,6 +232,8 @@ impl ScopeState {
         (RING_CAP as f32 / 2.0 - 16.0) / (10.0 * sr)
     }
 
+    fn frame_id_bump(&mut self) {}
+
     /// Grab the newest samples and align them to a trigger crossing.
     fn acquire(&mut self, sh: &Shared, scale: [f32; 2]) {
         let sr = sh.sr.load(Relaxed) as f32;
@@ -155,6 +242,14 @@ impl ScopeState {
         }
         let n_win = self.n_win(sr);
         if self.mode == 3 {
+            self.roll_feed(sh, sr);
+            if self.long_roll(sr) {
+                self.build_long(sr);
+                self.frame_sr = sr;
+                self.triggered = false;
+                self.frame_id_bump();
+                return;
+            }
             // roll mode: no trigger, always show the newest n_win samples scrolling in from the right
             for c in 0..2 {
                 self.tbuf[c].resize(n_win, 0.0);
@@ -171,7 +266,6 @@ impl ScopeState {
             }
             self.frame_sr = sr;
             self.triggered = false;
-            self.frame_id += 1;
             return;
         }
         let pre = ((self.pos * n_win as f32) as usize).min(n_win - 1);
@@ -217,7 +311,6 @@ impl ScopeState {
                     f.extend_from_slice(&t[i - pre..i - pre + n_win]);
                 }
                 self.triggered = true;
-                self.frame_id += 1;
                 self.last_trig = Instant::now();
                 if self.mode == 2 {
                     self.armed = false;
@@ -231,98 +324,8 @@ impl ScopeState {
                         f.extend_from_slice(&t[m - n_win..]);
                     }
                     self.triggered = false;
-                    self.frame_id += 1;
                 }
             }
-        }
-    }
-
-    /// Add the newest frame to the heat map of the plot (`w` x `h` pixels) and make the picture of it. The map is cleared whenever the
-    /// view changes, so that old traces never show up in a new place.
-    fn grade_update(&mut self, ctx: &egui::Context, w: usize, h: usize, scale: [f32; 2]) {
-        let n_win = self.frame[0].len().max(self.frame[1].len());
-        let key: Vec<u32> = vec![w as u32, h as u32, self.t_div.to_bits(), self.v_div.to_bits(), self.v_off.to_bits(), self.pos.to_bits(), scale[0].to_bits(), scale[1].to_bits(), self.show[0] as u32 | (self.show[1] as u32) << 1, n_win as u32];
-        let key_now = key.clone();
-        if key != self.heat_key || self.heat_dim != (w, h) {
-            self.heat_key = key;
-            self.heat_look = (u64::MAX, 0, 0);
-            self.heat_dim = (w, h);
-            for c in 0..2 {
-                self.heat[c].clear();
-                self.heat[c].resize(w * h, 0.0);
-            }
-        }
-        if self.frame_id != self.heat_frame && self.running {
-            self.heat_frame = self.frame_id;
-            let decay = 1.0 - 1.0 / self.grade_n.max(1.0);
-            for c in 0..2 {
-                let hm = &mut self.heat[c];
-                hm.iter_mut().for_each(|v| *v *= decay);
-                let f = &self.frame[c];
-                if !self.show[c] || f.len() < 2 {
-                    continue;
-                }
-                let n = f.len();
-                let spp = n as f32 / w as f32;
-                let to_y = |v: f32| h as f32 * 0.5 - (v * scale[c] + self.v_off) / (8.0 * self.v_div) * h as f32;
-                for px in 0..w {
-                    let a = ((px as f32 * spp) as usize).min(n - 1);
-                    // (one sample further: the line goes on to the next one)
-                    let b = ((((px + 1) as f32 * spp).ceil() as usize) + 1).clamp(a + 1, n);
-                    let (mut mn, mut mx) = (f32::MAX, f32::MIN);
-                    for &v in &f[a..b] {
-                        mn = mn.min(v);
-                        mx = mx.max(v);
-                    }
-                    let (ya, yb) = (to_y(mx), to_y(mn));
-                    if !(ya.is_finite() && yb.is_finite()) {
-                        continue;
-                    }
-                    let (r0, r1) = ((ya.floor().max(0.0)) as usize, (yb.ceil().min(h as f32 - 1.0)).max(0.0) as usize);
-                    if ya > h as f32 || yb < 0.0 || r0 > r1 {
-                        continue;
-                    }
-                    // the same amount per column whatever the slope: steep parts are dimmer, flat parts brighter, like a phosphor
-                    let add = 1.0 / (r1 - r0 + 1) as f32;
-                    for r in r0..=r1 {
-                        hm[r * w + px] += add;
-                    }
-                }
-            }
-        }
-        // the picture: additive light of the channel colours (only when something changed)
-        let look = (self.heat_frame, self.grade_gain.to_bits(), self.grade_n.to_bits());
-        if look == self.heat_look && self.heat_tex.is_some() && self.heat_key == key_now {
-            return;
-        }
-        self.heat_look = look;
-        // the brightest pixel is full brightness (whatever the signal: a steady sine and a busy mix look alike); gain > 1 lets the
-        // brightest 1 / gain of that reach it. The table maps heat to brightness (a power per pixel would take too long every frame).
-        let maxh = self.heat.iter().flat_map(|m| m.iter().copied()).fold(0f32, f32::max);
-        let top = (maxh / self.grade_gain.max(0.05)).max(1e-3);
-        const LUT_N: usize = 1024;
-        let lut: Vec<f32> = (0..=LUT_N).map(|i| (i as f32 / LUT_N as f32).powf(0.55)).collect();
-        let at = |v: f32| lut[((v / top * LUT_N as f32) as usize).min(LUT_N)];
-        let cols = [CH_COLORS[0], CH_COLORS[1]];
-        let mut px = Vec::with_capacity(w * h);
-        for i in 0..w * h {
-            let (mut r, mut g, mut b) = (0f32, 0f32, 0f32);
-            for c in 0..2 {
-                let Some(&hv) = self.heat[c].get(i) else { continue };
-                if hv < 1e-4 {
-                    continue;
-                }
-                let v = at(hv);
-                r += cols[c].r() as f32 * v;
-                g += cols[c].g() as f32 * v;
-                b += cols[c].b() as f32 * v;
-            }
-            px.push(Color32::from_rgba_premultiplied(r.min(255.0) as u8, g.min(255.0) as u8, b.min(255.0) as u8, 0));
-        }
-        let img = egui::ColorImage { size: [w, h], source_size: vec2(w as f32, h as f32), pixels: px };
-        match &mut self.heat_tex {
-            Some(t) => t.set(img, egui::TextureOptions::NEAREST),
-            None => self.heat_tex = Some(ctx.load_texture("scope_heat", img, egui::TextureOptions::NEAREST)),
         }
     }
 
@@ -384,7 +387,7 @@ impl App {
                 s.level = 0.0;
             }
             if act.zx != 0.0 {
-                s.t_div = fclamp(s.t_div * act.zx, ScopeState::min_t_div(sr), ScopeState::max_t_div(sr));
+                s.t_div = fclamp(s.t_div * act.zx, ScopeState::min_t_div(sr), s.max_t_div_for(sr));
             }
             if act.zy != 0.0 {
                 s.v_div = fclamp(s.v_div * act.zy, 1e-7, 1e4);
@@ -397,6 +400,12 @@ impl App {
             }
         }
 
+        {
+            let s = &mut self.scope;
+            if s.mode != 3 {
+                s.t_div = s.t_div.min(ScopeState::max_t_div(sr));
+            }
+        }
         // controls
         let cal_on = self.cal.on;
         ui.horizontal_wrapped(|ui| {
@@ -406,8 +415,11 @@ impl App {
             if crate::mapping::btn(ui, run_txt).clicked() {
                 s.running = !s.running;
             }
-            ui.checkbox(&mut s.show[0], RichText::new("L").color(CH_COLORS[0]));
-            ui.checkbox(&mut s.show[1], RichText::new("R").color(CH_COLORS[1]));
+            ui.checkbox(&mut s.show[0], RichText::new("L").color(s.col[0]));
+            ui.checkbox(&mut s.show[1], RichText::new("R").color(s.col[1]));
+            ui.color_edit_button_srgba(&mut s.col[0]).on_hover_text("Colour of the left trace");
+            ui.color_edit_button_srgba(&mut s.col[1]).on_hover_text("Colour of the right trace");
+            ui.checkbox(&mut s.blend, "Blend").on_hover_text("The traces add up instead of one covering the other: where they overlap the two colours mix into a third one");
             ui.label(RichText::new("Trig").small().weak());
             egui::ComboBox::from_id_salt("tsrc").width(36.0).selected_text(["L", "R"][s.trig_src]).show_ui(ui, |ui| {
                 ui.selectable_value(&mut s.trig_src, 0, "L");
@@ -444,29 +456,9 @@ impl App {
             ui.add(egui::DragValue::new(&mut s.hyst).range(0.0..=20.0).speed(0.05).suffix("% hyst"));
             ui.checkbox(&mut s.hf_reject, "HF reject").on_hover_text("Low-pass filter on the trigger signal only. The displayed trace is not filtered.");
             ui.add_enabled(s.hf_reject, egui::DragValue::new(&mut s.hf_hz).range(100.0..=96000.0).speed(20.0).suffix(" Hz"));
-            ui.checkbox(&mut s.grade, "Intensity").on_hover_text("Intensity grading, like a digital phosphor scope: the traces of many triggers are added up, a pixel is brighter the more often the signal passes through it (not in roll mode)");
-            if s.grade {
-                ui.add(egui::DragValue::new(&mut s.grade_n).range(2.0..=500.0).speed(0.5).suffix(" traces").prefix("fade "));
-                ui.add(egui::DragValue::new(&mut s.grade_gain).range(0.1..=10.0).speed(0.02).prefix("gain x").max_decimals(2));
-            }
         });
 
         let sh = self.sh.clone();
-        // test hook (screenshots): VISUSCOPE_SCOPE_DEMO=1 feeds a sine with a little noise and a second tone into the analysis
-        if std::env::var_os("VISUSCOPE_SCOPE_DEMO").is_some() {
-            use std::sync::atomic::AtomicU64;
-            static PH: AtomicU64 = AtomicU64::new(0);
-            sh.sr.store(48000, Relaxed);
-            let start = PH.fetch_add(800, Relaxed);
-            let mut r = sh.ring.lock();
-            let mut x = start as u32 ^ 0x9E37_79B9;
-            for i in 0..800u64 {
-                let t = (start + i) as f32 / 48000.0;
-                x = x.wrapping_mul(1664525).wrapping_add(1013904223);
-                let n = ((x >> 8) as f32 / 8388608.0 - 1.0) * 0.03;
-                r.push(0.6 * (std::f32::consts::TAU * 500.0 * t).sin() + n, 0.4 * (std::f32::consts::TAU * 1500.0 * t).sin() + 0.2 * (std::f32::consts::TAU * 500.0 * t).sin());
-            }
-        }
         self.scope.acquire(&sh, scale);
         self.scope.update_meas(scale);
 
@@ -488,7 +480,7 @@ impl App {
                     self.fmt_units(m.vmin),
                     self.fmt_units(m.vmean),
                     f
-                )).small().color(CH_COLORS[c]));
+                )).small().color(self.scope.col[c]));
             }
             ui.horizontal_wrapped(|ui| {
                 for p in parts {
@@ -505,12 +497,7 @@ impl App {
         if plot.width() < 40.0 || plot.height() < 40.0 {
             return;
         }
-        let graded = self.scope.grade && self.scope.mode != 3;
-        if graded {
-            let ctx = ui.ctx().clone();
-            self.scope.grade_update(&ctx, plot.width().floor().max(1.0) as usize, plot.height().floor().max(1.0) as usize, scale);
-            ctx.request_repaint();
-        }
+        self.scope.plot_w = plot.width() as usize;
         let s = &self.scope;
         let n_win = s.n_win(sr);
         let visible = n_win as f32 / sr;        let t_per_div = visible / 10.0;
@@ -552,18 +539,9 @@ impl App {
         }
         painter.rect_stroke(plot, 0.0, Stroke::new(1.0, GRID_MAJOR), egui::StrokeKind::Inside);
 
-        // traces (graded: the picture of the heat map instead of the lines)
+        // traces
         let w = plot.width().floor().max(1.0) as usize;
-        if graded {
-            if let Some(t) = &s.heat_tex {
-                let r = Rect::from_min_size(plot.min, vec2(w as f32, (plot.height().floor()).max(1.0)));
-                clip.image(t.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-            }
-        }
         for c in 0..2 {
-            if graded {
-                break;
-            }
             let f = &s.frame[c];
             if !s.show[c] || f.len() < 2 {
                 continue;
@@ -571,7 +549,8 @@ impl App {
             let sc = scale[c];
             let n = f.len();
             let spp = n as f32 / w as f32;
-            let col = CH_COLORS[c];
+            // (blended: light that adds up, so the colours mix where the traces meet)
+            let col = if s.blend { Color32::from_rgba_premultiplied(s.col[c].r(), s.col[c].g(), s.col[c].b(), 0) } else { s.col[c] };
             let mut pts: Vec<Pos2> = Vec::new();
             if spp <= 1.0 {
                 pts.reserve(n);
@@ -669,34 +648,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn intensity_grading_is_brighter_where_the_signal_lingers_and_is_fast_enough() {
-        let ctx = egui::Context::default();
+    fn a_roll_of_minutes_comes_from_the_history() {
+        let sh = Shared::new();
+        sh.sr.store(48000, Relaxed);
         let mut s = ScopeState::new();
-        s.grade = true;
-        let n = 48000 / 100;
-        let f: Vec<f32> = (0..n).map(|i| 0.5 * (i as f32 / n as f32 * std::f32::consts::TAU).sin()).collect();
-        s.frame = [f.clone(), f];
-        s.show = [true, false];
-        s.v_div = 0.25;
-        let (w, h) = (800usize, 400usize);
-        let t = std::time::Instant::now();
-        for _ in 0..30 {
-            s.frame_id += 1;
-            s.grade_update(&ctx, w, h, [1.0, 1.0]);
+        s.mode = 3;
+        s.t_div = 3.0;
+        s.plot_w = 600;
+        // 20 s of a 100 Hz tone that is loud in the first ten seconds and quiet after, fed in pieces like the audio thread does
+        let mut t = 0usize;
+        while t < 48000 * 20 {
+            {
+                let mut r = sh.ring.lock();
+                for i in 0..4800 {
+                    let a = if t + i < 48000 * 10 { 0.8 } else { 0.1 };
+                    let v = a * (2.0 * std::f32::consts::PI * 100.0 * (t + i) as f32 / 48000.0).sin();
+                    r.push(v, -v);
+                }
+            }
+            t += 4800;
+            s.roll_feed(&sh, 48000.0);
         }
-        let per = t.elapsed().as_secs_f32() / 30.0 * 1000.0;
-        println!("grading: {per:.2} ms per frame at {w}x{h}");
-        assert!(per < 12.0, "{per} ms");
-        // a sine lingers at its peaks: the rows of +-0.5 FS (y = h/2 -+ 0.25 h) are brighter than the zero crossing rows
-        let row_sum = |y: usize| -> f32 { (0..w).map(|x| s.heat[0][y * w + x]).sum() };
-        let peak_row = (h as f32 * 0.25) as usize;
-        assert!(row_sum(peak_row) > 2.0 * row_sum(h / 2), "{} vs {}", row_sum(peak_row), row_sum(h / 2));
-        // the other channel was off
-        assert!(s.heat[1].iter().all(|v| *v == 0.0));
-        // a change of the view starts afresh
-        s.t_div *= 2.0;
-        s.grade_update(&ctx, w, h, [1.0, 1.0]);
-        assert!(s.heat[0].iter().all(|v| *v == 0.0));
+        assert!(s.long_roll(48000.0), "30 s is longer than the ring of samples");
+        s.build_long(48000.0);
+        assert_eq!(s.frame[0].len(), 1200);
+        // the window is 30 s: it ends now, the last 20 s are the tone (10 s loud, 10 s quiet), before that nothing
+        let peak_at = |c: usize, px: usize| s.frame[c][2 * px + 1];
+        assert!(peak_at(0, 5) < 0.001, "before the start: {}", peak_at(0, 5));
+        assert!(peak_at(0, 250) > 0.7, "the loud part: {}", peak_at(0, 250));
+        assert!(peak_at(0, 550) < 0.15 && peak_at(0, 550) > 0.05, "the quiet part: {}", peak_at(0, 550));
+        // the right channel is the negated one
+        let lowest = s.frame[1][2 * 250];
+        assert!(lowest < -0.7, "{lowest}");
+        // the longest roll is 60 s per division
+        assert!(s.max_t_div_for(48000.0) >= 59.0);
+        s.mode = 0;
+        assert!(s.max_t_div_for(48000.0) < 5.0);
     }
 
     #[test]

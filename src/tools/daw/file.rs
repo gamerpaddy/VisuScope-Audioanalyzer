@@ -54,7 +54,7 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
     let mut out = String::from("VSDAW 1\n");
     let _ = writeln!(out, "sr {}\nmaster {}", proj.sr, proj.master_db);
     let mut seen: Vec<u32> = Vec::new();
-    for c in proj.tracks.iter().flat_map(|t| t.clips.iter()) {
+    for c in proj.tracks.iter().flat_map(|t| t.clips.iter().chain(t.shelf.iter().map(|(_, c)| c))) {
         if seen.contains(&c.src.id) {
             continue;
         }
@@ -106,8 +106,11 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
             let pts: Vec<String> = t.auto.iter().map(|(f, d)| format!("{f}:{d}")).collect();
             let _ = writeln!(out, "auto {}|{}", t.id, pts.join(","));
         }
+        for (take, c) in &t.shelf {
+            let _ = writeln!(out, "shelf {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.id, c.id, c.src.id, c.start, c.off, c.len, c.gain_db, c.fade_in, c.fade_out, c.reverse as u8, c.muted as u8, esc(&c.name), c.xf, take);
+        }
         for c in &t.clips {
-            let _ = writeln!(out, "clip {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.id, c.id, c.src.id, c.start, c.off, c.len, c.gain_db, c.fade_in, c.fade_out, c.reverse as u8, c.muted as u8, esc(&c.name));
+            let _ = writeln!(out, "clip {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.id, c.id, c.src.id, c.start, c.off, c.len, c.gain_db, c.fade_in, c.fade_out, c.reverse as u8, c.muted as u8, esc(&c.name), c.xf);
         }
     }
     std::fs::write(path, out).map_err(|e| e.to_string())
@@ -210,6 +213,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 name: unesc(f[1]),
                 color: f[2].parse::<usize>().unwrap_or(0) % COLOR_COUNT,
                 clips: Vec::new(),
+                shelf: Vec::new(),
                 vol_db: num(f.get(3)).clamp(-90.0, 24.0),
                 pan: num(f.get(4)).clamp(-1.0, 1.0),
                 mute: f[5] == "1",
@@ -223,7 +227,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 draw: false,
                 curve: Vec::new(),
             });
-        } else if let Some(r) = l.strip_prefix("clip ") {
+        } else if let Some((r, shelved)) = l.strip_prefix("clip ").map(|r| (r, false)).or_else(|| l.strip_prefix("shelf ").map(|r| (r, true))) {
             let f: Vec<&str> = r.split('|').collect();
             if f.len() < 12 {
                 continue;
@@ -263,10 +267,16 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 fade_out: f[8].parse().unwrap_or(0),
                 reverse: f[9] == "1",
                 muted: f[10] == "1",
+                xf: f.get(12).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0).min(48000 * 30),
                 name: unesc(f[11]),
             };
             c.clamp_fades();
-            proj.tracks[ti].clips.push(c);
+            if shelved {
+                let take = f.get(13).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1);
+                proj.tracks[ti].shelf.push((take, c));
+            } else {
+                proj.tracks[ti].clips.push(c);
+            }
         }
     }
     proj.marks.sort_by_key(|m| m.at);
@@ -281,6 +291,28 @@ pub fn next_src_id(c: &AtomicU32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn takes_and_crossfade_lengths_survive_the_project_file() {
+        let dir = std::env::temp_dir().join("visuscope_daw_test_takes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.vsproj");
+        let mut p = Project::new(44100);
+        let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        let flat = |id: u32, v: f32| Arc::new(Source::new(id, format!("s{id}"), vec![vec![v; 8000]]));
+        p.add_clip(ti, flat(1, 0.25), 0);
+        let c2 = p.record_over(ti, flat(2, 0.5), 2000, None).unwrap();
+        p.clip_mut(c2).unwrap().xf = 1234;
+        save(&p, &path).unwrap();
+        let l = load(&path).unwrap();
+        let t = &l.proj.tracks[0];
+        assert_eq!(t.shelf.len(), p.tracks[0].shelf.len());
+        assert_eq!(t.shelf[0].0, 1);
+        assert_eq!(t.shelf[0].1.len, p.tracks[0].shelf[0].1.len);
+        assert_eq!(t.clips.iter().map(|c| c.xf).max(), Some(1234));
+        assert_eq!(t.clips.len(), p.tracks[0].clips.len());
+    }
 
     #[test]
     fn project_roundtrip() {

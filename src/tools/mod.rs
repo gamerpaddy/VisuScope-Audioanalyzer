@@ -16,6 +16,7 @@ pub mod distortion;
 pub mod daw;
 pub mod dialogs;
 pub mod eqtool;
+pub mod impedance;
 pub mod impulse;
 pub mod loudness;
 pub mod logger;
@@ -36,10 +37,11 @@ pub mod sweep;
 pub mod traces;
 pub mod tracewin;
 pub mod tap;
+pub mod ts;
 pub mod transfer;
 pub mod wavio;
 
-pub const TOOL_COUNT: usize = 19;
+pub const TOOL_COUNT: usize = 20;
 /// Index of the routing graph's window in `INFO` (it only exists while the graph is switched on).
 pub const ROUTING: usize = 15;
 
@@ -72,11 +74,12 @@ pub const INFO: [ToolInfo; TOOL_COUNT] = [
     ToolInfo { short: "Profiler", title: "Profiler (latency & interrupts)", weight: 1.5, tip: "System latency, kernel DPC / interrupt time and audio callback timing; shows what caused a crackle" },
     ToolInfo { short: "Null test", title: "Null test (difference of two signals)", weight: 2.4, tip: "Line up two signals (input channels or files), subtract them and see and hear what is left" },
     ToolInfo { short: "Traces", title: "Traces (stored curves)", weight: 2.0, tip: "The stored frequency response curves of the measurement windows: show, hide, colour, name, compare against one, average, save and load" },
+    ToolInfo { short: "Impedance", title: "Impedance measurement", weight: 2.4, tip: "Impedance and phase of a speaker, headphone or any device through a known series resistor, with calibration, stored measurements and overlays" },
 ];
 
 /// How the Tools menu groups the tools (indices into `INFO`).
 pub const GROUPS: [(&str, &[usize]); 4] = [
-    ("Measure", &[1, 2, 10, 9, 4]),
+    ("Measure", &[1, 2, 10, 19, 9, 4]),
     ("Analyse", &[0, 3, 5, 8, 7, 17, 16, 18]),
     ("Test & design", &[11, 13]),
     ("Record & report", &[14, 15, 6, 12]),
@@ -103,6 +106,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(profiler::Profiler::new()),
         Box::new(nulltest::NullTest::new()),
         Box::new(tracewin::TraceWin::new()),
+        Box::new(impedance::Impedance::new()),
     ];
     debug_assert_eq!(v.len(), TOOL_COUNT);
     v
@@ -148,6 +152,8 @@ pub struct Requests {
     pub start_gen: bool,
     pub audio: AudioReq,
     pub note: Option<String>,
+    /// use the audio input and output of the connected DATS V3 for the measurements
+    pub use_dats: bool,
 }
 
 /// Read-only view of the app state plus the few things tools may change.
@@ -170,6 +176,10 @@ pub struct Ctx<'a> {
     pub gens: &'a Arc<parking_lot::Mutex<Vec<crate::tonegen::GenParams>>>,
     /// id of the input device chosen for the fixed input path (the graph starts from it)
     pub default_in: String,
+    /// the Dayton DATS V3 that is connected, if any
+    pub dats: Option<crate::app::DatsDev>,
+    /// a DATS V3 was just plugged in (true once)
+    pub dats_new: &'a mut bool,
     pub sweep: &'a mut sweep::Sweep,
     pub lib: &'a mut traces::Library,
     pub req: &'a mut Requests,
