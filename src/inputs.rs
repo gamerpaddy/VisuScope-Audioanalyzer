@@ -20,7 +20,11 @@ impl App {
                         self.map.cancel_learning();
                         continue;
                     }
-                    mapping::push_event(Src::Key { key: key.name().to_string(), ctrl: modifiers.command, shift: modifiers.shift, alt: modifiers.alt }, if pressed { 1.0 } else { 0.0 });
+                    let src = Src::Key { key: key.name().to_string(), ctrl: modifiers.command, shift: modifiers.shift, alt: modifiers.alt };
+                    if pressed && (self.map.learning.is_some() || self.map.bindings.iter().any(|b| b.src == src)) {
+                        ctx.input_mut(|i| { i.consume_key(modifiers, key); });
+                    }
+                    mapping::push_event(src, if pressed { 1.0 } else { 0.0 });
                 }
             }
         }
@@ -95,7 +99,7 @@ impl App {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{label}: press a key or button, or move a knob, fader or axis")).color(Color32::from_rgb(255, 200, 90)));
-                    if ui.button("Cancel (Esc)").clicked() {
+                    if ui.button(crate::lang::tr("Cancel (Esc)")).clicked() {
                         self.map.cancel_learning();
                     }
                 });
@@ -194,6 +198,7 @@ impl App {
                     self.wins[i].open = !self.wins[i].open;
                 }
             }
+            x if x.starts_with("serial:") => crate::serial::send_named(&x[7..]),
             _ => {}
         }
     }
@@ -204,14 +209,14 @@ impl App {
             return;
         }
         let mut open = true;
-        egui::Window::new("Input mappings").order(egui::Order::Foreground).open(&mut open).default_width(560.0).default_height(520.0).resizable(true).show(ctx, |ui| {
+        egui::Window::new(crate::lang::tr("Input mappings")).order(egui::Order::Foreground).open(&mut open).default_width(560.0).default_height(520.0).resizable(true).show(ctx, |ui| {
             let devs = mapping::devices();
             ui.label(RichText::new(if devs.is_empty() { "No MIDI input or controller found (they are looked for every few seconds).".to_string() } else { devs.join("   |   ") }).small().weak());
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Last input:").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Last input:")).small().weak());
                 ui.label(RichText::new(if self.map.last.is_empty() { "-" } else { &self.map.last }).small().monospace());
             });
-            ui.label(RichText::new("Press Learn, then press the key or move the control. A key, a MIDI note or a button starts an action; a MIDI controller, a fader, knob or joystick axis drives a setting between the two values.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Press Learn, then press the key or move the control. A key, a MIDI note or a button starts an action; a MIDI controller, a fader, knob or joystick axis drives a setting between the two values.")).small().weak());
             ui.separator();
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 let mut group = "";
@@ -232,17 +237,17 @@ impl App {
                         let bound = self.map.binding(&id).map(|b| b.src.label());
                         if waiting {
                             ui.label(RichText::new(if slider.is_some() { "move a knob, fader or axis ..." } else { "press a key or a button ..." }).small().color(Color32::from_rgb(255, 200, 90)));
-                            if ui.small_button("Cancel").clicked() {
+                            if ui.small_button(crate::lang::tr("Cancel")).clicked() {
                                 self.map.cancel_learning();
                             }
                         } else {
                             let (r, _) = ui.allocate_exact_size(egui::vec2(190.0, 18.0), egui::Sense::hover());
                             ui.painter().with_clip_rect(r).text(r.left_center(), egui::Align2::LEFT_CENTER, bound.clone().unwrap_or_else(|| "-".into()), egui::FontId::monospace(10.5), if bound.is_some() { Color32::from_gray(220) } else { Color32::from_gray(110) });
-                            if ui.small_button("Learn").clicked() {
+                            if ui.small_button(crate::lang::tr("Learn")).clicked() {
                                 self.map.learning = Some(id.clone());
                                 self.map.learn_meta = None;
                             }
-                            if bound.is_some() && ui.small_button("Clear").clicked() {
+                            if bound.is_some() && ui.small_button(crate::lang::tr("Clear")).clicked() {
                                 self.map.clear(&id);
                             }
                         }
@@ -254,10 +259,10 @@ impl App {
                                 ui.horizontal(|ui| {
                                     ui.add_space(24.0);
                                     let b = &mut self.map.bindings[bi];
-                                    let mut ch = ui.radio_value(&mut b.momentary, false, "toggle").changed();
-                                    ch |= ui.radio_value(&mut b.momentary, true, "momentary (on while held)").changed();
+                                    let mut ch = ui.radio_value(&mut b.momentary, false, crate::lang::tr("toggle")).changed();
+                                    ch |= ui.radio_value(&mut b.momentary, true, crate::lang::tr("momentary (on while held)")).changed();
                                     if id.starts_with("nodet:") && b.momentary {
-                                        ch |= ui.checkbox(&mut b.invert, "inverted (off while held)").changed();
+                                        ch |= ui.checkbox(&mut b.invert, crate::lang::tr("inverted (off while held)")).changed();
                                     }
                                     if ch {
                                         self.map.dirty = true;
@@ -272,12 +277,12 @@ impl App {
                             ui.add_space(24.0);
                             let b = &mut self.map.bindings[bi];
                             let mut ch = false;
-                            ui.label(RichText::new("from").small().weak());
+                            ui.label(RichText::new(crate::lang::tr("from")).small().weak());
                             ch |= ui.add(egui::DragValue::new(&mut b.min).range(lo..=hi).speed((hi - lo) * 0.002).suffix(unit)).changed();
-                            ui.label(RichText::new("to").small().weak());
+                            ui.label(RichText::new(crate::lang::tr("to")).small().weak());
                             ch |= ui.add(egui::DragValue::new(&mut b.max).range(lo..=hi).speed((hi - lo) * 0.002).suffix(unit)).changed();
-                            ch |= ui.checkbox(&mut b.invert, "reversed").changed();
-                            ui.label(RichText::new("(a key or button: lowest when released, highest when pressed)").small().weak());
+                            ch |= ui.checkbox(&mut b.invert, crate::lang::tr("reversed")).changed();
+                            ui.label(RichText::new(crate::lang::tr("(a key or button: lowest when released, highest when pressed)")).small().weak());
                             if ch {
                                 self.map.dirty = true;
                             }
@@ -285,7 +290,7 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
-                ui.label(RichText::new("The keys the windows already use (space, R, S, M, K, Ctrl+1 to 9 ...) keep working: avoid binding them to something else.").small().weak());
+                ui.label(RichText::new(crate::lang::tr("The keys the windows already use (space, R, S, M, K, Ctrl+1 to 9 ...) keep working: avoid binding them to something else.")).small().weak());
             });
         });
         if !open {

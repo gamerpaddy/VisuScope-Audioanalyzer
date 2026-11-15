@@ -12,6 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod nodes;
+mod canvas;
+
 const HDR: f32 = 22.0;
 const ROW: f32 = 22.0;
 const PORT_R: f32 = 5.5;
@@ -270,7 +273,7 @@ fn mod_menu_for(ui: &mut Ui, node: NodeId, i: usize, range: (f32, f32, bool, &'s
     let switch = unit == "switch";
     let cur = MOD_CUR.lock().iter().find(|m| m.node == node && m.param == i).copied();
     let Some(mut m) = cur else {
-        ui.label(RichText::new("Not controlled. Drag a wire from the output dot of a node onto this dot: a generator, a timeline out node, a low-pass ...").small().weak());
+        ui.label(RichText::new(crate::lang::tr("Not controlled. Drag a wire from the output dot of a node onto this dot: a generator, a timeline out node, a low-pass ...")).small().weak());
         return;
     };
     let name = MOD_SRC.lock().iter().find(|s| s.0 == m.src).map(|s| s.1.clone()).unwrap_or_else(|| "?".into());
@@ -279,17 +282,17 @@ fn mod_menu_for(ui: &mut Ui, node: NodeId, i: usize, range: (f32, f32, bool, &'s
     if switch {
         // the second entry while the signal is above the threshold; the hysteresis keeps it from flickering around it
         let (mut thr, mut hys) = (0.5 * (m.in_lo + m.in_hi), (m.in_hi - m.in_lo).abs());
-        ui.label(RichText::new("The second entry is chosen while the signal (full scale is 1) is above the threshold, the first while it is below").small().weak());
+        ui.label(RichText::new(crate::lang::tr("The second entry is chosen while the signal (full scale is 1) is above the threshold, the first while it is below")).small().weak());
         ui.horizontal(|ui| {
-            ui.label("Threshold");
+            ui.label(crate::lang::tr("Threshold"));
             ch |= ui.add(egui::DragValue::new(&mut thr).range(-4.0..=4.0).speed(0.005).max_decimals(3)).changed();
         });
         ui.horizontal(|ui| {
-            ui.label("Hysteresis");
-            ch |= ui.add(egui::DragValue::new(&mut hys).range(0.0..=4.0).speed(0.005).max_decimals(3)).on_hover_text("Total width: it switches on above threshold + half of it and off below threshold - half of it. 0 is a plain threshold.").changed();
+            ui.label(crate::lang::tr("Hysteresis"));
+            ch |= ui.add(egui::DragValue::new(&mut hys).range(0.0..=4.0).speed(0.005).max_decimals(3)).on_hover_text(crate::lang::tr("Total width: it switches on above threshold + half of it and off below threshold - half of it. 0 is a plain threshold.")).changed();
         });
         let mut inv = m.out_lo > m.out_hi;
-        ch |= ui.checkbox(&mut inv, "Inverted (the first entry above the threshold)").changed();
+        ch |= ui.checkbox(&mut inv, crate::lang::tr("Inverted (the first entry above the threshold)")).changed();
         if ch {
             m.in_lo = thr - 0.5 * hys;
             m.in_hi = thr + 0.5 * hys;
@@ -302,27 +305,27 @@ fn mod_menu_for(ui: &mut Ui, node: NodeId, i: usize, range: (f32, f32, bool, &'s
         }
         return;
     }
-    ui.label(RichText::new("Signal level (full scale is 1) -> value, outside the range it stops").small().weak());
+    ui.label(RichText::new(crate::lang::tr("Signal level (full scale is 1) -> value, outside the range it stops")).small().weak());
     ui.horizontal(|ui| {
-        ui.label("Signal at the lowest");
+        ui.label(crate::lang::tr("Signal at the lowest"));
         ch |= ui.add(egui::DragValue::new(&mut m.in_lo).range(-4.0..=4.0).speed(0.01).max_decimals(3)).changed();
     });
     ui.horizontal(|ui| {
-        ui.label("Signal at the highest");
+        ui.label(crate::lang::tr("Signal at the highest"));
         ch |= ui.add(egui::DragValue::new(&mut m.in_hi).range(-4.0..=4.0).speed(0.01).max_decimals(3)).changed();
     });
     ui.horizontal(|ui| {
-        ui.label("Value at the lowest");
+        ui.label(crate::lang::tr("Value at the lowest"));
         ch |= ui.add(egui::DragValue::new(&mut m.out_lo).range(min..=max).speed((max - min) * 0.002).suffix(unit)).changed();
     });
     ui.horizontal(|ui| {
-        ui.label("Value at the highest");
+        ui.label(crate::lang::tr("Value at the highest"));
         ch |= ui.add(egui::DragValue::new(&mut m.out_hi).range(min..=max).speed((max - min) * 0.002).suffix(unit)).changed();
     });
     if log {
-        ch |= ui.checkbox(&mut m.log, "Logarithmic").changed();
+        ch |= ui.checkbox(&mut m.log, crate::lang::tr("Logarithmic")).changed();
     }
-    ui.label(RichText::new("To smooth the signal first, put a Control low-pass node between.").small().weak());
+    ui.label(RichText::new(crate::lang::tr("To smooth the signal first, put a Control low-pass node between.")).small().weak());
     if ch {
         MOD_REQ.lock().push(ModReq::Set(m));
     }
@@ -741,7 +744,7 @@ impl Routing {
     fn entries(&self, cx: &Ctx) -> Vec<Entry> {
         let e = |label: String, kind: Kind, s: String, p0: Option<f32>| {
             let info = kind.info();
-            Entry { keywords: format!("{} {} {}", label, info.name, info.keywords).to_lowercase(), label, group: info.group, kind, s, p0 }
+            Entry { keywords: format!("{} {} {}", label, info.name, info.keywords).to_lowercase(), label: crate::lang::tr_s(&label), group: info.group, kind, s, p0 }
         };
         let mut v = Vec::new();
         for k in Kind::ALL {
@@ -787,6 +790,37 @@ impl Routing {
         self.tidy_pending = true;
         self.push();
         self.note = format!("EQ design loaded into an equaliser node ({} bands){}", bands.len(), if preamp < -0.05 { format!("; lower the level by {:.1} dB (Gain node) to keep the headroom", -preamp) } else { String::new() });
+    }
+
+    /// The crossover of the Speaker window as rows of nodes: every way starts at what feeds the first output and ends open.
+    fn take_crossover(&mut self, chains: Vec<Vec<(u8, [f32; 3])>>) {
+        let src = self.g.nodes.iter().find(|n| n.kind == Kind::Output && self.g.edge_into(n.id, 0).is_some()).and_then(|o| self.g.edge_into(o.id, 0).copied()).map(|e| (e.from, e.from_port));
+        let base = self.free_spot();
+        self.sel.clear();
+        for (row, ch) in chains.iter().enumerate() {
+            let mut prev = src;
+            for (col, (k, vals)) in ch.iter().enumerate() {
+                let kind = match k {
+                    0 => Kind::Filter,
+                    1 => Kind::Gain,
+                    _ => Kind::Delay,
+                };
+                let id = self.g.add(kind, base.x + col as f32 * 240.0, base.y + row as f32 * 200.0);
+                if let Some(n) = self.g.node_mut(id) {
+                    for (i, v) in vals.iter().enumerate().take(n.p.len()) {
+                        n.p[i] = *v;
+                    }
+                }
+                if let Some((a, ap)) = prev {
+                    let _ = self.g.connect_from(a, ap, id, 0);
+                }
+                prev = Some((id, 0));
+                self.sel.insert(id);
+            }
+        }
+        self.tidy_pending = true;
+        self.push();
+        self.note = format!("Crossover: {} way(s) added. Connect the end of each row to the output of its driver.", chains.len());
     }
 
     fn add_entry(&mut self, en: &Entry, at: Pos2, link: Link) {
@@ -872,7 +906,7 @@ impl Routing {
                 if browse_now {
                     ui.set_min_height(win_h);
                 }
-                let te = ui.add(egui::TextEdit::singleline(&mut s.text).hint_text("Search nodes: eq, input, compressor ...").desired_width(240.0));
+                let te = ui.add(egui::TextEdit::singleline(&mut s.text).hint_text(crate::lang::tr("Search nodes: eq, input, compressor ...")).desired_width(240.0));
                 if !s.focused {
                     te.request_focus();
                     s.focused = true;
@@ -919,7 +953,7 @@ impl Routing {
                         }
                     }
                     if hits.is_empty() {
-                        ui.label(RichText::new("no match").weak());
+                        ui.label(RichText::new(crate::lang::tr("no match")).weak());
                     }
                 });
             });
@@ -942,545 +976,6 @@ impl Routing {
     }
 
     // ------------------------------------------------------------------ node bodies
-
-    fn device_combo(&self, ui: &mut Ui, n: &mut Node, id_salt: &str) -> bool {
-        let Some(e) = &self.eng else { return false };
-        let devs: Vec<DevEx> = e.devs.lock().clone();
-        let cur = if n.s.is_empty() {
-            let d = e.default_in.lock().clone();
-            devs.iter().find(|x| x.id == d).map(|x| format!("{} (default)", short_label(&x.label))).unwrap_or_else(|| "default input".into())
-        } else {
-            devs.iter().find(|x| x.id == n.s).map(|x| short_label(&x.label)).unwrap_or_else(|| "device missing".into())
-        };
-        let mut changed = false;
-        egui::ComboBox::from_id_salt((id_salt, n.id)).width(ui.available_width() - 6.0).truncate().selected_text(cur).show_ui(ui, |ui| {
-            for d in &devs {
-                if ui.selectable_label(n.s == d.id, format!("{}  ({} ch, {} Hz)", short_label(&d.label), d.ch, d.sr)).clicked() {
-                    n.s = d.id.clone();
-                    changed = true;
-                }
-            }
-        });
-        changed
-    }
-
-    fn param_row(ui: &mut Ui, n: &mut Node, i: usize, label_w: f32) -> bool {
-        Self::param_row_max(ui, n, i, label_w, None)
-    }
-
-    /// A parameter row; `max` limits the upper end of the slider (the channels of the device, for instance).
-    fn param_row_max(ui: &mut Ui, n: &mut Node, i: usize, label_w: f32, max: Option<f32>) -> bool {
-        let z = ui.spacing().interact_size.y / 16.0;
-        let defs = n.kind.info().params;
-        let Some(d) = defs.get(i) else { return false };
-        let hi = max.map_or(d.max, |m| m.min(d.max).max(d.min + 0.01));
-        if n.p.len() <= i {
-            n.p.resize(i + 1, d.def);
-        }
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            // right-click the name to put the value back to its default
-            let followed = MOD_CUR.lock().iter().any(|m| m.node == n.id && m.param == i);
-            let name = ui.add_sized(vec2(label_w * z, 16.0 * z), egui::Label::new(RichText::new(d.name).small().color(if followed { Color32::from_rgb(255, 170, 70) } else { Color32::from_rgb(160, 172, 190) })).truncate().sense(Sense::click()));
-            if name.on_hover_text(if followed { "Follows a signal (right-click the slider to change it). Right-click here: reset to the default" } else { "Right-click: reset to the default" }).secondary_clicked() {
-                n.p[i] = d.def;
-                changed = true;
-            }
-            if !d.choices.is_empty() {
-                let switch = d.choices.len() == 2;
-                // a followed switch shows the state the signal gives it
-                let shown = if switch && followed { super::engine::MOD_LIVE.lock().iter().find(|m| m.0 == n.id && m.1 == i).map(|m| m.2).filter(|v| v.is_finite()).unwrap_or(n.p[i]) } else { n.p[i] };
-                let cur = d.choices.get(shown.round() as usize).copied().unwrap_or("?");
-                let w = ui.available_width() - 4.0;
-                let r = ui.add_enabled_ui(!(switch && followed), |ui| {
-                    egui::ComboBox::from_id_salt(("pc", n.id, i)).width(w).truncate().selected_text(cur).show_ui(ui, |ui| {
-                        for (k, c) in d.choices.iter().enumerate() {
-                            if ui.selectable_label(n.p[i].round() as usize == k, *c).clicked() {
-                                n.p[i] = k as f32;
-                                changed = true;
-                            }
-                        }
-                    })
-                });
-                if switch {
-                    // right-click: bind to a key, note or button (toggle or momentary); the dot at the left edge takes a signal
-                    // (the menu gets an id of its own: the list of the dropdown and a menu of the same widget would share one popup)
-                    let mut menu_r = r.inner.response.clone();
-                    menu_r.id = menu_r.id.with("bind");
-                    crate::mapping::button_menu(&menu_r,&crate::mapping::Target::toggle(format!("nodet:{}:{}", n.id, i), format!("{} #{}: {}", n.kind.info().name, n.id, d.name), true));
-                    param_port(ui, z, pos2(ui.max_rect().left() - 10.0 * z, ui.min_rect().center().y), n.id, i, (0.0, 1.0, false, "switch"));
-                }
-            } else {
-                // the value box next to the slider takes the width of the longest value it will show
-                let digits = if d.unit == " us" { 7 } else { format!("{:.1}", hi.abs().max(d.min.abs())).len() + usize::from(d.min < 0.0) };
-                let value_w = (digits + d.unit.len()) as f32 * 7.4 + 22.0;
-                ui.spacing_mut().slider_width = (ui.available_width() - value_w * z - 8.0 * z).max(30.0 * z);
-                let int = d.unit.is_empty() && hi - d.min >= 1.0 && d.min.fract() == 0.0 && d.def.fract() == 0.0;
-                // right-click the track: back to the default; right-click the value box: reset, follow a signal, bind to an input
-                let t = crate::mapping::Target::slider(format!("node:{}:{}", n.id, i), format!("{} #{}: {}", n.kind.info().name, n.id, d.name), d.min, hi, d.log, d.unit);
-                let nid = n.id;
-                let fmt = if int {
-                    crate::slider::Fmt { int: true, ..crate::slider::Fmt::new(d.unit, 0) }
-                } else if d.unit == " us" {
-                    crate::slider::Fmt { us: true, ..crate::slider::Fmt::new("", 0) }
-                } else if d.unit == " Hz" || d.unit == " ms" {
-                    // (slow rates, wow, flutter, tremolo: tenths of a Hz)
-                    crate::slider::Fmt::new(d.unit, if d.log && d.min >= 1.0 { 0 } else { 1 })
-                } else {
-                    crate::slider::Fmt::new(d.unit, 1)
-                };
-                if followed {
-                    // the slider shows the value the signal gives it, live (what is dragged here does not count)
-                    let mut shown = super::engine::MOD_LIVE.lock().iter().find(|m| m.0 == nid && m.1 == i).map(|m| m.2).filter(|v| v.is_finite()).unwrap_or(n.p[i]);
-                    crate::slider::bound(ui, &mut shown, d.min, hi, d.log, d.def, &t, fmt, |_| {});
-                } else {
-                    changed |= crate::slider::bound(ui, &mut n.p[i], d.min, hi, d.log, d.def, &t, fmt, |_| {});
-                }
-                // the control input of the value: at the left edge of the node, in the row
-                param_port(ui, z, pos2(ui.max_rect().left() - 10.0 * z, ui.min_rect().center().y), nid, i, (d.min, hi, d.log, d.unit));
-            }
-        });
-        changed
-    }
-
-    /// Output nodes whose device is also captured by an input node (a loopback of it): a feedback loop.
-    fn feedback_nodes(&self, cx: &Ctx) -> HashSet<NodeId> {
-        let default_out = cx.out_devs.first().map(|d| d.id.clone()).unwrap_or_default();
-        let outs: Vec<(NodeId, String)> = self.g.nodes.iter().filter(|n| n.kind == Kind::Output).map(|n| (n.id, if n.s.is_empty() { default_out.clone() } else { n.s.clone() })).collect();
-        let mut bad = HashSet::new();
-        for i in self.g.nodes.iter().filter(|n| n.kind == Kind::Input) {
-            let dev = if i.s.is_empty() { cx.default_in.clone() } else { i.s.clone() };
-            // only a path from the input to the output closes the loop
-            for (o, od) in &outs {
-                if *od == dev && !dev.is_empty() && self.g.reaches(i.id, *o) {
-                    bad.insert(i.id);
-                    bad.insert(*o);
-                }
-            }
-        }
-        bad
-    }
-
-    /// Widgets of one node; returns true when something changed.
-    fn body(&mut self, ui: &mut Ui, cx: &Ctx, n: &mut Node, feedback: bool) -> bool {
-        let z = self.zoom;
-        ui.spacing_mut().item_spacing.y = 3.0 * z;
-        ui.spacing_mut().interact_size.y = 16.0 * z;
-        let mut ch = false;
-        if feedback {
-            ui.label(RichText::new("feedback: this output is captured by the input that feeds it").small().color(Color32::from_rgb(255, 120, 100)));
-        }
-        let status = self.eng.as_ref().and_then(|e| e.node_status.lock().get(&n.id).cloned());
-        let meter = self.eng.as_ref().map(|e| e.meter(n.id)).unwrap_or_default();
-        match n.kind {
-            Kind::Input => {
-                ch |= self.device_combo(ui, n, "indev");
-                let ch_n = self.eng.as_ref().and_then(|e| {
-                    let d = e.devs.lock();
-                    let cur = if n.s.is_empty() { e.default_in.lock().clone() } else { n.s.clone() };
-                    d.iter().find(|x| x.id == cur).map(|x| x.ch)
-                });
-                for i in 0..2 {
-                    if let Some(c) = ch_n {
-                        n.p[i] = n.p[i].min(c as f32);
-                    }
-                    // (the slider ends at the last channel of the device)
-                    ch |= Self::param_row_max(ui, n, i, 52.0, ch_n.map(|c| c as f32));
-                }
-                ch |= Self::param_row(ui, n, 2, 52.0);
-                ch |= Self::param_row(ui, n, 3, 52.0);
-                if let Some(s) = status {
-                    let bad = s.contains("not found") || s.contains("unsupported") || s.contains("reconnect") || s.contains("no device");
-                    ui.label(RichText::new(s).small().color(if bad { Color32::from_rgb(255, 160, 90) } else { Color32::from_gray(120) }));
-                }
-            }
-            Kind::Generator => {
-                let n_gen = cx.gens.lock().len().max(1);
-                let gi = (n.p[0].round() as usize).clamp(1, n_gen);
-                let desc = cx.gens.lock().get(gi - 1).map(|p| format!("{} {:.0} Hz, {:.0} dBFS{}", p.wave.name(), p.freq, p.level_db[0], if p.on { "" } else { "  (off)" })).unwrap_or_default();
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Generator").small().color(Color32::from_rgb(160, 172, 190)));
-                    egui::ComboBox::from_id_salt(("gsel", n.id)).selected_text(format!("Gen {gi}")).width(70.0 * z).show_ui(ui, |ui| {
-                        for k in 1..=n_gen {
-                            if ui.selectable_label(gi == k, format!("Gen {k}")).clicked() {
-                                n.p[0] = k as f32;
-                                ch = true;
-                            }
-                        }
-                    });
-                });
-                ui.label(RichText::new(desc).small().weak());
-                ui.label(RichText::new("set it in the Generator window (tabs)").small().weak());
-            }
-            Kind::TimelineOut | Kind::TimelineRec => {
-                let tracks = bus().tracks.lock().clone();
-                let master_ok = n.kind == Kind::TimelineOut;
-                let cur = if n.s.is_empty() {
-                    if master_ok { "Master mix".to_string() } else { "choose a track".to_string() }
-                } else {
-                    tracks.iter().find(|t| t.0.to_string() == n.s).map(|t| t.1.clone()).unwrap_or_else(|| "track missing".into())
-                };
-                egui::ComboBox::from_id_salt(("tsel", n.id)).width(ui.available_width() - 6.0).truncate().selected_text(cur).show_ui(ui, |ui| {
-                    if master_ok && ui.selectable_label(n.s.is_empty(), "Master mix").clicked() {
-                        n.s.clear();
-                        ch = true;
-                    }
-                    for (id, name) in &tracks {
-                        if ui.selectable_label(n.s == id.to_string(), name).clicked() {
-                            n.s = id.to_string();
-                            ch = true;
-                        }
-                    }
-                    if !master_ok {
-                        ui.separator();
-                        if crate::mapping::btn(ui, "+ New track for this node").on_hover_text("Adds an armed track to the timeline that records what this node receives").clicked() {
-                            bus().track_requests.lock().push((n.id, format!("Node {}", n.id)));
-                            ui.close();
-                        }
-                    }
-                });
-                ui.label(RichText::new(if master_ok { "play the timeline to hear / see it" } else { "arm this track to record it" }).small().weak());
-            }
-            Kind::Dual => {
-                // the rows line up with the two output dots
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add_space(6.0 * z);
-                for k in 0..2 {
-                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW * z), Sense::hover());
-                    ui.painter().text(pos2(row.right() - 8.0, row.center().y), Align2::RIGHT_CENTER, format!("Line {} out", k + 1), FontId::proportional(11.0 * z), Color32::from_rgb(210, 190, 140));
-                }
-                ui.label(RichText::new("both lines carry the whole stereo signal").small().weak());
-            }
-            Kind::Split | Kind::Merge => {
-                // the rows line up with the dots: the left channel on top, the right one below
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add_space(6.0 * z);
-                for (k, name) in ["Left", "Right"].into_iter().enumerate() {
-                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW * z), Sense::hover());
-                    let col = if k == 0 { Color32::from_rgb(70, 200, 255) } else { Color32::from_rgb(255, 100, 160) };
-                    let (al, x) = if n.kind == Kind::Split { (Align2::RIGHT_CENTER, row.right() - 8.0) } else { (Align2::LEFT_CENTER, row.left() + 8.0) };
-                    ui.painter().text(pos2(x, row.center().y), al, if n.kind == Kind::Split { format!("{name} channel out") } else { format!("{name} channel in") }, FontId::proportional(11.0 * z), col);
-                }
-                ui.label(RichText::new(if n.kind == Kind::Split { "each output carries one channel on both sides" } else { "each input is made mono; first = left, second = right" }).small().weak());
-            }
-            Kind::Output => {
-                if n.inputs() == 2 {
-                    // the rows line up with the two input dots: the left channel on top, the right one below
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.add_space(6.0 * z);
-                    for (k, name) in ["Left", "Right"].into_iter().enumerate() {
-                        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW * z), Sense::hover());
-                        let col = if k == 0 { Color32::from_rgb(70, 200, 255) } else { Color32::from_rgb(255, 100, 160) };
-                        ui.painter().text(pos2(row.left() + 8.0, row.center().y), Align2::LEFT_CENTER, format!("{name} channel in"), FontId::proportional(11.0 * z), col);
-                    }
-                    ui.spacing_mut().item_spacing.y = 3.0 * z;
-                }
-                let cur = if n.s.is_empty() { cx.out_devs.first().map(|d| format!("{} (default)", d.label)).unwrap_or_else(|| "default output".into()) } else { cx.out_devs.iter().find(|d| d.id == n.s).map(|d| d.label.clone()).unwrap_or_else(|| "device missing".into()) };
-                egui::ComboBox::from_id_salt(("outdev", n.id)).width(ui.available_width() - 6.0).truncate().selected_text(cur).show_ui(ui, |ui| {
-                    for (i, d) in cx.out_devs.iter().enumerate() {
-                        let id = if i == 0 { String::new() } else { d.id.clone() };
-                        if ui.selectable_label(n.s == id, &d.label).clicked() {
-                            n.s = id;
-                            ch = true;
-                        }
-                    }
-                });
-                ch |= Self::param_row(ui, n, 0, 40.0);
-                ch |= Self::param_row(ui, n, 1, 40.0);
-                ch |= Self::param_row(ui, n, 2, 40.0);
-                if let Some(s) = status {
-                    ui.add(egui::Label::new(RichText::new(s).small().color(Color32::from_gray(120))).wrap());
-                }
-            }
-            Kind::Analyzer => {
-                ui.label(RichText::new("feeds spectrum, scope, loudness ...").small().weak());
-            }
-            Kind::Eq => {
-                let fs = self.eng.as_ref().map_or(48000.0, |e| e.rate.load(std::sync::atomic::Ordering::Relaxed) as f32);
-                let drawing = self.eq_draw.contains(&n.id);
-                let bands0 = (n.p.len() / 4).clamp(1, EQ_MAX);
-                n.p.resize(bands0 * 4, 0.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let mut d = drawing;
-                    if ui.toggle_value(&mut d, "Draw").on_hover_text("Edit with the mouse in the graph: drag a dot (frequency and level), click empty space = new band, right-click a dot = remove it").changed() {
-                        if d {
-                            self.eq_draw.insert(n.id);
-                        } else {
-                            self.eq_draw.remove(&n.id);
-                        }
-                    }
-                    if ui.add_enabled(n.p.len() / 4 < EQ_MAX, egui::Button::new("+ band")).on_hover_text("Add a band (up to 12)").clicked() {
-                        n.p.extend([0.0, 1000.0, 0.0, 1.0]);
-                        ch = true;
-                    }
-                    ui.label(RichText::new(format!("{} bands", n.p.len() / 4)).small().weak());
-                });
-                // response curve; with Draw on it is taller and the bands are dots to drag
-                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width() - 4.0, if drawing { 150.0 * z } else { 54.0 * z }), if drawing { Sense::click_and_drag() } else { Sense::hover() });
-                let range = 24.0f32;
-                let xf = |f: f32| r.left() + ((f.max(20.0) / 20.0).log10() / 3.0).clamp(0.0, 1.0) * r.width();
-                let fx = |x: f32| 20.0 * 10f32.powf(((x - r.left()) / r.width()).clamp(0.0, 1.0) * 3.0);
-                let yg = |g: f32| r.center().y - (g / range).clamp(-1.0, 1.0) * r.height() * 0.5;
-                let gy = |y: f32| ((r.center().y - y) / (r.height() * 0.5)).clamp(-1.0, 1.0) * range;
-                let painter = ui.painter_at(r);
-                painter.rect_filled(r, 3.0, Color32::from_rgb(14, 17, 23));
-                for f in [100.0f32, 1000.0, 10000.0] {
-                    painter.line_segment([pos2(xf(f), r.top()), pos2(xf(f), r.bottom())], Stroke::new(1.0, Color32::from_gray(30)));
-                }
-                if drawing {
-                    for g in [-12.0f32, 12.0] {
-                        painter.line_segment([pos2(r.left(), yg(g)), pos2(r.right(), yg(g))], Stroke::new(1.0, Color32::from_gray(30)));
-                        painter.text(pos2(r.left() + 3.0, yg(g)), Align2::LEFT_CENTER, format!("{g:+.0}"), FontId::proportional(8.0), Color32::from_gray(90));
-                    }
-                }
-                painter.line_segment([pos2(r.left(), r.center().y), pos2(r.right(), r.center().y)], Stroke::new(1.0, Color32::from_gray(48)));
-                let curve = |n: &Node| -> Vec<Pos2> {
-                    let mut u = EqUnit::default();
-                    u.set(&n.p, fs);
-                    (0..120).map(|i| {
-                        let t = i as f32 / 119.0;
-                        pos2(r.left() + t * r.width(), yg(u.response_db(fs, 20.0 * 1000f32.powf(t))))
-                    }).collect()
-                };
-                painter.add(Shape::line(curve(n), Stroke::new(1.6, if n.bypass { Color32::from_gray(90) } else { Color32::from_rgb(120, 190, 255) })));
-                let mut remove: Option<usize> = None;
-                if drawing {
-                    for b in 0..n.p.len() / 4 {
-                        let o = b * 4;
-                        let t = n.p[o].round() as usize;
-                        if t >= 6 {
-                            continue;
-                        }
-                        let uses_gain = matches!(t, 0 | 1 | 2 | 5);
-                        // the dots stay inside the graph, also for the extremes of the range
-                        let m = 7.0 * z;
-                        let c = pos2(xf(n.p[o + 1]).clamp(r.left() + m, r.right() - m), (if uses_gain { yg(n.p[o + 2]) } else { r.center().y }).clamp(r.top() + m, r.bottom() - m));
-                        let hr = ui.interact(Rect::from_center_size(c, vec2(18.0 * z, 18.0 * z)), ui.scope_id().with(("eqh", n.id, b)), Sense::click_and_drag());
-                        let col = EQ_PALETTE[b % EQ_PALETTE.len()];
-                        painter.circle_filled(c, (if hr.hovered() || hr.dragged() { 7.0 } else { 5.5 }) * z, col);
-                        painter.circle_stroke(c, 5.5 * z, Stroke::new(1.0, Color32::BLACK));
-                        painter.text(c + vec2(0.0, -11.0 * z), Align2::CENTER_CENTER, format!("{}", b + 1), FontId::proportional(8.0 * z), col);
-                        if hr.dragged() {
-                            if let Some(q) = hr.interact_pointer_pos() {
-                                n.p[o + 1] = fx(q.x).clamp(20.0, 20000.0).round();
-                                if uses_gain {
-                                    let g = gy(q.y);
-                                    n.p[o + 2] = ((if t == 5 { g.min(0.0) } else { g }) * 10.0).round() / 10.0;
-                                }
-                                ch = true;
-                            }
-                        }
-                        if hr.hovered() {
-                            painter.text(pos2(r.right() - 4.0, r.top() + 8.0), Align2::RIGHT_CENTER, format!("{}  {:.0} Hz  {:+.1} dB  Q {:.2}", EQ_TYPES[t], n.p[o + 1], n.p[o + 2], n.p[o + 3]), FontId::proportional(9.5), Color32::from_gray(210));
-                        }
-                        if hr.secondary_clicked() && n.p.len() / 4 > 1 {
-                            remove = Some(b);
-                        }
-                    }
-                    // empty space: a click or a drag makes a new band under the pointer, which the drag then moves
-                    if (resp.clicked() || resp.drag_started()) && n.p.len() / 4 < EQ_MAX {
-                        if let Some(q) = resp.interact_pointer_pos() {
-                            n.p.extend([0.0, fx(q.x).round(), (gy(q.y) * 10.0).round() / 10.0, 1.0]);
-                            self.eq_new = Some((n.id, n.p.len() / 4 - 1));
-                            ch = true;
-                        }
-                    }
-                    if resp.dragged() {
-                        if let (Some((id, b)), Some(q)) = (self.eq_new, resp.interact_pointer_pos()) {
-                            if id == n.id && b < n.p.len() / 4 {
-                                n.p[b * 4 + 1] = fx(q.x).round();
-                                n.p[b * 4 + 2] = (gy(q.y) * 10.0).round() / 10.0;
-                                ch = true;
-                            }
-                        }
-                    } else if self.eq_new.is_some_and(|(id, _)| id == n.id) {
-                        self.eq_new = None;
-                    }
-                }
-                // the band list: type, frequency, level, width
-                for b in 0..n.p.len() / 4 {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        let o = b * 4;
-                        let (sw, _) = ui.allocate_exact_size(vec2(4.0 * z, 14.0 * z), Sense::hover());
-                        ui.painter().rect_filled(sw, 2.0, EQ_PALETTE[b % EQ_PALETTE.len()]);
-                        let cur = EQ_TYPES[(n.p[o].round() as usize).min(EQ_TYPES.len() - 1)];
-                        egui::ComboBox::from_id_salt(("eqt", n.id, b)).width(66.0 * z).selected_text(cur).show_ui(ui, |ui| {
-                            for (k, c) in EQ_TYPES.iter().enumerate() {
-                                if ui.selectable_label(n.p[o].round() as usize == k, *c).clicked() {
-                                    n.p[o] = k as f32;
-                                    // a notch needs a depth: the level of the band
-                                    if k == 5 && n.p[o + 2] > -1.0 {
-                                        n.p[o + 2] = -24.0;
-                                    }
-                                    ch = true;
-                                }
-                            }
-                        });
-                        let t = n.p[o].round() as usize;
-                        let nid = n.id;
-                        let (lo, hi) = if t == 5 { (-60.0, 0.0) } else { (-24.0, 24.0) };
-                        // (right-click a value: let it follow a signal; while it does, the live value is shown)
-                        let (mut sv, f1) = followed_value(nid, o + 1, n.p[o + 1]);
-                        let r1 = ui.add(egui::DragValue::new(if f1 { &mut sv } else { &mut n.p[o + 1] }).range(20.0..=20000.0).speed(5.0).suffix(" Hz").max_decimals(0));
-                        param_port(ui, z, pos2(r1.rect.center().x, r1.rect.top() - 1.0 * z), nid, o + 1, (20.0, 20000.0, true, " Hz"));
-                        ch |= r1.changed() && !f1;
-                        let (mut sv2, f2) = followed_value(nid, o + 2, n.p[o + 2]);
-                        let r2 = ui.add_enabled(matches!(t, 0 | 1 | 2 | 5), egui::DragValue::new(if f2 { &mut sv2 } else { &mut n.p[o + 2] }).range(lo..=hi).speed(0.1).suffix(" dB").max_decimals(1)).on_hover_text(if t == 5 { "Depth of the notch" } else { "Level of the band" });
-                        param_port(ui, z, pos2(r2.rect.center().x, r2.rect.top() - 1.0 * z), nid, o + 2, (lo, hi, false, " dB"));
-                        ch |= r2.changed() && !f2;
-                        let (mut sv3, f3) = followed_value(nid, o + 3, n.p[o + 3]);
-                        let r3 = ui.add(egui::DragValue::new(if f3 { &mut sv3 } else { &mut n.p[o + 3] }).range(0.1..=10.0).speed(0.02).max_decimals(2)).on_hover_text("Q (width: higher is narrower)");
-                        param_port(ui, z, pos2(r3.rect.center().x, r3.rect.top() - 1.0 * z), nid, o + 3, (0.1, 10.0, true, ""));
-                        ch |= r3.changed() && !f3;
-                        if n.p.len() / 4 > 1 && crate::mapping::small_btn(ui, "x").on_hover_text("Remove this band").clicked() {
-                            remove = Some(b);
-                        }
-                    });
-                }
-                if let Some(b) = remove {
-                    n.p.drain(b * 4..b * 4 + 4);
-                    ch = true;
-                }
-            }
-            Kind::Comp | Kind::Limiter => {
-                for i in 0..n.kind.info().params.len() {
-                    ch |= Self::param_row(ui, n, i, 56.0);
-                }
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width() - 4.0, 8.0 * z), Sense::hover());
-                let gr = (-meter.extra).clamp(0.0, 24.0) / 24.0;
-                ui.painter().rect_filled(r, 2.0, Color32::from_gray(30));
-                ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * gr, r.height())), 2.0, Color32::from_rgb(235, 150, 60));
-                ui.label(RichText::new(format!("gain reduction {:.1} dB", meter.extra)).small().weak());
-            }
-            Kind::Gate => {
-                for i in 0..4 {
-                    ch |= Self::param_row(ui, n, i, 56.0);
-                }
-                ui.label(RichText::new(if meter.extra > 0.5 { "open" } else { "closed" }).small().weak());
-            }
-            Kind::Mixer => {
-                let cnt = n.inputs();
-                // the number of inputs and the master level come first, so that adding an input moves nothing the
-                // pointer is on; the rows below line up with the input dots (no extra spacing between them)
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add_space(6.0 * z);
-                ui.allocate_ui_with_layout(vec2(ui.available_width(), ROW * z), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.set_min_height(ROW * z);
-                    ui.label(RichText::new("Inputs").small().color(Color32::from_rgb(160, 172, 190)));
-                    let mut c = cnt;
-                    if spinner(ui, ("mixn", n.id), &mut c, 1, MIX_MAX, z) {
-                        n.p[0] = c as f32;
-                        ch = true;
-                    }
-                });
-                ui.allocate_ui_with_layout(vec2(ui.available_width(), ROW * z), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.set_min_height(ROW * z);
-                    ch |= Self::param_row(ui, n, 1, 44.0);
-                });
-                let cnt = n.inputs();
-                for k in 0..cnt {
-                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW * z), Sense::hover());
-                    ui.scope_builder(UiBuilder::new().max_rect(row.shrink2(vec2(10.0 * z, 2.0 * z))).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.label(RichText::new(format!("{}", k + 1)).small().weak());
-                        ui.spacing_mut().slider_width = 100.0 * z;
-                        let muted = n.p[2 + MIX_MAX + k] >= 0.5;
-                        let t = crate::mapping::Target::slider(format!("node:{}:{}", n.id, 2 + k), format!("Mixer #{}: input {} gain", n.id, k + 1), -60.0, 12.0, false, " dB");
-                        let nid = n.id;
-                        let (mut shown, followed) = followed_value(nid, 2 + k, n.p[2 + k]);
-                        ui.add_enabled_ui(!muted, |ui| {
-                            if followed {
-                                crate::slider::bound(ui, &mut shown, -60.0, 12.0, false, 0.0, &t, crate::slider::Fmt::new(" dB", 1), |_| {});
-                            } else {
-                                ch |= crate::slider::bound(ui, &mut n.p[2 + k], -60.0, 12.0, false, 0.0, &t, crate::slider::Fmt::new(" dB", 1), |_| {});
-                            }
-                        });
-                        // (at the right edge: the left edge has the input dot of the row)
-                        param_port(ui, z, pos2(ui.max_rect().right() + 10.0 * z, ui.min_rect().center().y), nid, 2 + k, (-60.0, 12.0, false, " dB"));
-                        let mb = ui.selectable_label(muted, "M").on_hover_text("Mute this input");
-                        crate::mapping::button_menu(&mb, &crate::mapping::Target::toggle(format!("mixm:{}:{}", n.id, k), format!("Mixer #{}: mute input {}", n.id, k + 1), true));
-                        if mb.clicked() {
-                            n.p[2 + MIX_MAX + k] = if muted { 0.0 } else { 1.0 };
-                            ch = true;
-                        }
-                    });
-                }
-            }
-            Kind::Distortion => {
-                let old = n.param(1).round() as usize;
-                for i in [1, 0, 2, 5, 6, 7, 3, 4] {
-                    if n.shows(i) {
-                        ch |= Self::param_row(ui, n, i, 50.0);
-                    }
-                }
-                let new = n.param(1).round() as usize;
-                if new != old {
-                    // the harmonics are meant to be added at the level of the signal, the clippers are turned down
-                    if new == DIST_HARMONIC && (n.p[4] + 6.0).abs() < 0.01 {
-                        n.p[4] = 0.0;
-                    } else if old == DIST_HARMONIC && n.p[4].abs() < 0.01 {
-                        n.p[4] = -6.0;
-                    }
-                }
-                if new == DIST_HARMONIC {
-                    ui.label(RichText::new("a series of harmonics of the signal, relative to its level").small().weak());
-                }
-            }
-            Kind::Convolver => {
-                let name = if n.s.is_empty() { "none".to_string() } else { std::path::Path::new(&n.s).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| n.s.clone()) };
-                // buttons on one row, the file name on its own (cut to the width of the node), the status wraps
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if crate::mapping::btn(ui, "Load IR...").on_hover_text("A room, a cabinet or a measured impulse response (also one saved from the Impulse window)").clicked() {
-                        self.ir_dlg = Some((n.id, crate::tools::dialogs::open("Impulse response", "Audio", crate::tools::decode::EXTENSIONS)));
-                    }
-                    if !n.s.is_empty() && crate::mapping::btn(ui, "Remove").on_hover_text("Remove the impulse response").clicked() {
-                        n.s.clear();
-                        ch = true;
-                    }
-                });
-                ui.add(egui::Label::new(RichText::new(name).small().weak()).truncate()).on_hover_text(&n.s);
-                for i in 0..2 {
-                    ch |= Self::param_row(ui, n, i, 40.0);
-                }
-                if let Some(s) = status {
-                    ui.add(egui::Label::new(RichText::new(s).small().color(Color32::from_gray(120))).wrap());
-                }
-            }
-            _ => {
-                for i in 0..n.kind.info().params.len() {
-                    if n.shows(i) {
-                        ch |= Self::param_row(ui, n, i, 56.0);
-                    }
-                }
-                if n.kind == Kind::Phase && n.param(1).round() as usize == 3 {
-                    ch |= phase_curve(ui, n, z);
-                }
-                if matches!(n.kind, Kind::Phase | Kind::NoiseRed | Kind::Shifter) {
-                    if let Some(s) = status.filter(|s| !s.is_empty()) {
-                        ui.label(RichText::new(s).small().color(Color32::from_gray(120)));
-                    }
-                }
-            }
-        }
-        // output level
-        if n.kind != Kind::Analyzer || true {
-            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width() - 4.0, 7.0 * z), Sense::hover());
-            let p = ui.painter();
-            for (c, pk) in meter.peak.iter().enumerate() {
-                let y = r.top() + c as f32 * 4.0 * z;
-                let db = 20.0 * pk.max(1e-6).log10();
-                let t = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-                let rr = Rect::from_min_size(pos2(r.left(), y), vec2(r.width(), 3.0 * z));
-                p.rect_filled(rr, 1.0, Color32::from_gray(30));
-                p.rect_filled(Rect::from_min_size(rr.min, vec2(rr.width() * t, 3.0 * z)), 1.0, if db > -1.0 { Color32::from_rgb(235, 70, 70) } else if db > -12.0 { Color32::from_rgb(230, 190, 60) } else { Color32::from_rgb(70, 200, 120) });
-            }
-        }
-        ch
-    }
 
     fn undo_graph(&mut self) {
         let g = self.g.clone();
@@ -1564,7 +1059,7 @@ impl Routing {
                     a.1[other] = g;
                 }
             }
-            if crate::mapping::small_btn(ui, "x").on_hover_text("Stop comparing and keep this version").clicked() {
+            if crate::mapping::small_btn(ui, "x").on_hover_text(crate::lang::tr("Stop comparing and keep this version")).clicked() {
                 self.ab = None;
             }
         }
@@ -1598,9 +1093,9 @@ impl Routing {
     /// Ready-made patches for a task: for people who start from nothing. The current patch is replaced (Ctrl+Z brings it back).
     fn presets_menu(&mut self, ui: &mut Ui, cx: &Ctx) {
         let mut pick: Option<super::presets::Preset> = None;
-        crate::windows::sticky_menu(ui, "Presets", |ui| {
+        crate::windows::sticky_menu(ui, crate::lang::tr("Presets"), |ui| {
             ui.set_min_width(320.0);
-            ui.label(RichText::new("Start from a ready-made patch (replaces the current one; Ctrl+Z brings it back)").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Start from a ready-made patch (replaces the current one; Ctrl+Z brings it back)")).small().weak());
             for p in super::presets::Preset::ALL {
                 let name = p.name().split(':').next().unwrap_or("");
                 if crate::mapping::btn(ui, name).on_hover_text(p.about()).clicked() {
@@ -1632,21 +1127,21 @@ impl Routing {
         let title = if self.cur_name.is_empty() { "Routings".to_string() } else { format!("Routings: {}", self.cur_name) };
         crate::windows::sticky_menu(ui, title, |ui| {
             ui.set_min_width(250.0);
-            ui.label(RichText::new("Saved routings").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Saved routings")).small().weak());
             let names = list_routings();
             if names.is_empty() {
-                ui.label(RichText::new("none yet: type a name below and save").small().weak());
+                ui.label(RichText::new(crate::lang::tr("none yet: type a name below and save")).small().weak());
             }
             let (mut load, mut del): (Option<String>, Option<String>) = (None, None);
             egui::ScrollArea::vertical().max_height(260.0).auto_shrink([true, true]).show(ui, |ui| {
                 for n in &names {
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(*n == self.cur_name, n).on_hover_text("Load this routing (replaces the current one)").clicked() {
+                        if ui.selectable_label(*n == self.cur_name, n).on_hover_text(crate::lang::tr("Load this routing (replaces the current one)")).clicked() {
                             load = Some(n.clone());
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let armed = self.del_arm.as_deref() == Some(n.as_str());
-                            if crate::mapping::small_btn(ui, if armed { "delete?" } else { "x" }).on_hover_text("Delete this saved routing (click twice)").clicked() {
+                            if crate::mapping::small_btn(ui, if armed { "delete?" } else { "x" }).on_hover_text(crate::lang::tr("Delete this saved routing (click twice)")).clicked() {
                                 if armed {
                                     del = Some(n.clone());
                                 } else {
@@ -1659,10 +1154,10 @@ impl Routing {
             });
             ui.separator();
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.save_name).hint_text("name").desired_width(130.0));
+                ui.add(egui::TextEdit::singleline(&mut self.save_name).hint_text(crate::lang::tr("name")).desired_width(130.0));
                 let name = clean_name(&self.save_name);
                 let exists = names.iter().any(|n| n.eq_ignore_ascii_case(&name));
-                if ui.add_enabled(!name.is_empty(), egui::Button::new(if exists { "Overwrite" } else { "Save" })).on_hover_text("Save the current routing under this name").clicked() {
+                if ui.add_enabled(!name.is_empty(), egui::Button::new(if exists { "Overwrite" } else { "Save" })).on_hover_text(crate::lang::tr("Save the current routing under this name")).clicked() {
                     match save_routing(&name, &self.g) {
                         Ok(()) => {
                             self.note = format!("Saved routing {name}");
@@ -1723,566 +1218,6 @@ impl Routing {
 
     // ------------------------------------------------------------------ canvas
 
-    fn canvas(&mut self, ui: &mut Ui, cx: &Ctx, canvas: Rect) {
-        let origin = canvas.min + self.pan;
-        // nodes that were saved on top of each other (or grew over their neighbours) are moved apart once their sizes are known
-        if self.tidy_pending && self.g.nodes.iter().all(|n| self.sizes.contains_key(&n.id)) {
-            self.tidy_pending = false;
-            self.tidy();
-            self.push();
-        }
-        let painter = ui.painter_at(canvas);
-        painter.rect_filled(canvas, 0.0, CANVAS_BG);
-        // dot grid
-        let step = (24.0 * self.zoom).max(10.0);
-        let (ox, oy) = (self.pan.x.rem_euclid(step), self.pan.y.rem_euclid(step));
-        let mut y = canvas.top() + oy;
-        while y < canvas.bottom() {
-            let mut x = canvas.left() + ox;
-            while x < canvas.right() {
-                painter.circle_filled(pos2(x, y), 0.8, Color32::from_gray(42));
-                x += step;
-            }
-            y += step;
-        }
-        let bg = ui.interact(canvas, ui.scope_id().with("routing_bg"), Sense::click_and_drag());
-        let shift = ui.input(|i| i.modifiers.shift);
-        let hand = ui.input(|i| i.modifiers.alt || i.key_down(egui::Key::Space));
-        // a drag on the background selects with a band; Alt or Space with the drag (or the middle or right button) moves the view
-        if bg.dragged_by(egui::PointerButton::Primary) && self.wire.is_none() {
-            if !hand {
-                if self.band.is_none() {
-                    self.band = ui.input(|i| i.pointer.press_origin());
-                }
-            } else {
-                self.pan += bg.drag_delta();
-            }
-        }
-        if bg.dragged_by(egui::PointerButton::Middle) || bg.dragged_by(egui::PointerButton::Secondary) {
-            self.pan += bg.drag_delta();
-        }
-        // the wheel only zooms the node window, about the pointer, wherever it is (also over a node and over the graph of an
-        // equaliser); popups on top keep their own wheel. A pinch on a touchpad (or a touch screen) and Ctrl + wheel zoom the same way.
-        let over = ui.input(|i| i.pointer.hover_pos()).filter(|p| canvas.contains(*p) && ui.ctx().layer_id_at(*p) == Some(ui.layer_id()));
-        if let Some(p) = over {
-            let (sc, alt, pinch) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.alt, i.zoom_delta()));
-            let mut factor = if pinch.is_finite() && pinch > 0.0 { pinch } else { 1.0 };
-            if sc != egui::Vec2::ZERO {
-                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
-                if alt {
-                    // Alt + wheel (or a horizontal wheel) moves the view
-                    self.pan += sc;
-                } else if sc.y != 0.0 {
-                    factor *= (sc.y * 0.0025).exp();
-                } else {
-                    self.pan += sc;
-                }
-            }
-            if (factor - 1.0).abs() > 1e-4 {
-                // the spot under the pointer stays where it is
-                let m = (p - origin) / self.zoom;
-                self.zoom = (self.zoom * factor).clamp(0.15, 1.8);
-                self.pan = p - canvas.min - m * self.zoom;
-            }
-        }
-        // node coordinates <-> screen
-        let (origin, z) = (canvas.min + self.pan, self.zoom);
-        let sp = move |m: Pos2| origin + m.to_vec2() * z;
-        // the listening probe follows the pointer (not while a wire, a band or the background is being dragged)
-        let probing = if self.probe_on && self.wire.is_none() && self.band.is_none() && !bg.dragged() { over.and_then(|p| self.probe_target(p, &sp, z)) } else { None };
-        self.probe_body = probing.is_some_and(|t| t.1);
-        self.set_probe(probing.map(|t| t.0));
-        let mp = move |s: Pos2| ((s - origin) / z).to_pos2();
-        if bg.clicked() {
-            self.sel.clear();
-            self.sel_wire = None;
-        }
-        let pointer = ui.input(|i| i.pointer.interact_pos());
-
-        // wires first (under the nodes)
-        let mut wire_hit: Option<(NodeId, u8)> = None;
-        let metersum: HashMap<NodeId, f32> = self.eng.as_ref().map(|e| self.g.nodes.iter().map(|n| (n.id, e.meter(n.id).peak[0].max(e.meter(n.id).peak[1]))).collect()).unwrap_or_default();
-        for e in &self.g.edges {
-            let (Some(a), Some(b)) = (self.g.node(e.from), self.g.node(e.to)) else { continue };
-            let pts = wire_pts(sp(out_pos(a, e.from_port as usize)), sp(in_pos(b, e.port as usize)));
-            let lvl = metersum.get(&e.from).copied().unwrap_or(0.0);
-            let live = ((20.0 * lvl.max(1e-6).log10() + 60.0) / 60.0).clamp(0.0, 1.0);
-            let selected = self.sel_wire == Some((e.to, e.port));
-            let near = pointer.is_some_and(|p| canvas.contains(p) && wire_distance(&pts, p) < 7.0);
-            if near && self.wire.is_none() {
-                wire_hit = Some((e.to, e.port));
-            }
-            let col = if selected { Color32::from_rgb(255, 214, 80) } else if near { Color32::from_rgb(200, 220, 255) } else { Color32::from_rgb(80, 120, 170).gamma_multiply(0.6 + 0.4 * live) };
-            painter.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(if selected || near { 3.0 } else { 2.2 }, col))));
-        }
-        // a parameter that follows a signal: a dashed line from the signal to the node
-        for m in &self.g.mods {
-            let (Some(a), Some(b)) = (self.g.node(m.src), self.g.node(m.node)) else { continue };
-            let bw = self.sizes.get(&b.id).map_or(node_w(b.kind), |s| s.0);
-            // to the port of the parameter row (where the row was drawn last), else to the top of the node
-            let row = MOD_ROWS.lock().iter().find(|r| r.0 == (m.node, m.param)).map(|r| r.1);
-            let pts = wire_pts(sp(out_pos(a, 0)), row.unwrap_or_else(|| sp(pos2(b.x + bw * 0.5, b.y))));
-            let line: Vec<Pos2> = (0..=24).map(|k| bezier_at(&pts, k as f32 / 24.0)).collect();
-            painter.extend(Shape::dashed_line(&line, Stroke::new(1.6, Color32::from_rgb(255, 170, 70).gamma_multiply(0.8)), 6.0, 4.0));
-        }
-        if let Some((to, port)) = wire_hit {
-            if bg.clicked() || ui.input(|i| i.pointer.primary_clicked()) {
-                self.sel_wire = Some((to, port));
-                self.sel.clear();
-            }
-        }
-        // a right-click picks the wire under the pointer (or none) for the menu
-        if bg.secondary_clicked() {
-            self.sel_wire = wire_hit;
-        }
-        let mut changed_graph = false;
-        bg.context_menu(|ui| {
-            let at = pointer.map(mp).unwrap_or(pos2(100.0, 100.0));
-            if let Some((to, port)) = self.sel_wire {
-                if crate::mapping::btn(ui, "Insert a node here...").clicked() {
-                    self.search = Some(Search { at, text: String::new(), sel: 0, link: Link::Insert(to, port), focused: false });
-                    ui.close();
-                }
-                // a line that carries one channel already (after a split node, for instance) has nothing to split
-                let mono = self.g.edge_into(to, port).is_some_and(|e| self.g.carries_mono(e.from, 0));
-                if crate::mapping::btn(ui, "Split here into two stereo lines").on_hover_text("A node with two outputs, both the whole stereo signal: the first goes on to the same place, the second is free to connect anywhere").clicked() {
-                    let place = self.free_place(at, Kind::Dual);
-                    if let Some(s) = self.g.split_wire_as(Kind::Dual, to, port, place.x, place.y) {
-                        self.sel.clear();
-                        self.sel.insert(s);
-                        self.sel_wire = None;
-                        changed_graph = true;
-                        self.note = "Two lines: the first goes on to the old target, connect the second where you want it".into();
-                    }
-                    ui.close();
-                }
-                if !mono && crate::mapping::btn(ui, "Split here into left and right channels").on_hover_text("A split node in this line: the left channel goes on to the same place, the right output is free to connect anywhere").clicked() {
-                    let place = self.free_place(at, Kind::Split);
-                    if let Some(s) = self.g.split_wire(to, port, place.x, place.y) {
-                        self.sel.clear();
-                        self.sel.insert(s);
-                        self.sel_wire = None;
-                        changed_graph = true;
-                        self.note = "Split: the left channel goes on to the old target, connect the right output where you want it".into();
-                    }
-                    ui.close();
-                }
-                if crate::mapping::btn(ui, "Merge here with another line").on_hover_text("A merge node in this line: this line goes into its left input, connect a second line to the right input").clicked() {
-                    let place = self.free_place(at, Kind::Merge);
-                    if let Some(s) = self.g.split_wire_as(Kind::Merge, to, port, place.x, place.y) {
-                        self.sel.clear();
-                        self.sel.insert(s);
-                        self.sel_wire = None;
-                        changed_graph = true;
-                        self.note = "Merge: this line is the left input, connect the second line to the right input".into();
-                    }
-                    ui.close();
-                }
-                if crate::mapping::btn(ui, "Disconnect").clicked() {
-                    self.g.disconnect(to, port);
-                    self.sel_wire = None;
-                    changed_graph = true;
-                    ui.close();
-                }
-                ui.separator();
-            }
-            if crate::mapping::btn(ui, "Add node...  (Space)").clicked() {
-                self.search = Some(Search { at, text: String::new(), sel: 0, link: Link::None, focused: false });
-                ui.close();
-            }
-            if crate::mapping::btn(ui, "Fit all nodes").clicked() {
-                self.fit_next = true;
-                ui.close();
-            }
-        });
-
-        // nodes
-        let mut dragged: Option<(NodeId, egui::Vec2)> = None;
-        let mut clicked: Option<(NodeId, bool)> = None;
-        let mut remove: Option<NodeId> = None;
-        let mut port_drag: Option<(WireDrag, bool)> = None; // (what, released)
-        let ids: Vec<NodeId> = self.g.nodes.iter().map(|n| n.id).collect();
-        let loops = self.feedback_nodes(cx);
-        for id in ids {
-            let Some(idx) = self.g.nodes.iter().position(|n| n.id == id) else { continue };
-            let mut n = self.g.nodes[idx].clone();
-            let w = node_w(n.kind) * z;
-            let (hdr, row) = (HDR * z, ROW * z);
-            let info = n.kind.info();
-            let top_left = sp(pos2(n.x, n.y));
-            let selected = self.sel.contains(&id);
-            let bg_idx = painter.add(Shape::Noop);
-            let body_rect = Rect::from_min_size(top_left + vec2(0.0, hdr), vec2(w, 600.0 * z));
-            let mut used_h = 0.0;
-            let mut body_changed = false;
-            if body_rect.top() < canvas.bottom() + 600.0 && top_left.x < canvas.right() && top_left.x + w > canvas.left() {
-                let (changed, h) = {
-                    let mut child = ui.new_child(UiBuilder::new().max_rect(body_rect.shrink2(vec2(10.0 * z, 5.0 * z))).layout(egui::Layout::top_down(egui::Align::LEFT)));
-                    child.set_clip_rect(canvas);
-                    scale_style(child.style_mut(), z);
-                    let c = self.body(&mut child, cx, &mut n, loops.contains(&id));
-                    // nothing may reach past the node: (a test hook, VISUSCOPE_NODECHECK=1, logs the kinds that do)
-                    if child.min_rect().width() > w - 8.0 * z && std::env::var_os("VISUSCOPE_NODECHECK").is_some() {
-                        crate::log::log(&format!("node overflow: {:?} is {:.0} wide in a node of {:.0}", n.kind, child.min_rect().width(), w));
-                    }
-                    (c, child.min_rect().height() + 10.0 * z)
-                };
-                body_changed = changed;
-                used_h = h;
-            }
-            let full = Rect::from_min_size(top_left, vec2(w, hdr + used_h.max(row)));
-            if body_changed && n.kind == Kind::Eq {
-                // a band was added or removed: the node grows or shrinks
-                self.tidy_pending = true;
-            }
-            self.sizes.insert(id, (w / z, full.height() / z));
-            // header
-            let header = Rect::from_min_size(top_left, vec2(w, hdr));
-            let (r, g, b) = info.color;
-            let hcol = Color32::from_rgb(r, g, b);
-            painter.set(
-                bg_idx,
-                Shape::Vec(vec![
-                    Shape::rect_filled(full, 6.0, BODY_BG),
-                    Shape::rect_filled(header, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, if n.bypass { Color32::from_gray(70) } else { hcol.gamma_multiply(if selected { 1.0 } else { 0.78 }) }),
-                    Shape::rect_stroke(full, 6.0, Stroke::new(if selected { 1.8 } else { 1.0 }, if selected { Color32::from_rgb(235, 240, 250) } else { Color32::from_rgb(52, 60, 76) }), egui::StrokeKind::Inside),
-                ]),
-            );
-            let title = match n.kind {
-                Kind::Input => "Input".to_string(),
-                k => k.name().to_string(),
-            };
-            painter.text(header.min + vec2(10.0 * z, hdr * 0.5), Align2::LEFT_CENTER, title, FontId::proportional(12.0 * z), Color32::from_rgb(10, 14, 20));
-            // header buttons: bypass, remove
-            let hb = ui.interact(Rect::from_min_max(header.min, pos2(header.max.x - 44.0 * z, header.max.y)), ui.scope_id().with(("nh", id)), Sense::click_and_drag());
-            if info.inputs > 0 && info.outputs > 0 {
-                let br = Rect::from_center_size(pos2(header.max.x - 34.0 * z, header.center().y), vec2(14.0 * z, 14.0 * z));
-                let r = ui.interact(br, ui.scope_id().with(("nb", id)), Sense::click());
-                painter.rect_filled(br, 3.0, if n.bypass { Color32::from_rgb(235, 190, 70) } else { Color32::from_black_alpha(60) });
-                painter.text(br.center(), Align2::CENTER_CENTER, "B", FontId::proportional(9.5 * z), if n.bypass { Color32::BLACK } else { Color32::from_gray(210) });
-                if r.on_hover_text("Bypass this node").clicked() {
-                    n.bypass = !n.bypass;
-                    body_changed = true;
-                }
-            }
-            let xr = Rect::from_center_size(pos2(header.max.x - 12.0 * z, header.center().y), vec2(14.0 * z, 14.0 * z));
-            let xrr = ui.interact(xr, ui.scope_id().with(("nx", id)), Sense::click());
-            painter.text(xr.center(), Align2::CENTER_CENTER, "x", FontId::proportional(12.0 * z), if xrr.hovered() { Color32::WHITE } else { Color32::from_gray(30) });
-            if xrr.on_hover_text("Remove the node").clicked() {
-                remove = Some(id);
-            }
-            if hb.dragged() {
-                dragged = Some((id, hb.drag_delta() / z));
-            }
-            if hb.clicked() || hb.drag_started() {
-                clicked = Some((id, shift));
-            }
-            hb.context_menu(|ui| {
-                if crate::mapping::btn(ui, "Duplicate").clicked() {
-                    let (x, y) = (n.x + 30.0, n.y + 30.0);
-                    let k = n.kind;
-                    let nn = self.g.add(k, x, y);
-                    if nn != n.id {
-                        if let Some(m) = self.g.node_mut(nn) {
-                            m.p = n.p.clone();
-                            m.s = n.s.clone();
-                            m.bypass = n.bypass;
-                        }
-                        changed_graph = true;
-                    }
-                    ui.close();
-                }
-                if crate::mapping::btn(ui, "Remove").clicked() {
-                    remove = Some(id);
-                    ui.close();
-                }
-            });
-            // ports
-            // a port carries a stereo pair: the dot shows the left half in cyan and the right half in pink;
-            // the ports of split / merge nodes carry one channel and are drawn in that channel's colour
-            let mut dot = |ui: &mut Ui, c: Pos2, tag: (u8, NodeId, u8), wired: bool, lr: u8| {
-                let pr = PORT_R * z.max(0.7);
-                let rr = Rect::from_center_size(c, vec2(pr * 3.2, pr * 3.2));
-                let r = ui.interact(rr, ui.scope_id().with(("port", tag)), Sense::click_and_drag());
-                let (lc, rc) = (Color32::from_rgb(70, 200, 255), Color32::from_rgb(255, 100, 160));
-                let k = if r.hovered() || wired { 1.0 } else { 0.55 };
-                painter.circle_filled(c, pr + 0.5, Color32::from_rgb(20, 24, 32));
-                match lr {
-                    1 => {
-                        painter.circle_filled(c, pr, lc.gamma_multiply(k));
-                    }
-                    2 => {
-                        painter.circle_filled(c, pr, rc.gamma_multiply(k));
-                    }
-                    _ => {
-                        half_dot(&painter, c, pr, true, lc.gamma_multiply(k));
-                        half_dot(&painter, c, pr, false, rc.gamma_multiply(k));
-                    }
-                }
-                painter.circle_stroke(c, pr, Stroke::new(if r.hovered() { 2.0 } else { 1.2 }, if r.hovered() { Color32::WHITE } else { Color32::from_rgb(150, 175, 215) }));
-                r.on_hover_text(match lr {
-                    1 => "Left channel",
-                    2 => "Right channel",
-                    _ => "Stereo: left (cyan half) and right (pink half) travel together in one wire",
-                })
-            };
-            for p in 0..n.inputs() {
-                let c = sp(in_pos(&n, p));
-                let wired = self.g.edge_into(id, p as u8).is_some();
-                let lr = if n.kind == Kind::Merge || (n.kind == Kind::Output && n.inputs() == 2) { 1 + p as u8 } else { 0 };
-                let r = dot(ui, c, (0, id, p as u8), wired, lr);
-                if r.drag_started() {
-                    // dragging a connected input moves its wire; an empty one starts a new wire backwards
-                    port_drag = Some(match self.g.edge_into(id, p as u8).copied() {
-                        Some(e) => {
-                            self.g.disconnect(id, p as u8);
-                            changed_graph = true;
-                            (WireDrag::FromOut(e.from, e.from_port), false)
-                        }
-                        None => (WireDrag::FromIn(id, p as u8), false),
-                    });
-                }
-            }
-            for op in 0..n.outputs() {
-                let c = sp(out_pos(&n, op));
-                let lr = if n.kind == Kind::Split { 1 + op as u8 } else { 0 };
-                let r = dot(ui, c, (1, id, op as u8), self.g.edges.iter().any(|e| e.from == id && e.from_port as usize == op), lr);
-                if r.drag_started() {
-                    port_drag = Some((WireDrag::FromOut(id, op as u8), false));
-                }
-                let mono = self.g.carries_mono(id, 0);
-                r.context_menu(|ui| {
-                    if crate::mapping::btn(ui, "Split here into two stereo lines").on_hover_text("A node with two outputs that both carry the whole stereo signal").clicked() {
-                        let at = self.free_place(pos2(n.x + node_w(n.kind) + 40.0, n.y + 60.0), Kind::Dual);
-                        if let Some(s) = self.g.split_output_as(Kind::Dual, id, op as u8, at.x, at.y) {
-                            self.sel.clear();
-                            self.sel.insert(s);
-                            changed_graph = true;
-                        }
-                        ui.close();
-                    }
-                    if mono {
-                        return;
-                    }
-                    if crate::mapping::btn(ui, "Split here into left and right channels").on_hover_text("A split node on this output: its two outputs carry the left and the right channel, to route them one by one").clicked() {
-                        let at = self.free_place(pos2(n.x + node_w(n.kind) + 40.0, n.y + 60.0), Kind::Split);
-                        if let Some(s) = self.g.split_output(id, op as u8, at.x, at.y) {
-                            self.sel.clear();
-                            self.sel.insert(s);
-                            changed_graph = true;
-                        }
-                        ui.close();
-                    }
-                });
-            }
-            if body_changed {
-                let still = n.inputs();
-                self.g.nodes[idx] = n;
-                self.g.edges.retain(|e| e.to != id || (e.port as usize) < still);
-                changed_graph = true;
-            }
-        }
-        if let Some((w, _)) = port_drag {
-            self.wire = Some(w);
-        }
-
-        // moving, selecting, removing
-        if let Some((id, d)) = clicked {
-            if shift {
-                if !self.sel.remove(&id) {
-                    self.sel.insert(id);
-                }
-            } else if !self.sel.contains(&id) {
-                self.sel.clear();
-                self.sel.insert(id);
-            }
-            self.sel_wire = None;
-            // bring to front
-            if let Some(pos) = self.g.nodes.iter().position(|n| n.id == id) {
-                let n = self.g.nodes.remove(pos);
-                self.g.nodes.push(n);
-            }
-            let _ = d;
-        }
-        if let Some((id, d)) = dragged {
-            let moving: Vec<NodeId> = if self.sel.contains(&id) { self.sel.iter().copied().collect() } else { vec![id] };
-            for m in moving {
-                if let Some(n) = self.g.node_mut(m) {
-                    n.x += d.x;
-                    n.y += d.y;
-                }
-            }
-            self.dirty = true;
-        }
-        if let Some(id) = remove {
-            self.g.remove_bridged(id);
-            self.sel.remove(&id);
-            changed_graph = true;
-        }
-        // rubber band
-        if let Some(a) = self.band {
-            if let Some(p) = pointer {
-                let r = Rect::from_two_pos(a, p);
-                painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_rgb(140, 185, 255)), egui::StrokeKind::Inside);
-                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(110, 160, 255, 24));
-                if ui.input(|i| i.pointer.any_released()) {
-                    if !ui.input(|i| i.modifiers.shift) {
-                        self.sel.clear();
-                    }
-                    for n in &self.g.nodes {
-                        let nr = Rect::from_min_size(sp(pos2(n.x, n.y)), vec2(node_w(n.kind), 60.0) * z);
-                        if r.intersects(nr) {
-                            self.sel.insert(n.id);
-                        }
-                    }
-                    self.band = None;
-                }
-            } else {
-                self.band = None;
-            }
-        }
-
-        // wire being dragged
-        if let (Some(w), Some(p)) = (self.wire, pointer) {
-            let (a, b) = match w {
-                WireDrag::FromOut(id, op) => (self.g.node(id).map(|n| sp(out_pos(n, op as usize))), p),
-                WireDrag::FromIn(id, port) => (Some(p), self.g.node(id).map_or(p, |n| sp(in_pos(n, port as usize)))),
-            };
-            if let Some(a) = a {
-                painter.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(wire_pts(a, b), false, Color32::TRANSPARENT, Stroke::new(2.4, Color32::from_rgb(255, 214, 80)))));
-            }
-            if ui.input(|i| i.pointer.any_released()) {
-                self.wire = None;
-                // the dots of a mixer are a row apart (22 pixels at full size): the radius is smaller than half of that
-                let radius = (15.0 * z.max(0.6)).min(ROW * z * 0.48);
-                match w {
-                    WireDrag::FromOut(from, fport) => {
-                        // onto the control input of a value?
-                        let port_hit = MOD_ROWS.lock().iter().filter(|(k, _)| k.0 != from).map(|(k, pos)| (pos.distance(p), *k)).filter(|d| d.0 < 11.0 * z.max(0.7)).min_by(|a, b| a.0.total_cmp(&b.0)).map(|d| d.1);
-                        if let Some((to, param)) = port_hit {
-                            if let Some((lo, hi, log, _)) = self.g.node(to).and_then(|n| param_range(n, param)) {
-                                let switch = self.g.node(to).is_some_and(|n| param_range(n, param).is_some_and(|r| r.3 == "switch"));
-                                let (in_lo, in_hi) = if switch { (-0.05, 0.05) } else { (-1.0, 1.0) };
-                                let m = Modulation { node: to, param, src: from, in_lo, in_hi, out_lo: lo, out_hi: hi, log };
-                                if self.g.set_modulation(m) {
-                                    changed_graph = true;
-                                } else {
-                                    self.note = "That cannot control this value".into();
-                                }
-                            }
-                        } else {
-                        let cands: Vec<(NodeId, u8, Pos2)> = self.g.nodes.iter().flat_map(|n| (0..n.inputs()).map(move |k| (n.id, k as u8, sp(in_pos(n, k))))).collect();
-                        let target = pick_port(&cands, p, radius);
-                        // dropped on a node body: first free input
-                        let target = target.or_else(|| {
-                            self.g.nodes.iter().find_map(|n| {
-                                let r = Rect::from_min_size(sp(pos2(n.x, n.y)), vec2(node_w(n.kind), HDR + 20.0) * z);
-                                if r.contains(p) && n.id != from {
-                                    (0..n.inputs()).find(|&k| self.g.edge_into(n.id, k as u8).is_none()).map(|k| (n.id, k as u8))
-                                } else {
-                                    None
-                                }
-                            })
-                        });
-                        match target {
-                            Some((to, port)) => {
-                                if let Err(m) = self.g.connect_from(from, fport, to, port) {
-                                    self.note = m.into();
-                                }
-                                changed_graph = true;
-                            }
-                            None if canvas.contains(p) => {
-                                self.search = Some(Search { at: mp(p), text: String::new(), sel: 0, link: Link::FromOut(from, fport), focused: false });
-                            }
-                            None => {}
-                        }
-                        }
-                    }
-                    WireDrag::FromIn(to, port) => {
-                        let cands: Vec<(NodeId, u8, Pos2)> = self.g.nodes.iter().flat_map(|n| (0..n.outputs()).map(move |k| (n.id, k as u8, sp(out_pos(n, k))))).collect();
-                        let src = pick_port(&cands, p, radius);
-                        match src {
-                            Some((from, fport)) => {
-                                if let Err(m) = self.g.connect_from(from, fport, to, port) {
-                                    self.note = m.into();
-                                }
-                                changed_graph = true;
-                            }
-                            None if canvas.contains(p) => {
-                                self.search = Some(Search { at: mp(p) - vec2(260.0, 0.0), text: String::new(), sel: 0, link: Link::ToIn(to, port), focused: false });
-                            }
-                            None => {}
-                        }
-                    }
-                }
-            }
-        } else if self.wire.is_some() && ui.input(|i| i.pointer.any_released()) {
-            self.wire = None;
-        }
-
-        // keyboard: Space = search, Delete = remove, F = fit
-        let typing = ui.ctx().egui_wants_keyboard_input();
-        if self.search.is_none() && !typing && ui.rect_contains_pointer(canvas) {
-            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Space)) {
-                let at = pointer.map(mp).unwrap_or(pos2(100.0, 100.0));
-                self.search = Some(Search { at, text: String::new(), sel: 0, link: Link::None, focused: false });
-            }
-            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace)) {
-                if let Some((to, port)) = self.sel_wire.take() {
-                    self.g.disconnect(to, port);
-                    changed_graph = true;
-                }
-                let gone: Vec<NodeId> = self.sel.drain().collect();
-                for id in gone {
-                    self.g.remove_bridged(id);
-                    changed_graph = true;
-                }
-            }
-            if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y)) {
-                self.redo_graph();
-            } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
-                self.undo_graph();
-            }
-            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F)) {
-                self.fit_next = true;
-            }
-            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::P)) {
-                self.probe_on = !self.probe_on;
-            }
-        }
-        // where the probe listens: a ring around the dot, or an outline around the node
-        if let Some(pr) = self.probe_hover.filter(|_| self.probe_on) {
-            if let Some(n) = self.g.node(pr.node) {
-                let col = Color32::from_rgb(120, 220, 230);
-                if self.probe_body {
-                    let (w, h) = self.sizes.get(&n.id).copied().unwrap_or((node_w(n.kind), 150.0));
-                    painter.rect_stroke(Rect::from_min_size(sp(pos2(n.x, n.y)), vec2(w * z, h * z)).expand(2.0), 6.0, Stroke::new(2.0, col), egui::StrokeKind::Outside);
-                } else {
-                    let c = sp(if pr.input { in_pos(n, pr.port as usize) } else { out_pos(n, pr.port as usize) });
-                    painter.circle_stroke(c, 9.0 * z, Stroke::new(2.5, col));
-                }
-            }
-        }
-        self.search_ui(ui, cx, canvas);
-        if self.fit_next && !self.g.nodes.is_empty() {
-            self.fit_next = false;
-            let (mut lo, mut hi) = (pos2(f32::MAX, f32::MAX), pos2(f32::MIN, f32::MIN));
-            for n in &self.g.nodes {
-                lo = pos2(lo.x.min(n.x), lo.y.min(n.y));
-                hi = pos2(hi.x.max(n.x + node_w(n.kind)), hi.y.max(n.y + 120.0));
-            }
-            let centre = (lo.to_vec2() + hi.to_vec2()) * 0.5;
-            // zoom out when everything does not fit, but never in beyond 100 %
-            let size = (hi - lo).max(vec2(1.0, 1.0));
-            if std::env::var_os("VISUSCOPE_ZOOM").is_none() {
-                self.zoom = ((canvas.width() / size.x).min(canvas.height() / (size.y + 40.0)) * 0.92).clamp(0.15, 1.0);
-            }
-            self.pan = canvas.size() * 0.5 - centre * self.zoom;
-        }
-        if changed_graph {
-            self.push();
-        }
-    }
 }
 
 impl Tool for Routing {
@@ -2396,6 +1331,10 @@ impl Tool for Routing {
         if let Some((bands, preamp)) = sent {
             self.take_eq_bands(bands, preamp);
         }
+        let xo = bus().xo_send.lock().take();
+        if let Some(chains) = xo {
+            self.take_crossover(chains);
+        }
         if let Some((id, dlg)) = &self.ir_dlg {
             if let Some(res) = dlg.take() {
                 let id = *id;
@@ -2413,7 +1352,7 @@ impl Tool for Routing {
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         if !cx.graph_on {
-            ui.label("The routing graph is off. Turn it on in Options.");
+            ui.label(crate::lang::tr("The routing graph is off. Turn it on in Options."));
             return;
         }
         for c in std::mem::take(&mut self.cmds) {
@@ -2459,27 +1398,27 @@ impl Tool for Routing {
         self.hist.track(&self.g, settled);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            if crate::mapping::btn(ui, "+ Node").on_hover_text("Search all nodes (Space)").clicked() {
+            if crate::mapping::btn(ui, "+ Node").on_hover_text(crate::lang::tr("Search all nodes (Space)")).clicked() {
                 self.search = Some(Search { at: pos2(100.0, 100.0) - self.pan.to_pos2().to_vec2(), text: String::new(), sel: 0, link: Link::None, focused: false });
             }
-            if crate::mapping::btn(ui, "Fit").on_hover_text("Show all nodes (F)").clicked() {
+            if crate::mapping::btn(ui, "Fit").on_hover_text(crate::lang::tr("Show all nodes (F)")).clicked() {
                 self.fit_next = true;
             }
-            if crate::mapping::btn(ui, "Tidy").on_hover_text("Move nodes apart that overlap").clicked() {
+            if crate::mapping::btn(ui, "Tidy").on_hover_text(crate::lang::tr("Move nodes apart that overlap")).clicked() {
                 self.tidy_pending = true;
             }
             self.presets_menu(ui, cx);
             self.routings_menu(ui, cx);
-            if ui.add_enabled(!self.hist.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last change of the patch (Ctrl+Z)").clicked() {
+            if ui.add_enabled(!self.hist.undo.is_empty(), egui::Button::new(crate::lang::tr("Undo")).small()).on_hover_text(crate::lang::tr("Undo the last change of the patch (Ctrl+Z)")).clicked() {
                 self.undo_graph();
             }
-            if ui.add_enabled(!self.hist.redo.is_empty(), egui::Button::new("Redo").small()).on_hover_text("Redo (Ctrl+Y or Ctrl+Shift+Z)").clicked() {
+            if ui.add_enabled(!self.hist.redo.is_empty(), egui::Button::new(crate::lang::tr("Redo")).small()).on_hover_text(crate::lang::tr("Redo (Ctrl+Y or Ctrl+Shift+Z)")).clicked() {
                 self.redo_graph();
             }
             self.ab_buttons(ui);
-            ui.toggle_value(&mut self.probe_on, "Probe").on_hover_text("Listening probe (P): hover over a node, or over one of its input or output dots, to hear the signal there");
+            ui.toggle_value(&mut self.probe_on, crate::lang::tr("Probe")).on_hover_text(crate::lang::tr("Listening probe (P): hover over a node, or over one of its input or output dots, to hear the signal there"));
             if self.probe_on {
-                ui.add(egui::DragValue::new(&mut self.probe_db).range(-48.0..=6.0).speed(0.2).suffix(" dB")).on_hover_text("Volume of the probe");
+                ui.add(egui::DragValue::new(&mut self.probe_db).range(-48.0..=6.0).speed(0.2).suffix(crate::lang::tr(" dB"))).on_hover_text(crate::lang::tr("Volume of the probe"));
                 // where the probe plays
                 let devs: Vec<(String, String)> = cx.out_devs.iter().filter(|d| !d.id.is_empty()).map(|d| (d.id.clone(), short_label(&d.label))).collect();
                 let cur = match self.probe_dev.as_str() {
@@ -2488,20 +1427,20 @@ impl Tool for Routing {
                     d => devs.iter().find(|x| x.0 == d).map(|x| x.1.clone()).unwrap_or_else(|| "device missing".into()),
                 };
                 egui::ComboBox::from_id_salt("probe_dev").width(130.0).truncate().selected_text(cur).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.probe_dev, String::new(), "Same as the first output node");
-                    ui.selectable_value(&mut self.probe_dev, super::engine::PROBE_DEFAULT.to_string(), "Default output");
+                    ui.selectable_value(&mut self.probe_dev, String::new(), crate::lang::tr("Same as the first output node"));
+                    ui.selectable_value(&mut self.probe_dev, super::engine::PROBE_DEFAULT.to_string(), crate::lang::tr("Default output"));
                     for (id, label) in &devs {
                         ui.selectable_value(&mut self.probe_dev, id.clone(), label);
                     }
-                }).response.on_hover_text("Where the probe plays");
-                ui.checkbox(&mut self.probe_solo, "mute same device").on_hover_text("An output node that plays to the same device as the probe is silent while the probe listens (the other outputs go on)");
+                }).response.on_hover_text(crate::lang::tr("Where the probe plays"));
+                ui.checkbox(&mut self.probe_solo, crate::lang::tr("mute same device")).on_hover_text(crate::lang::tr("An output node that plays to the same device as the probe is silent while the probe listens (the other outputs go on)"));
                 let name = self.probe_hover.and_then(|p| self.g.node(p.node).map(|n| format!("{} {}", n.kind.name(), if p.input { format!("in {}", p.port + 1) } else { format!("out {}", p.port + 1) })));
                 ui.label(RichText::new(name.map(|n| format!("listening: {n}")).unwrap_or_else(|| "hover a node or a dot".into())).small().color(Color32::from_rgb(120, 220, 230)));
             }
-            if crate::mapping::small_btn(ui, format!("{:.0} %", self.zoom * 100.0)).on_hover_text("Zoom of the node window: mouse wheel, or pinch on a touchpad (click: back to 100 %)").clicked() {
+            if crate::mapping::small_btn(ui, format!("{:.0} %", self.zoom * 100.0)).on_hover_text(crate::lang::tr("Zoom of the node window: mouse wheel, or pinch on a touchpad (click: back to 100 %)")).clicked() {
                 self.zoom = 1.0;
             }
-            ui.label(RichText::new("Rate").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Rate")).small().weak());
             let cur = if self.rate_pref == 0 { "auto".to_string() } else { format!("{} Hz", self.rate_pref) };
             egui::ComboBox::from_id_salt("graph_rate").width(80.0).selected_text(cur).show_ui(ui, |ui| {
                 for r in [0u32, 44100, 48000, 88200, 96000, 176400, 192000] {
@@ -2553,238 +1492,4 @@ fn _unused(_: f32) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn entry(kind: Kind) -> Entry {
-        Entry { label: kind.name().into(), group: kind.info().group, keywords: String::new(), kind, s: String::new(), p0: None }
-    }
-
-    #[test]
-    fn new_nodes_link_up_and_split_wires() {
-        let mut r = Routing::new();
-        r.g = Graph::starter("dev", None);
-        let (inp, ana) = (1, 2);
-        // insert a node into the wire input -> analyzer
-        r.add_entry(&entry(Kind::Eq), pos2(100.0, 0.0), Link::Insert(ana, 0));
-        let eq = r.g.nodes.iter().find(|n| n.kind == Kind::Eq).unwrap().id;
-        assert_eq!(r.g.edge_into(eq, 0).unwrap().from, inp);
-        assert_eq!(r.g.edge_into(ana, 0).unwrap().from, eq);
-        // dropping a wire from the input on empty canvas and picking a mixer connects it
-        r.add_entry(&entry(Kind::Mixer), pos2(0.0, 100.0), Link::FromOut(inp, 0));
-        let mx = r.g.nodes.iter().find(|n| n.kind == Kind::Mixer).unwrap().id;
-        assert_eq!(r.g.edge_into(mx, 0).unwrap().from, inp);
-        // the input now feeds two nodes: a split
-        assert_eq!(r.g.edges.iter().filter(|e| e.from == inp).count(), 2);
-        // a sink picked from a wire that starts at an input port ends up connected to its source
-        r.add_entry(&entry(Kind::Generator), pos2(0.0, 200.0), Link::ToIn(mx, 1));
-        let gen_id = r.g.nodes.iter().find(|n| n.kind == Kind::Generator).unwrap().id;
-        assert_eq!(r.g.edge_into(mx, 1).unwrap().from, gen_id);
-        // a node without an input cannot be inserted into a wire
-        let before = r.g.edges.len();
-        r.add_entry(&entry(Kind::Generator), pos2(0.0, 300.0), Link::Insert(ana, 0));
-        assert_eq!(r.g.edges.len(), before);
-    }
-
-    #[test]
-    fn routings_can_be_saved_listed_loaded_and_names_are_cleaned() {
-        let dir = std::env::temp_dir().join(format!("visuscope_routings_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // SAFETY of the test: nothing else reads this variable
-        unsafe { std::env::set_var("VISUSCOPE_ROUTINGS_DIR", &dir) };
-        assert!(list_routings().is_empty());
-        assert_eq!(clean_name("  ../evil/na:me*? "), "evilname");
-        // device names, trailing dots and spaces, and very long names
-        assert_eq!(clean_name("con"), "con_");
-        assert_eq!(clean_name("NUL.txt"), "NUL.txt_");
-        assert_eq!(clean_name("Lpt1"), "Lpt1_");
-        assert_eq!(clean_name("COM10"), "COM10");
-        assert_eq!(clean_name("name. . "), "name");
-        assert_eq!(clean_name(&"x".repeat(300)).len(), 80);
-        let mut g = Graph::starter("dev", None);
-        let eq = g.add(Kind::Eq, 5.0, 6.0);
-        g.node_mut(eq).unwrap().p[2] = 3.0;
-        save_routing("Studio A", &g).unwrap();
-        save_routing("alpha", &Graph::default()).unwrap();
-        assert!(save_routing("///", &g).is_err());
-        assert_eq!(list_routings(), vec!["alpha".to_string(), "Studio A".to_string()]);
-        let back = load_routing("Studio A").unwrap();
-        assert_eq!(back.nodes.len(), g.nodes.len());
-        assert_eq!(back.node(eq).unwrap().p[2], 3.0);
-        assert!(load_routing("missing").is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn nodes_do_not_land_on_each_other_and_overlaps_are_tidied() {
-        let mut r = Routing::new();
-        let a = r.g.add(Kind::Eq, 100.0, 100.0);
-        let b = r.g.add(Kind::Comp, 120.0, 130.0);
-        let c = r.g.add(Kind::Gain, 100.0, 100.0);
-        for id in [a, b, c] {
-            let n = r.g.node(id).unwrap().clone();
-            r.sizes.insert(id, (node_w(n.kind), 180.0));
-        }
-        r.tidy();
-        let rects: Vec<Rect> = [a, b, c].iter().map(|id| r.node_rect(r.g.node(*id).unwrap())).collect();
-        for i in 0..3 {
-            for j in i + 1..3 {
-                assert!(!rects[i].intersects(rects[j]), "{:?} overlaps {:?}", rects[i], rects[j]);
-            }
-        }
-        // a node added where something already is goes to a free place
-        r.add_entry(&entry(Kind::Delay), rects[0].center(), Link::None);
-        let d = r.g.nodes.last().unwrap().clone();
-        let rd = Rect::from_min_size(pos2(d.x, d.y), vec2(node_w(Kind::Delay), 170.0));
-        assert!(rects.iter().all(|x| !x.intersects(rd)), "the new node sits on another one");
-    }
-
-    #[test]
-    fn a_wire_dropped_between_two_close_dots_goes_to_the_nearer_one() {
-        // the rows of a mixer at a small zoom: 14 pixels apart, the old radius of 15 reached both and took the first
-        let c = [(1, 0u8, pos2(100.0, 100.0)), (1, 1, pos2(100.0, 114.0)), (1, 2, pos2(100.0, 128.0))];
-        assert_eq!(pick_port(&c, pos2(103.0, 113.0), 7.0), Some((1, 1)));
-        assert_eq!(pick_port(&c, pos2(103.0, 127.0), 7.0), Some((1, 2)));
-        assert_eq!(pick_port(&c, pos2(103.0, 101.0), 7.0), Some((1, 0)));
-        assert_eq!(pick_port(&c, pos2(140.0, 113.0), 7.0), None);
-        assert_eq!(pick_port(&[], pos2(0.0, 0.0), 7.0), None);
-    }
-
-    #[test]
-    fn a_long_wire_can_be_hit_anywhere_along_its_length() {
-        // 2500 pixels long: the old 21 sample points were 120 pixels apart
-        let pts = wire_pts(pos2(0.0, 0.0), pos2(2500.0, 400.0));
-        for k in 0..=200 {
-            let on = bezier_at(&pts, k as f32 / 200.0);
-            assert!(wire_distance(&pts, on + vec2(0.0, 3.0)) < 4.0, "point {k}");
-        }
-        assert!(wire_distance(&pts, pos2(1250.0, 200.0 + 80.0)) > 20.0, "a point far from the line is not on it");
-        // a degenerate wire does not divide by zero
-        let flat = wire_pts(pos2(5.0, 5.0), pos2(5.0, 5.0));
-        assert!(wire_distance(&flat, pos2(5.0, 5.0)).is_finite());
-    }
-
-    #[test]
-    fn every_settled_change_is_one_undo_step_and_a_drag_is_only_one() {
-        let mut g = Graph::default();
-        let a = g.add(Kind::Generator, 0.0, 0.0);
-        let mut h = History::default();
-        h.track(&g, true);
-        assert!(h.undo.is_empty());
-        // a drag: many changes while the button is down, then released
-        let f = g.add(Kind::Gain, 10.0, 10.0);
-        g.connect(a, f, 0).unwrap();
-        h.track(&g, true);
-        assert_eq!(h.undo.len(), 1);
-        for k in 0..50 {
-            g.node_mut(f).unwrap().x = k as f32;
-            h.track(&g, false);
-        }
-        assert_eq!(h.undo.len(), 1, "nothing is recorded while the button is down");
-        h.track(&g, true);
-        assert_eq!(h.undo.len(), 2);
-        // delete the gain node (joined back up or not), undo brings it and its line back, redo removes it again
-        let before = g.clone();
-        g.remove_bridged(f);
-        h.track(&g, true);
-        assert!(g.node(f).is_none());
-        let back = h.back(&g).unwrap();
-        assert!(back.node(f).is_some() && back.edges.len() == before.edges.len());
-        assert_eq!(back.node(f).unwrap().x, 49.0);
-        let again = h.forward(&back).unwrap();
-        assert!(again.node(f).is_none());
-        // a new change after an undo ends the redo line
-        let back = h.back(&again).unwrap();
-        let mut g2 = back.clone();
-        g2.add(Kind::Eq, 0.0, 0.0);
-        h.track(&g2, true);
-        assert!(h.redo.is_empty());
-        // nothing to undo at the start
-        let mut h2 = History::default();
-        assert!(h2.back(&g).is_none() && h2.forward(&g).is_none());
-        // the number of steps is limited
-        let mut h3 = History::default();
-        let mut gg = Graph::default();
-        h3.track(&gg, true);
-        for _ in 0..History::MAX + 30 {
-            gg.add(Kind::Gain, 0.0, 0.0);
-            h3.track(&gg, true);
-        }
-        assert_eq!(h3.undo.len(), History::MAX);
-    }
-
-    #[test]
-    fn split_and_merge_ports_are_per_channel() {
-        let mut g = Graph::default();
-        let (i, s, m, a) = (g.add(Kind::Input, 0.0, 0.0), g.add(Kind::Split, 0.0, 0.0), g.add(Kind::Merge, 0.0, 0.0), g.add(Kind::Analyzer, 0.0, 0.0));
-        g.connect(i, s, 0).unwrap();
-        g.connect_from(s, 0, m, 0).unwrap();
-        g.connect_from(s, 1, m, 1).unwrap();
-        g.connect(m, a, 0).unwrap();
-        assert!(g.connect_from(s, 2, m, 0).is_err(), "a split node has two outputs");
-        assert!(g.connect_from(i, 1, s, 0).is_err(), "an input device has one");
-        assert_eq!(g.edge_into(m, 1).unwrap().from_port, 1);
-        let h = Graph::decode(&g.encode()).unwrap();
-        assert_eq!(h.edge_into(m, 1).unwrap().from_port, 1);
-        // the two outputs sit one row apart and the rows line up with the merge inputs
-        let (sn, mn) = (g.node(s).unwrap(), g.node(m).unwrap());
-        assert!((out_pos(sn, 1).y - out_pos(sn, 0).y - ROW).abs() < 1e-4);
-        assert!((in_pos(mn, 1).y - in_pos(mn, 0).y - ROW).abs() < 1e-4);
-    }
-
-    #[test]
-    fn the_dats_set_up_adds_nodes_and_mutes_the_old_output() {
-        let mut r = Routing::new();
-        let i0 = r.g.add(Kind::Input, 0.0, 0.0);
-        let a0 = r.g.add(Kind::Analyzer, 0.0, 0.0);
-        let g0 = r.g.add(Kind::Generator, 0.0, 0.0);
-        let o0 = r.g.add(Kind::Output, 0.0, 0.0);
-        r.g.node_mut(o0).unwrap().s = "wasapi:dats".into();
-        r.g.connect(i0, a0, 0).unwrap();
-        r.g.connect(g0, o0, 0).unwrap();
-        // the old output is a plain generator output: it gets muted and the nodes are made
-        r.command("datsnodes	wasapi:datsin	wasapi:dats");
-        r.apply_bound();
-        let n = r.g.nodes.len();
-        assert_eq!(n, 4 + 3, "{}", r.note);
-        assert!(r.g.node(o0).unwrap().p[1] >= 0.5 || r.g.nodes.iter().filter(|x| x.kind == Kind::Output && x.s == "wasapi:dats").count() == 2);
-        let new_out = r.g.nodes.iter().filter(|x| x.kind == Kind::Output && x.s == "wasapi:dats" && x.id != o0).next().unwrap();
-        assert!(new_out.p[1] < 0.5);
-        assert_eq!(r.g.node(g0).map(|x| x.kind), Some(Kind::Generator));
-        assert!(r.g.nodes.iter().any(|x| x.kind == Kind::Input && x.s == "wasapi:datsin"));
-        // the DATS input is wired to the analyzer (the old input node stays)
-        let di = r.g.nodes.iter().find(|x| x.kind == Kind::Input && x.s == "wasapi:datsin").unwrap().id;
-        assert_eq!(r.g.edge_into(a0, 0).unwrap().from, di);
-        assert!(r.g.node(i0).is_some());
-        // pressing it again changes nothing
-        r.command("datsnodes	wasapi:datsin	wasapi:dats");
-        r.apply_bound();
-        assert_eq!(r.g.nodes.len(), n, "{}", r.note);
-    }
-
-    #[test]
-    fn a_device_request_sets_the_first_input_and_output_node() {
-        let mut r = Routing::new();
-        let i2 = r.g.add(Kind::Input, 0.0, 0.0);
-        let _o = r.g.add(Kind::Output, 0.0, 0.0);
-        let i1_before = r.g.nodes.iter().find(|n| n.kind == Kind::Input).unwrap().id;
-        r.command("setdev	in	asio:DATS");
-        r.command("setdev	out	wasapi:out1");
-        r.apply_bound();
-        let first_in = r.g.nodes.iter().filter(|n| n.kind == Kind::Input).map(|n| n.id).min().unwrap();
-        assert_eq!(r.g.node(first_in).unwrap().s, "asio:DATS");
-        assert_eq!(r.g.nodes.iter().find(|n| n.kind == Kind::Output).unwrap().s, "wasapi:out1");
-        let _ = (i2, i1_before);
-    }
-
-    #[test]
-    fn port_positions_line_up_with_mixer_rows() {
-        let mut g = Graph::default();
-        let m = g.add(Kind::Mixer, 10.0, 20.0);
-        let n = g.node(m).unwrap();
-        // consecutive input dots are one row apart, the output sits in the header
-        assert!((in_pos(n, 1).y - in_pos(n, 0).y - ROW).abs() < 1e-4);
-        assert!(out_pos(n, 0).y < in_pos(n, 0).y);
-        assert!(out_pos(n, 0).x > in_pos(n, 0).x);
-    }
-}
+mod tests;

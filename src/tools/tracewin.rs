@@ -19,10 +19,10 @@ impl TraceWin {
 impl Tool for TraceWin {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.auto, "Auto scale");
+            ui.checkbox(&mut self.auto, crate::lang::tr("Auto scale"));
             ui.add_enabled_ui(!self.auto, |ui| {
-                ui.add(egui::DragValue::new(&mut self.y_lo).range(-300.0..=self.y_hi - 5.0).speed(0.5).prefix("min "));
-                ui.add(egui::DragValue::new(&mut self.y_hi).range(self.y_lo + 5.0..=200.0).speed(0.5).prefix("max "));
+                ui.add(egui::DragValue::new(&mut self.y_lo).range(-300.0..=self.y_hi - 5.0).speed(0.5).prefix(crate::lang::tr("min ")));
+                ui.add(egui::DragValue::new(&mut self.y_hi).range(self.y_lo + 5.0..=200.0).speed(0.5).prefix(crate::lang::tr("max ")));
             });
             if let Some(r) = cx.lib.rel {
                 let name = cx.lib.items.get(r).map(|m| m.name.clone()).unwrap_or_default();
@@ -93,5 +93,15 @@ or load a file with Load...", FontId::proportional(12.0), crate::views::TXT);
         }
         ui.add_space(4.0);
         egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| cx.lib.manage(ui));
+    }
+
+    fn save(&self, o: &mut SettingsOut) {
+        o.put("safe_colours", super::traces::SAFE.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    fn load(&mut self, i: &SettingsIn) {
+        if let Some(v) = i.get::<bool>("safe_colours") {
+            super::traces::SAFE.store(v, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }

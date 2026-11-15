@@ -66,7 +66,7 @@ pub fn bound(ui: &mut Ui, v: &mut f32, lo: f32, hi: f32, log: bool, def: f32, ta
     changed |= field.changed();
     let mut reset = ui.interact(track.rect, track.id.with("rc_track"), Sense::click()).secondary_clicked();
     context_menu(&field, |ui| {
-        if ui.button("Reset to the default").clicked() {
+        if ui.button(crate::lang::tr("Reset to the default")).clicked() {
             reset = true;
             ui.close();
         }

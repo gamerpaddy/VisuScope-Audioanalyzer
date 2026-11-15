@@ -44,7 +44,7 @@ impl WavWriter {
 
     fn header(&mut self) -> std::io::Result<()> {
         let bytes = self.fmt.bytes() as u32;
-        let data = (self.frames * self.ch as u64 * bytes as u64).min(u32::MAX as u64 - 64) as u32;
+        let data = (self.frames * self.ch as u64 * bytes as u64).min(u32::MAX as u64 - 36) as u32;
         let f = &mut self.f;
         f.write_all(b"RIFF")?;
         f.write_all(&(36 + data).to_le_bytes())?;
@@ -62,7 +62,12 @@ impl WavWriter {
 
     /// Interleaved frames.
     pub fn write(&mut self, l: &[f32], r: &[f32]) -> std::io::Result<()> {
-        let mut buf = Vec::with_capacity(l.len() * 2 * self.fmt.bytes());
+        let count = l.len().min(r.len());
+        let frames = self.frames.checked_add(count as u64).ok_or_else(|| std::io::Error::other("WAV too large"))?;
+        if frames > (u32::MAX as u64 - 36) / (self.ch as u64 * self.fmt.bytes() as u64) {
+            return Err(std::io::Error::other("WAV exceeds the 4 GiB RIFF limit; export a shorter range"));
+        }
+        let mut buf = Vec::with_capacity(count * 2 * self.fmt.bytes());
         for (&a, &b) in l.iter().zip(r) {
             for v in [a, b].into_iter().take(self.ch as usize) {
                 match self.fmt {
@@ -72,8 +77,9 @@ impl WavWriter {
                 }
             }
         }
-        self.frames += l.len() as u64;
-        self.f.write_all(&buf)
+        self.f.write_all(&buf)?;
+        self.frames = frames;
+        Ok(())
     }
 
     pub fn bytes_written(&self) -> u64 {
@@ -85,7 +91,7 @@ impl WavWriter {
         self.f.flush()?;
         let mut file = self.f.into_inner().map_err(|e| e.into_error())?;
         let bytes = self.fmt.bytes() as u64;
-        let data = (self.frames * self.ch as u64 * bytes).min(u32::MAX as u64 - 64) as u32;
+        let data = (self.frames * self.ch as u64 * bytes).min(u32::MAX as u64 - 36) as u32;
         file.seek(SeekFrom::Start(4))?;
         file.write_all(&(36 + data).to_le_bytes())?;
         file.seek(SeekFrom::Start(40))?;
@@ -291,4 +297,15 @@ mod tests {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+#[cfg(test)] mod review_tests {
+ use super::*;
+ #[test] fn oversized_write_is_rejected_before_writing() {
+ let p = std::env::temp_dir().join(format!("vs-limit-{}.wav", std::process::id()));
+ let mut w = WavWriter::create(&p, Format::Float32, 2, 48000).unwrap();
+ w.frames = (u32::MAX as u64 - 36) / 8;
+ assert!(w.write(&[0.0], &[0.0]).is_err());
+ drop(w); std::fs::remove_file(p).unwrap();
+ }
 }

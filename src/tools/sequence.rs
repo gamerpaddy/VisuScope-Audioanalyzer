@@ -56,6 +56,8 @@ enum Kind {
     Tone(f32, f32),
     Imd(bool, f32),
     Off,
+    /// send this text to the serial port
+    Serial(String),
     Wait(f32),
     Avg(f32),
     Measure(usize, Cond),
@@ -119,6 +121,7 @@ fn parse(text: &str) -> Result<Vec<Step>, String> {
             "tone" if w.len() == 3 => Kind::Tone(num(w[1]).ok_or_else(|| err("bad frequency"))?, num(w[2]).ok_or_else(|| err("bad level"))?),
             "imd" if w.len() == 3 && matches!(w[1], "smpte" | "ccif") => Kind::Imd(w[1] == "smpte", num(w[2]).ok_or_else(|| err("bad level"))?),
             "off" => Kind::Off,
+            "serial" if w.len() >= 2 => Kind::Serial(line[w[0].len()..].trim().to_string()),
             "wait" if w.len() == 2 => Kind::Wait(num(w[1]).ok_or_else(|| err("bad time"))?.clamp(0.0, 600.0)),
             "set" if w.len() == 3 && w[1] == "avg" => Kind::Avg(num(w[2]).ok_or_else(|| err("bad time"))?.clamp(0.2, 60.0)),
             "measure" if w.len() >= 3 => {
@@ -188,6 +191,7 @@ pub struct Sequence {
     headless: bool,
     pending: bool,
     started: Option<Instant>,
+    aborted: bool,
 }
 
 fn script_path() -> std::path::PathBuf {
@@ -218,6 +222,7 @@ impl Sequence {
             headless: false,
             pending: false,
             started: None,
+            aborted: false,
         }
     }
 
@@ -226,6 +231,7 @@ impl Sequence {
     }
 
     fn start(&mut self, cx: &mut Ctx) {
+        self.aborted = false;
         match parse(&self.text) {
             Err(e) => {
                 self.msg = e;
@@ -254,18 +260,21 @@ impl Sequence {
     }
 
     fn finish(&mut self, cx: &mut Ctx, aborted: bool) {
+        self.aborted = aborted;
         if let Some(s) = self.saved.take() {
-            cx.req.gen_cmd = Some(GenCmd { wave: Some(s.wave), freq: Some(s.freq), level_db: Some(s.level), on: Some(s.on) });
+            cx.req.gen_cmd = Some(GenCmd { wave: Some(s.wave), freq: Some(s.freq), level_db: Some(s.level), on: Some(s.on), mute: None });
         }
         if aborted {
             cx.sweep.cancel();
         }
         self.run = Run::Idle;
+        if let Some(rep) = self.report.take() {
+            if let Err(e) = std::fs::write(&rep, self.report_text(cx)) {
+                self.results.push(Outcome { line: 0, text: "report".into(), value: format!("{rep}: {e}"), status: Status::Error });
+            }
+        }
         let verdict = self.verdict();
         self.msg = if aborted { "stopped".into() } else { verdict.to_string() };
-        if let Some(rep) = self.report.take() {
-            let _ = std::fs::write(&rep, self.report_text(cx));
-        }
         if self.headless {
             cx.req.exit = Some(match verdict {
                 "PASS" => 0,
@@ -276,6 +285,7 @@ impl Sequence {
     }
 
     fn verdict(&self) -> &'static str {
+        if self.aborted { return "STOPPED / INCOMPLETE"; }
         if self.results.iter().any(|r| r.status == Status::Error) {
             "ERROR"
         } else if self.results.iter().any(|r| r.status == Status::Fail) {
@@ -336,7 +346,7 @@ impl Sequence {
                 crate::log::log(&format!("sequence: step {} '{}'", self.idx + 1, st.text));
                 match st.kind.clone() {
                     Kind::Tone(f, l) => {
-                        cx.req.gen_cmd = Some(GenCmd { wave: Some(Wave::Sine), freq: Some(f), level_db: Some(l), on: Some(true) });
+                        cx.req.gen_cmd = Some(GenCmd { wave: Some(Wave::Sine), freq: Some(f), level_db: Some(l), on: Some(true), mute: None });
                         self.cur_freq = Some(f);
                         self.cur_smpte = None;
                         self.t_change = Instant::now();
@@ -345,11 +355,17 @@ impl Sequence {
                         self.run = Run::Next;
                     }
                     Kind::Imd(smpte, l) => {
-                        cx.req.gen_cmd = Some(GenCmd { wave: Some(if smpte { Wave::Smpte } else { Wave::Ccif }), freq: None, level_db: Some(l), on: Some(true) });
+                        cx.req.gen_cmd = Some(GenCmd { wave: Some(if smpte { Wave::Smpte } else { Wave::Ccif }), freq: None, level_db: Some(l), on: Some(true), mute: None });
                         self.cur_freq = None;
                         self.cur_smpte = Some(smpte);
                         self.t_change = Instant::now();
                         self.push(&st, "generator set".into(), Status::Info);
+                        self.idx += 1;
+                        self.run = Run::Next;
+                    }
+                    Kind::Serial(t) => {
+                        crate::serial::send(&t, &[]);
+                        self.push(&st, format!("serial: {t}"), Status::Info);
                         self.idx += 1;
                         self.run = Run::Next;
                     }
@@ -568,9 +584,7 @@ impl Tool for Sequence {
                 self.finish(cx, false);
             }
         }
-        if !visible && self.running() && !self.headless {
-            self.finish(cx, true);
-        }
+        let _ = visible; // Closing the window does not stop a test.
         if self.running() {
             self.step(cx);
             // a headless run must never hang
@@ -599,10 +613,10 @@ impl Tool for Sequence {
                 ui.label(RichText::new(v).strong().size(16.0).color(col));
             }
             ui.add_enabled_ui(!busy, |ui| {
-                if ui.add_enabled(self.load.is_none(), egui::Button::new("Load...")).clicked() {
+                if ui.add_enabled(self.load.is_none(), egui::Button::new(crate::lang::tr("Load..."))).clicked() {
                     self.load = Some(dialogs::open("Load test sequence", "Sequence", &["vss", "txt"]));
                 }
-                if ui.add_enabled(self.save.is_none(), egui::Button::new("Save...")).on_hover_text("Save as .vss to keep the script; as .txt to save the result report").clicked() {
+                if ui.add_enabled(self.save.is_none(), egui::Button::new(crate::lang::tr("Save..."))).on_hover_text(crate::lang::tr("Save as .vss to keep the script; as .txt to save the result report")).clicked() {
                     self.save = Some(dialogs::save("Save sequence or report", "Sequence / report", &["vss", "txt"], "sequence.vss".into()));
                 }
                 if crate::mapping::btn(ui, "Example").clicked() {
@@ -615,10 +629,10 @@ impl Tool for Sequence {
         });
         let h = (ui.available_height() * 0.5).clamp(90.0, 400.0);
         egui::ScrollArea::vertical().id_salt("seq_script").max_height(h).show(ui, |ui| {
-            ui.add_enabled(!busy, egui::TextEdit::multiline(&mut self.text).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(8).hint_text("tone 1000 -20\nmeasure thdn < -80"));
+            ui.add_enabled(!busy, egui::TextEdit::multiline(&mut self.text).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).desired_rows(8).hint_text(crate::lang::tr("tone 1000 -20\nmeasure thdn < -80")));
         });
-        egui::CollapsingHeader::new("Commands").default_open(false).show(ui, |ui| {
-            ui.label(RichText::new("tone <Hz> <dBFS>   imd smpte|ccif <dBFS>   off   wait <s>   set avg <s>\nmeasure <metric> < v | > v | in a..b     metrics: level freq thd thdn snr sinad sfdr enob noise rms peak imd\nsweep    response <Hz a..b> <dB a..b> [abs | norm <Hz>]    rt60 < v    report <file.html>\nLines starting with # are comments. Command line: visuscope --run file.vss --report result.txt").small().monospace());
+        egui::CollapsingHeader::new(crate::lang::tr("Commands")).default_open(false).show(ui, |ui| {
+            ui.label(RichText::new(crate::lang::tr("tone <Hz> <dBFS>   imd smpte|ccif <dBFS>   off   wait <s>   set avg <s>\nmeasure <metric> < v | > v | in a..b     metrics: level freq thd thdn snr sinad sfdr enob noise rms peak imd\nsweep    response <Hz a..b> <dB a..b> [abs | norm <Hz>]    rt60 < v    report <file.html>\nLines starting with # are comments. Command line: visuscope --run file.vss --report result.txt")).small().monospace());
         });
         ui.separator();
         egui::ScrollArea::vertical().id_salt("seq_results").auto_shrink([false, false]).show(ui, |ui| {
@@ -667,7 +681,7 @@ impl Tool for Sequence {
     }
 
     fn status(&self) -> Option<(String, Color32)> {
-        self.running().then(|| (format!("sequence step {}/{}", (self.idx + 1).min(self.steps.len()), self.steps.len()), Color32::from_rgb(255, 190, 80)))
+        self.running().then(|| (format!("Test running: step {}/{} (open Sequence to stop)", (self.idx + 1).min(self.steps.len()), self.steps.len()), Color32::from_rgb(255, 190, 80)))
     }
 
     /// `run\t<script>\t<report>` from the command line.
@@ -715,4 +729,16 @@ mod tests {
         assert!(parse("# nothing").is_err());
         assert!(Cond::In(-1.0, 1.0).ok(0.5) && !Cond::Lt(-80.0).ok(-70.0) && !Cond::Gt(0.0).ok(f32::NAN));
     }
+}
+
+#[cfg(test)] mod ux_tests {
+ use super::*;
+ #[test] fn stopped_successful_steps_do_not_mean_pass() {
+ let mut s = Sequence::new();
+ s.results.push(Outcome { line: 1, text: "check".into(), value: "ok".into(), status: Status::Pass });
+ s.aborted = true;
+ assert_eq!(s.verdict(), "STOPPED / INCOMPLETE");
+ s.aborted = false;
+ assert_eq!(s.verdict(), "PASS");
+ }
 }

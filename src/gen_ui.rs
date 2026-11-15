@@ -32,15 +32,15 @@ impl App {
             for k in 0..n {
                 let p = if k == 0 { &self.tg } else { &self.gen_extra[k - 1] };
                 let label = format!("{} {}{}", k + 1, p.wave.name(), if p.on { "  \u{25CF}" } else { "" });
-                if ui.selectable_label(self.gen_tab == k, label).on_hover_text("Each generator is a node in the Routing window").clicked() {
+                if ui.selectable_label(self.gen_tab == k, label).on_hover_text(crate::lang::tr("Each generator is a node in the Routing window")).clicked() {
                     self.gen_tab = k;
                 }
             }
-            if n < 8 && crate::mapping::small_btn(ui, "+").on_hover_text("Add another generator").clicked() {
+            if n < 8 && crate::mapping::small_btn(ui, "+").on_hover_text(crate::lang::tr("Add another generator")).clicked() {
                 self.gen_extra.push(tonegen::GenParams { wave: Wave::Square, freq: 440.0, level_db: [-20.0, -20.0], ..tonegen::GenParams::default() });
                 self.gen_tab = self.gen_extra.len();
             }
-            if self.gen_tab > 0 && crate::mapping::small_btn(ui, "x").on_hover_text("Remove this generator").clicked() {
+            if self.gen_tab > 0 && crate::mapping::small_btn(ui, "x").on_hover_text(crate::lang::tr("Remove this generator")).clicked() {
                 self.gen_extra.remove(self.gen_tab - 1);
                 self.gen_tab -= 1;
             }
@@ -84,13 +84,13 @@ impl App {
                 }
             });
             if self.graph_on {
-                ui.label(RichText::new("Where this generator goes is set in the Routing window (connect its node to an output or an analyser).").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Where this generator goes is set in the Routing window (connect its node to an output or an analyser).")).small().weak());
             }
             let cur = self.gen_devs.get(self.gen_sel).map(|d| d.label.clone()).unwrap_or_else(|| "-".into());
             let mut restart = false;
             if !self.graph_on {
             ui.horizontal(|ui| {
-                ui.label("Output");
+                ui.label(crate::lang::tr("Output"));
                 egui::ComboBox::from_id_salt("gendev").width(ui.available_width() - 70.0).selected_text(cur).show_ui(ui, |ui| {
                     for (i, d) in self.gen_devs.iter().enumerate() {
                         if ui.selectable_value(&mut self.gen_sel, i, &d.label).clicked() {
@@ -105,21 +105,21 @@ impl App {
             if restart && (self.tg.on || self.gen_handle.is_some()) {
                 self.start_gen();
             }
-            ui.label(RichText::new("Plays to the chosen device. To measure it, pick its [Loopback] entry as the input. Keep levels low near speakers or a live mic.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Plays to the chosen device. To measure it, pick its [Loopback] entry as the input. Keep levels low near speakers or a live mic.")).small().weak());
             }
 
             // levels
             sub(ui, "Level", true, |ui| {
                 let g = &mut self.tg;
                 egui::Grid::new("gen_lvl").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
-                    ui.label("Left");
+                    ui.label(crate::lang::tr("Left"));
                     let l = crate::slider::bound(ui, &mut g.level_db[0], -120.0, 0.0, false, -20.0, &crate::mapping::Target::slider("gen_level", "Generator level", -90.0, 0.0, false, " dB"), crate::slider::Fmt::new(" dBFS", 1), |_| {});
-                    ui.checkbox(&mut g.mute[0], "mute");
+                    ui.checkbox(&mut g.mute[0], crate::lang::tr("mute"));
                     ui.end_row();
-                    ui.label("Right");
-                    let rr = ui.add_enabled(!self.gen_link, egui::Slider::new(&mut g.level_db[1], -120.0..=0.0).suffix(" dBFS"));
+                    ui.label(crate::lang::tr("Right"));
+                    let rr = ui.add_enabled(!self.gen_link, egui::Slider::new(&mut g.level_db[1], -120.0..=0.0).suffix(crate::lang::tr(" dBFS")));
                     let r = rr.changed() | (!self.gen_link && crate::slider::reset(ui, &rr, &mut g.level_db[1], -20.0));
-                    ui.checkbox(&mut g.mute[1], "mute");
+                    ui.checkbox(&mut g.mute[1], crate::lang::tr("mute"));
                     ui.end_row();
                     let _ = r;
                     if l && self.gen_link {
@@ -127,8 +127,8 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.gen_link, "Link L/R");
-                    ui.label(RichText::new("peak for tones, RMS for noise / multitone").small().weak());
+                    ui.checkbox(&mut self.gen_link, crate::lang::tr("Link L/R"));
+                    ui.label(RichText::new(crate::lang::tr("peak for tones, RMS for noise / multitone")).small().weak());
                 });
                 if self.gen_link {
                     self.tg.level_db[1] = self.tg.level_db[0];
@@ -145,7 +145,7 @@ impl App {
                 });
                 match g.wave {
                     Wave::Sine | Wave::Square | Wave::Triangle | Wave::Saw | Wave::Pulse | Wave::Impulse => {
-                        { crate::slider::bound(ui, &mut g.freq, 1.0, 96000.0, true, 1000.0, &crate::mapping::Target::slider("gen_freq", "Generator frequency", 20.0, 20000.0, true, " Hz"), crate::slider::Fmt::new(" Hz", 0), |_| {}); ui.label("Frequency"); }
+                        { crate::slider::bound(ui, &mut g.freq, 1.0, 96000.0, true, 1000.0, &crate::mapping::Target::slider("gen_freq", "Generator frequency", 20.0, 20000.0, true, " Hz"), crate::slider::Fmt::new(" Hz", 0), |_| {}); ui.label(crate::lang::tr("Frequency")); }
                         ui.horizontal(|ui| {
                             for f in [50.0, 100.0, 440.0, 1000.0, 5000.0, 10000.0, 19000.0] {
                                 if crate::mapping::small_btn(ui, fmt_hz_short(f)).clicked() {
@@ -154,31 +154,31 @@ impl App {
                             }
                         });
                         if g.wave == Wave::Pulse {
-                            { let r = ui.add(egui::Slider::new(&mut g.duty, 0.01..=0.99).text("Duty")); crate::slider::reset(ui, &r, &mut g.duty, 0.25); }
+                            { let r = ui.add(egui::Slider::new(&mut g.duty, 0.01..=0.99).text(crate::lang::tr("Duty"))); crate::slider::reset(ui, &r, &mut g.duty, 0.25); }
                         }
                     }
                     Wave::SweepLog | Wave::SweepLin => {
                         ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut g.sweep_f0).range(1.0..=96000.0).suffix(" Hz"));
-                            ui.label("to");
-                            ui.add(egui::DragValue::new(&mut g.sweep_f1).range(2.0..=96000.0).suffix(" Hz"));
+                            ui.add(egui::DragValue::new(&mut g.sweep_f0).range(1.0..=96000.0).suffix(crate::lang::tr(" Hz")));
+                            ui.label(crate::lang::tr("to"));
+                            ui.add(egui::DragValue::new(&mut g.sweep_f1).range(2.0..=96000.0).suffix(crate::lang::tr(" Hz")));
                         });
-                        ui.add(egui::Slider::new(&mut g.sweep_time, 0.2..=60.0).logarithmic(true).suffix(" s").text("Sweep time"));
+                        ui.add(egui::Slider::new(&mut g.sweep_time, 0.2..=60.0).logarithmic(true).suffix(" s").text(crate::lang::tr("Sweep time")));
                     }
                     Wave::Multitone => {
-                        ui.add(egui::Slider::new(&mut g.mt_count, 2..=32).text("Tones"));
+                        ui.add(egui::Slider::new(&mut g.mt_count, 2..=32).text(crate::lang::tr("Tones")));
                         ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut g.mt_f0).range(1.0..=96000.0).suffix(" Hz"));
-                            ui.label("to");
-                            ui.add(egui::DragValue::new(&mut g.mt_f1).range(2.0..=96000.0).suffix(" Hz"));
+                            ui.add(egui::DragValue::new(&mut g.mt_f0).range(1.0..=96000.0).suffix(crate::lang::tr(" Hz")));
+                            ui.label(crate::lang::tr("to"));
+                            ui.add(egui::DragValue::new(&mut g.mt_f1).range(2.0..=96000.0).suffix(crate::lang::tr(" Hz")));
                         });
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut g.mt_log, "Log spacing");
-                            ui.checkbox(&mut g.mt_schroeder, "Schroeder phases (low crest)");
+                            ui.checkbox(&mut g.mt_log, crate::lang::tr("Log spacing"));
+                            ui.checkbox(&mut g.mt_schroeder, crate::lang::tr("Schroeder phases (low crest)"));
                         });
                     }
                     Wave::Smpte | Wave::Ccif => {
-                        ui.label(RichText::new("Fixed twin-tone IMD test signal; level is the peak of the sum.").small().weak());
+                        ui.label(RichText::new(crate::lang::tr("Fixed twin-tone IMD test signal; level is the peak of the sum.")).small().weak());
                     }
                     Wave::Noise => {
                         egui::ComboBox::from_id_salt("gennoise").width(ui.available_width() - 8.0).selected_text(g.noise.name()).show_ui(ui, |ui| {
@@ -186,24 +186,24 @@ impl App {
                                 ui.selectable_value(&mut g.noise, k, k.name());
                             }
                         });
-                        ui.checkbox(&mut g.noise_corr, "Correlated L/R (mono noise)");
+                        ui.checkbox(&mut g.noise_corr, crate::lang::tr("Correlated L/R (mono noise)"));
                     }
                 }
             });
 
             sub(ui, "Harmonic distortion", false, |ui| {
                 let g = &mut self.tg;
-                ui.checkbox(&mut g.harm_on, "Add harmonics (tones / sweeps)");
+                ui.checkbox(&mut g.harm_on, crate::lang::tr("Add harmonics (tones / sweeps)"));
                 ui.add_enabled_ui(g.harm_on, |ui| {
                     for h in 0..5 {
-                        ui.add(egui::Slider::new(&mut g.harm_db[h], -140.0..=-20.0).suffix(" dBc").text(format!("H{}", h + 2)));
+                        ui.add(egui::Slider::new(&mut g.harm_db[h], -140.0..=-20.0).suffix(crate::lang::tr(" dBc")).text(format!("H{}", h + 2)));
                     }
                 });
             });
 
             sub(ui, "Phase / polarity", false, |ui| {
                 let g = &mut self.tg;
-                { let r = ui.add(egui::Slider::new(&mut g.phase_deg, -180.0..=180.0).suffix(" deg").text("R vs L phase")); crate::slider::reset(ui, &r, &mut g.phase_deg, 0.0); }
+                { let r = ui.add(egui::Slider::new(&mut g.phase_deg, -180.0..=180.0).suffix(crate::lang::tr(" deg")).text(crate::lang::tr("R vs L phase"))); crate::slider::reset(ui, &r, &mut g.phase_deg, 0.0); }
                 ui.horizontal(|ui| {
                     if crate::mapping::small_btn(ui, "0").clicked() {
                         g.phase_deg = 0.0;
@@ -214,34 +214,34 @@ impl App {
                     if crate::mapping::small_btn(ui, "180").clicked() {
                         g.phase_deg = 180.0;
                     }
-                    ui.checkbox(&mut g.invert_r, "Invert R");
+                    ui.checkbox(&mut g.invert_r, crate::lang::tr("Invert R"));
                 });
-                ui.label(RichText::new("Shifts the right channel's tone phase (watch the goniometer and correlation).").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Shifts the right channel's tone phase (watch the goniometer and correlation).")).small().weak());
             });
 
             sub(ui, "Jitter", false, |ui| {
                 let g = &mut self.tg;
-                ui.checkbox(&mut g.jitter_on, "Sample-clock jitter (tones, sweeps, multitone)");
+                ui.checkbox(&mut g.jitter_on, crate::lang::tr("Sample-clock jitter (tones, sweeps, multitone)"));
                 ui.add_enabled_ui(g.jitter_on, |ui| {
-                    ui.add(egui::Slider::new(&mut g.jit_rms_ns, 0.0..=1000.0).logarithmic(true).suffix(" ns").text("Random RMS"));
-                    { let r = ui.add(egui::Slider::new(&mut g.jit_sine_ns, 0.0..=1000.0).suffix(" ns").text("Sine amplitude")); crate::slider::reset(ui, &r, &mut g.jit_sine_ns, 0.0); }
-                    ui.add(egui::Slider::new(&mut g.jit_sine_hz, 1.0..=20000.0).logarithmic(true).suffix(" Hz").text("Sine rate"));
+                    ui.add(egui::Slider::new(&mut g.jit_rms_ns, 0.0..=1000.0).logarithmic(true).suffix(crate::lang::tr(" ns")).text(crate::lang::tr("Random RMS")));
+                    { let r = ui.add(egui::Slider::new(&mut g.jit_sine_ns, 0.0..=1000.0).suffix(crate::lang::tr(" ns")).text(crate::lang::tr("Sine amplitude"))); crate::slider::reset(ui, &r, &mut g.jit_sine_ns, 0.0); }
+                    ui.add(egui::Slider::new(&mut g.jit_sine_hz, 1.0..=20000.0).logarithmic(true).suffix(crate::lang::tr(" Hz")).text(crate::lang::tr("Sine rate")));
                 });
             });
 
             sub(ui, "Word length and dither", false, |ui| {
                 let g = &mut self.tg;
-                ui.checkbox(&mut g.quant_on, "Quantise output");
+                ui.checkbox(&mut g.quant_on, crate::lang::tr("Quantise output"));
                 ui.add_enabled_ui(g.quant_on, |ui| {
-                    ui.add(egui::Slider::new(&mut g.bits, 4..=24).suffix(" bit").text("Word length"));
+                    ui.add(egui::Slider::new(&mut g.bits, 4..=24).suffix(crate::lang::tr(" bit")).text(crate::lang::tr("Word length")));
                     egui::ComboBox::from_id_salt("gendither").selected_text(g.dither.name()).show_ui(ui, |ui| {
                         for d in Dither::ALL {
                             ui.selectable_value(&mut g.dither, d, d.name());
                         }
                     });
-                    { let r = ui.add(egui::Slider::new(&mut g.dither_lsb, 0.0..=2.0).suffix(" LSB").text("Dither amount")); crate::slider::reset(ui, &r, &mut g.dither_lsb, 1.0); }
+                    { let r = ui.add(egui::Slider::new(&mut g.dither_lsb, 0.0..=2.0).suffix(crate::lang::tr(" LSB")).text(crate::lang::tr("Dither amount"))); crate::slider::reset(ui, &r, &mut g.dither_lsb, 1.0); }
                 });
-                ui.label(RichText::new("Quantising a low-level tone shows how dither trades distortion for noise on the THD+N / ENOB readout.").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Quantising a low-level tone shows how dither trades distortion for noise on the THD+N / ENOB readout.")).small().weak());
             });
         });
     }

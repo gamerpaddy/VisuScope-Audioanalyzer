@@ -67,42 +67,42 @@ impl Tool for ReportTool {
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
-        ui.label(RichText::new("Report").strong());
-        ui.add(egui::TextEdit::singleline(&mut self.title).desired_width(f32::INFINITY).hint_text("title"));
-        ui.add(egui::TextEdit::multiline(&mut self.notes).desired_width(f32::INFINITY).desired_rows(3).hint_text("notes: device under test, setup, operator ..."));
+        ui.label(RichText::new(crate::lang::tr("Report")).strong());
+        ui.add(egui::TextEdit::singleline(&mut self.title).desired_width(f32::INFINITY).hint_text(crate::lang::tr("title")));
+        ui.add(egui::TextEdit::multiline(&mut self.notes).desired_width(f32::INFINITY).desired_rows(3).hint_text(crate::lang::tr("notes: device under test, setup, operator ...")));
         ui.horizontal_wrapped(|ui| {
             for (i, (_, label)) in SECTIONS.iter().enumerate() {
                 ui.checkbox(&mut self.include[i], *label);
             }
         });
-        ui.label(RichText::new("Sections without data are left out. The report shows the current state of each window.").small().weak());
+        ui.label(RichText::new(crate::lang::tr("Sections without data are left out. The report shows the current state of each window.")).small().weak());
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(RichText::new("Create report").strong()).min_size(egui::vec2(120.0, 26.0))).clicked() {
+            if ui.add(egui::Button::new(RichText::new(crate::lang::tr("Create report")).strong()).min_size(egui::vec2(120.0, 26.0))).clicked() {
                 cx.req.report = Some(ReportReq { title: self.title.clone(), notes: self.notes.clone(), include: SECTIONS.iter().zip(self.include).filter(|(_, on)| *on).map(|(s, _)| s.0.to_string()).collect(), open: self.open_after, path: None });
             }
-            ui.checkbox(&mut self.open_after, "open in browser");
-            if crate::mapping::btn(ui, "Folder").on_hover_text("Reports are saved in Documents\\VisuScope").clicked() {
+            ui.checkbox(&mut self.open_after, crate::lang::tr("open in browser"));
+            if crate::mapping::btn(ui, "Folder").on_hover_text(crate::lang::tr("Reports are saved in Documents\\VisuScope")).clicked() {
                 open_path(&docs_dir());
             }
         });
         ui.separator();
-        ui.label(RichText::new("Export the last sweep").strong());
+        ui.label(RichText::new(crate::lang::tr("Export the last sweep")).strong());
         let has = cx.sweep.result.is_some();
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(has && self.frd.is_none(), egui::Button::new("Response .frd")).on_hover_text("frequency, magnitude dB, phase degrees (space separated)").clicked() {
+            if ui.add_enabled(has && self.frd.is_none(), egui::Button::new(crate::lang::tr("Response .frd"))).on_hover_text(crate::lang::tr("frequency, magnitude dB, phase degrees (space separated)")).clicked() {
                 self.frd = Some(dialogs::save("Export response", "FRD", &["frd"], "response.frd".into()));
             }
-            if ui.add_enabled(has && self.rew.is_none(), egui::Button::new("Response .txt")).on_hover_text("same data as comma separated text with a REW style header").clicked() {
+            if ui.add_enabled(has && self.rew.is_none(), egui::Button::new(crate::lang::tr("Response .txt"))).on_hover_text(crate::lang::tr("same data as comma separated text with a REW style header")).clicked() {
                 self.rew = Some(dialogs::save("Export response", "Text", &["txt"], "response.txt".into()));
             }
-            if ui.add_enabled(has && self.wav.is_none(), egui::Button::new("Impulse .wav")).on_hover_text("impulse response as a 32-bit float mono WAV").clicked() {
+            if ui.add_enabled(has && self.wav.is_none(), egui::Button::new(crate::lang::tr("Impulse .wav"))).on_hover_text(crate::lang::tr("impulse response as a 32-bit float mono WAV")).clicked() {
                 self.wav = Some(dialogs::save("Export impulse response", "WAV", &["wav"], "impulse.wav".into()));
             }
             if !has {
-                ui.label(RichText::new("run a sweep in the Response window first").small().weak());
+                ui.label(RichText::new(crate::lang::tr("run a sweep in the Response window first")).small().weak());
             }
         });
-        ui.label(RichText::new("Spectrum snapshots, traces and Response / Impulse CSV exports are in their own windows.").small().weak());
+        ui.label(RichText::new(crate::lang::tr("Spectrum snapshots, traces and Response / Impulse CSV exports are in their own windows.")).small().weak());
     }
 
     fn save(&self, o: &mut SettingsOut) {

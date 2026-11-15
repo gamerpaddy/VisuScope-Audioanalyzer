@@ -22,6 +22,11 @@ fn prefix(k: usize) -> String {
 }
 
 impl App {
+    pub fn shutdown_tools(&mut self) {
+        let mut req = Requests::default();
+        let mut cx = make_ctx!(self, &mut req);
+        for t in &mut self.tools { t.shutdown(&mut cx); }
+    }
     fn apply_requests(&mut self, req: Requests) {
         if req.start_gen && self.gen_handle.is_none() {
             self.start_gen();
@@ -36,6 +41,7 @@ impl App {
             }
         }
         if let Some(code) = req.exit {
+            self.shutdown_tools();
             self.save_settings(true);
             self.lib.save_auto();
             std::process::exit(code);
@@ -49,6 +55,9 @@ impl App {
             }
             if let Some(l) = c.level_db {
                 self.tg.level_db = [l, l];
+            }
+            if let Some(m) = c.mute {
+                self.tg.mute = m;
             }
             if let Some(on) = c.on {
                 self.tg.on = on;

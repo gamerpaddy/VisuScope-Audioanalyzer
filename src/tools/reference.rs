@@ -255,7 +255,7 @@ impl Tool for Reference {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.ch, 0, RichText::new("L").color(CH_COLORS[0]));
             ui.selectable_value(&mut self.ch, 1, RichText::new("R").color(CH_COLORS[1]));
-            if crate::mapping::btn(ui, "Capture live").on_hover_text("Store the averaged spectrum as a reference curve").clicked() {
+            if crate::mapping::btn(ui, "Capture live").on_hover_text(crate::lang::tr("Store the averaged spectrum as a reference curve")).clicked() {
                 let n = self.refs.len() + 1;
                 let ch = self.ch;
                 self.from_spectrum(format!("capture {n}"), |f| spec_at(cx.an, &cx.an.avg[ch], f));
@@ -277,10 +277,10 @@ impl Tool for Reference {
                     }
                 }
                 if cx.snaps.is_empty() {
-                    ui.label(RichText::new("no snapshots yet").weak());
+                    ui.label(RichText::new(crate::lang::tr("no snapshots yet")).weak());
                 }
             });
-            if ui.add_enabled(self.open.is_none(), egui::Button::new("Import CSV...")).on_hover_text("2 columns: frequency, level (a reference curve)\n3 columns: frequency, lower limit, upper limit (a mask)").clicked() {
+            if ui.add_enabled(self.open.is_none(), egui::Button::new(crate::lang::tr("Import CSV..."))).on_hover_text(crate::lang::tr("2 columns: frequency, level (a reference curve)\n3 columns: frequency, lower limit, upper limit (a mask)")).clicked() {
                 self.open = Some(dialogs::open("Import reference", "CSV / text", &["csv", "txt"]));
             }
         });
@@ -290,18 +290,18 @@ impl Tool for Reference {
         // list
         let mut remove: Option<usize> = None;
         if self.refs.is_empty() {
-            ui.label(RichText::new("No references yet. Capture the live spectrum, take one from a snapshot or import a CSV.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("No references yet. Capture the live spectrum, take one from a snapshot or import a CSV.")).small().weak());
         } else {
             egui::Grid::new("ref_grid").num_columns(7).spacing([8.0, 4.0]).show(ui, |ui| {
                 for (i, r) in self.refs.iter_mut().enumerate() {
                     ui.checkbox(&mut r.show, "");
                     ui.label(RichText::new(&r.name).color(r.color));
                     let is_mask = self.mask == Some(i);
-                    if ui.selectable_label(is_mask, "mask").on_hover_text("Use as pass/fail limit mask").clicked() {
+                    if ui.selectable_label(is_mask, crate::lang::tr("mask")).on_hover_text(crate::lang::tr("Use as pass/fail limit mask")).clicked() {
                         self.mask = if is_mask { None } else { Some(i) };
                     }
-                    ui.add_enabled(r.limits.is_none(), egui::DragValue::new(&mut r.tol).range(0.1..=60.0).speed(0.1).prefix("+/-").suffix(" dB"));
-                    ui.add(egui::DragValue::new(&mut r.offset).range(-200.0..=200.0).speed(0.1).prefix("shift ").suffix(" dB"));
+                    ui.add_enabled(r.limits.is_none(), egui::DragValue::new(&mut r.tol).range(0.1..=60.0).speed(0.1).prefix("+/-").suffix(crate::lang::tr(" dB")));
+                    ui.add(egui::DragValue::new(&mut r.offset).range(-200.0..=200.0).speed(0.1).prefix(crate::lang::tr("shift ")).suffix(crate::lang::tr(" dB")));
                     if crate::mapping::small_btn(ui, "save").clicked() && self.save.is_none() {
                         self.save = Some((dialogs::save("Save reference", "CSV", &["csv"], format!("{}.csv", r.name)), i));
                     }
@@ -334,7 +334,7 @@ impl Tool for Reference {
                 let (txt, col) = if pass { ("PASS".to_string(), Color32::from_rgb(90, 220, 120)) } else { (format!("FAIL   {:.0} % of the band, worst {:+.1} dB at {}", self.fail_pct, self.worst.0, crate::app::fmt_hz(self.worst.1)), Color32::from_rgb(245, 100, 90)) };
                 ui.label(RichText::new(txt).size(18.0).strong().color(col));
             } else {
-                ui.label(RichText::new("waiting for audio...").weak());
+                ui.label(RichText::new(crate::lang::tr("waiting for audio...")).weak());
             }
         }
         ui.separator();
@@ -344,7 +344,7 @@ impl Tool for Reference {
             let mut pick = |ui: &mut Ui, id: &str, which: &mut Src| {
                 let txt = self.src_name(*which, cx);
                 egui::ComboBox::from_id_salt(id).width(120.0).selected_text(txt).show_ui(ui, |ui| {
-                    ui.selectable_value(which, Src::Live, "live (avg)");
+                    ui.selectable_value(which, Src::Live, crate::lang::tr("live (avg)"));
                     for (i, r) in self.refs.iter().enumerate() {
                         ui.selectable_value(which, Src::Ref(i), &r.name);
                     }
@@ -363,7 +363,7 @@ impl Tool for Reference {
             if crate::mapping::btn(ui, "swap").clicked() {
                 std::mem::swap(&mut self.a, &mut self.b);
             }
-            if crate::mapping::btn(ui, "Align live to ref at 1 kHz").on_hover_text("Shift the selected mask / reference so it meets the live level at 1 kHz").clicked() {
+            if crate::mapping::btn(ui, "Align live to ref at 1 kHz").on_hover_text(crate::lang::tr("Shift the selected mask / reference so it meets the live level at 1 kHz")).clicked() {
                 if let (Some(i), Some(live)) = (self.mask.or(match self.b { Src::Ref(k) => Some(k), _ => None }), spec_at(cx.an, &cx.an.avg[self.ch], 1000.0)) {
                     if let Some(r) = self.refs.get_mut(i) {
                         if let Some(v) = interp(&r.pts, 1000.0) {
@@ -372,7 +372,7 @@ impl Tool for Reference {
                     }
                 }
             }
-            ui.add(egui::DragValue::new(&mut self.y_range).range(2.0..=100.0).speed(0.2).prefix("+/-").suffix(" dB"));
+            ui.add(egui::DragValue::new(&mut self.y_range).range(2.0..=100.0).speed(0.2).prefix("+/-").suffix(crate::lang::tr(" dB")));
         });
         let (resp, painter, rect) = canvas(ui, 110.0);
         let pr = inset(rect);

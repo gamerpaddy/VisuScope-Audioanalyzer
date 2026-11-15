@@ -66,7 +66,7 @@ impl Tool for Profiler {
             (st.secs.iter().copied().collect(), st.events.iter().cloned().collect(), st.counters_ok, st.total_hiccups)
         };
         if secs.is_empty() {
-            ui.label("Measuring ...");
+            ui.label(crate::lang::tr("Measuring ..."));
             return;
         }
         let last = *secs.last().unwrap();
@@ -75,7 +75,7 @@ impl Tool for Profiler {
             ui.spacing_mut().item_spacing.y = 5.0;
             ui.horizontal(|ui| {
                 if recent == 0 {
-                    ui.label(RichText::new("No hiccups in the last minute").strong().color(Color32::from_rgb(110, 210, 140)));
+                    ui.label(RichText::new(crate::lang::tr("No hiccups in the last minute")).strong().color(Color32::from_rgb(110, 210, 140)));
                 } else {
                     ui.label(RichText::new(format!("{recent} hiccup(s) in the last minute")).strong().color(Color32::from_rgb(255, 170, 80)));
                 }
@@ -83,7 +83,7 @@ impl Tool for Profiler {
                 if crate::mapping::small_btn(ui, "Clear").clicked() {
                     prof::clear();
                 }
-                if crate::mapping::small_btn(ui, "Copy report").on_hover_text("Copy the numbers and the hiccup list to the clipboard").clicked() {
+                if crate::mapping::small_btn(ui, "Copy report").on_hover_text(crate::lang::tr("Copy the numbers and the hiccup list to the clipboard")).clicked() {
                     let mut s = format!("VisuScope {} profiler report\n", crate::VERSION_FULL);
                     s += &format!("timer latency worst {:.1} ms, input callback gap worst {:.1} ms, DPC {:.1} % (worst core {:.1} %), interrupts {:.1} %, CPU {:.0} %\n", last.wake_max_ms, last.cb_gap_max_ms, last.dpc, last.dpc_worst, last.intr, last.cpu);
                     for e in &events {
@@ -93,7 +93,7 @@ impl Tool for Profiler {
                 }
             });
             if !ok {
-                ui.label(RichText::new("Windows performance counters are not available: only timing measured by the program is shown.").small().color(Color32::from_rgb(255, 190, 90)));
+                ui.label(RichText::new(crate::lang::tr("Windows performance counters are not available: only timing measured by the program is shown.")).small().color(Color32::from_rgb(255, 190, 90)));
             }
             // numbers
             let recent_secs: Vec<&Sec> = secs.iter().rev().take(10).collect();
@@ -139,9 +139,9 @@ impl Tool for Profiler {
                 bars(ui, "Interrupt time", &secs, |s| s.intr, 10.0, Some(5.0), " %");
             }
             ui.separator();
-            ui.label(RichText::new("Hiccups").strong());
+            ui.label(RichText::new(crate::lang::tr("Hiccups")).strong());
             if events.is_empty() {
-                ui.label(RichText::new("Nothing that could be heard so far. When the sound crackles, the cause shows up here.").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Nothing that could be heard so far. When the sound crackles, the cause shows up here.")).small().weak());
             }
             for e in events.iter().take(40) {
                 ui.horizontal_wrapped(|ui| {
@@ -151,7 +151,7 @@ impl Tool for Profiler {
                 ui.label(RichText::new(&e.cause).small().color(if e.severe { Color32::from_rgb(255, 160, 110) } else { Color32::from_gray(165) }));
                 ui.add_space(2.0);
             }
-            egui::CollapsingHeader::new(RichText::new("What helps against crackling").small()).default_open(false).show(ui, |ui| {
+            egui::CollapsingHeader::new(RichText::new(crate::lang::tr("What helps against crackling")).small()).default_open(false).show(ui, |ui| {
                 for t in [
                     "Raise the safety buffer in Options (adds a little delay, hides short stalls of the system), or the audio buffer of the interface (its control panel).",
                     "Windows power plan: High performance; switch off USB selective suspend and core parking.",

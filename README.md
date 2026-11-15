@@ -38,6 +38,9 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Distortion sweeps: THD / THD+N vs frequency and level, IMD (SMPTE, CCIF) vs level, harmonics 2 to 6 from one sweep (Farina)
 - Room acoustics: RT60 / EDT / clarity per octave band, waterfall (CSD), STI and %ALcons, room modes with theoretical axial modes
 - Null test: two signals (input channels or files) are lined up automatically (delay to a fraction of a sample, polarity, level) and subtracted; the residual is shown on a scope and a spectrum next to the originals, the null depth is read out in dB, and A, B or the difference can be played (with a boost for small errors) on the chosen output, or on the first output node while the routing graph is on
+- Frequency response extras: a *Gate* that cuts the measured impulse response afterwards (0.5 ms and up, no new sweep, set by dragging a line on the impulse response; the *Response window* of the sweep settings gates while measuring), minimum phase / excess phase / excess delay under the magnitude, a *History* of the last sweeps, *Check level first* (a half-second sweep before the measurement; it does not start when that clips or comes back too quiet) and a warning when the sweep was close to the noise and a *Spatial average* of several microphone positions (power or vector; *Average* in the Traces window does the same by power for stored traces)
+- **Speaker design** window: box simulation from the Thiele-Small parameters of the Impedance window (sealed / vented: response, -3 dB point, cone excursion against Xmax, impedance in the box, port length and air speed), crossover from stored driver traces (Butterworth / Linkwitz-Riley, gain, delay, polarity, summed response, reverse null, *Send to routing* builds the filters, gains and delays as rows of nodes), near-field / far-field merge with baffle step, polar diagram, directivity map and directivity index from traces at several angles (*Measure at ...°* runs the sweep and stores each angle)
+- **Device tests** window: crosstalk and channel matching (stepped sine, one channel driven at a time), wow and flutter of a 3 / 3.15 kHz tone (IEC 386 weighted peak and RMS, unweighted, speed error, spectrum of the deviation), multitone distortion (everything between the tones of the generator's multitone against the tones)
 - Peak list with note names, tuner
 - Signal statistics: histogram, clipping, bit depth use, trends
 - Reference curves and limit masks with pass/fail
@@ -65,6 +68,12 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - **Assistant** (button at the right end of the top bar): type what you want in plain words, e.g. "measure the frequency, impulse response and distortion with a sweep on input mic1", "THD vs level on the line input", "room acoustics with a sweep from 50 hz to 16 khz", "generate a 1 khz tone at -20 db and monitor it". It shows its plan first (and *Walk me through* asks for the input and channels, the output, a microphone calibration file or none, and the parameters step by step before setting up the windows; each task also suggests a routing patch that can be put into the node editor) (input device and channel, sweep range / length / level / averages, which windows to open and tile, generator and monitor settings) and then sets it up, optionally starting the measurements one after the other. It works offline with keywords and numbers; no service is involved
 - No side bar: the input device, its channels and the monitor are in the **Input** menu at the left end of the top bar (the routing graph takes them over when on), and the settings that used to be in the side bar are a **Settings** drop-down at the top of the window they belong to (Analysis, traces and microphone calibration in Spectrum, the spectrogram settings in Spectrogram, 3D view, distortion and voltage calibration in Measurements)
 - **Input mappings** (Options > Keys, MIDI and controllers): bind keys (with Ctrl / Shift / Alt), MIDI notes and controllers, and the buttons and axes of game controllers and joysticks to actions (freeze, reset max/min, screenshot, monitor and generator on / off, tile, layouts, show / hide each window, timeline play / record / loop / marker / split / undo, routing probe / A-B / undo ...) and to sliders (monitor volume, generator level and frequency, timeline master volume). Press *Learn*, then press the key or move the control; a slider has its own range and can be reversed. The bindings are kept in `mappings.txt` in the settings folder. MIDI inputs use the Windows multimedia API, controllers and joysticks the system's game controller interfaces (XInput and DirectInput devices)
+- **Command palette** (Ctrl+K): type a few letters of any action (a window, a layout, play, record ...) and press Enter
+- One frequency cursor for all windows: the frequency under the pointer in the spectrum or in any frequency plot is marked in the others
+- Colour-blind safe trace colours (list of the Traces window)
+- *Language* (Options): English or German, switched without a restart. Another language is a text file `lang_<name>.txt` in the settings folder, one `English<TAB>translation` pair per line. Text that is built from numbers (read-outs, status lines) is English in every language for now
+- *Light interface* (Options): light top bar, status bar and menus; the windows stay dark inside, like the screen of a scope
+- A right-click in a plot copies its read-out to the clipboard
 - Snapshots menu: the whole session (windows, tool settings, generators, routing graph) saved under a name together with notes, and put back with one click
 - Interface size (Options, or Ctrl + plus / minus): makes text and widgets larger for high-resolution screens
 - Options dialog for frame rate, readout rate, window behaviour and the remembered dialog folder
@@ -80,7 +89,7 @@ Real-time audio analyzer for Windows. Captures from an input device or from WASA
 - Stereo tracks can show their left and right channel as sub-tracks (`LR` button) with their own mute and gain; right-click a track to convert it to mono or split it into a left and a right track (panned hard left / right)
 - Right-click a track or an empty lane to import a file onto that track or to choose the input it records from
 - Mouse wheel zooms, Shift+wheel pans, Alt+wheel (or the wheel over the headers) scrolls the tracks; double-click a slider to type a value, right-click resets it
-- Clips snap to each other, the playhead and the grid (hold Shift to move freely); a clip must be selected before it can be moved, trimmed or faded, and the playback cursor is set by clicking in the ruler or in the waveform of a track (a white guide line shows where, only while the pointer is over a track's waveform); the upper bar of a track selects the clip and the track. The *Clip* button switches the red marking of samples above full scale (waveforms and track meters) off. A clip that is moved over another one crossfades with it instead of clicking
+- Clips snap to each other, the playhead and the grid (hold Alt to move freely); a clip must be selected before it can be moved, trimmed or faded, and the playback cursor is set by clicking in the ruler or in the waveform of a track (a white guide line shows where, only while the pointer is over a track's waveform); the upper bar of a track selects the clip and the track. The *Clip* button switches the red marking of samples above full scale (waveforms and track meters) off. A clip that is moved over another one crossfades with it instead of clicking
 - Ctrl + click on the track names selects several tracks: *Merge selected tracks into one* mixes them as they sound into a single track (undo brings the originals back), *Mix to a new track* keeps them. The analysis panel goes below the tracks, to the right of them in a low wide window, and is left out when there is no room
 - Playback leaves the live input in the analysers by default. Turn on *Output > Show the timeline in the analysers* (or press *Loop & play*) to let spectrum, scope, loudness ... follow the master or the selected track
 - Analysis of the selection: levels, LUFS, true peak, clipping, spectrum and spectrogram; store the spectrum as a trace
@@ -124,7 +133,38 @@ Each node shows a level meter; wires brighten with the signal. A loop is refused
 
 ![Layout previews](docs/layouts.png)
 
-The Layouts menu shows every preset as a small picture of its arrangement (also for presets you saved). Auto tiling gives the heaviest window the most room (the routing graph first) and lays the timeline out as a full-width strip so it stays wider than tall whenever the area allows it.
+The Layouts menu shows every preset as a small picture of its arrangement (also for presets you saved). Auto tiling gives the heaviest window the most room (the routing graph first). The timeline always gets a full-width strip, whatever the arrangement was before (at the top when it was above the other windows, else at the bottom, as tall as it was when it was a strip already); the other windows keep their places relative to each other, and are tiled afresh when that would leave a sliver.
+
+## Serial port (COM): turntables, relays, an Arduino
+
+VisuScope can send text commands to a controller on a serial port. It only sends; what the text means is up to your controller.
+
+Set it up in *Options > Serial port (COM)*: port, baud rate, line ending, and a list of named commands (name + text to send). Hover the heading for the full help.
+
+- In the text, `\n` `\r` `\t` and `\xNN` stand for control characters; `{angle}` is replaced by the angle of the turntable.
+- Send a command with its **Send** button, from the command palette (Ctrl+K), from a key / MIDI / controller binding (*Keys, MIDI and controllers*, action `serial:<name>`), or from a test sequence with the line `serial <text>`.
+- *Speaker design > Polar* has a **Turntable** switch: it sends the command (default `G{angle}`) before each angle, waits the settle time and measures. **Measure all** runs every angle up to the maximum by itself.
+- Most boards restart when the port is opened, so the first command waits (default 2 s, "boot ms").
+
+A minimal Arduino sketch for a relay and a stepper table:
+
+```cpp
+void setup() { Serial.begin(115200); pinMode(7, OUTPUT); }
+void loop() {
+  if (!Serial.available()) return;
+  String s = Serial.readStringUntil('\n');
+  if (s == "R1") digitalWrite(7, HIGH);        // command "relay on"  = R1
+  else if (s == "R0") digitalWrite(7, LOW);    // command "relay off" = R0
+  else if (s[0] == 'G') turnTo(s.substring(1).toFloat());  // G45 = turn the table to 45 degrees
+}
+```
+
+## Small things
+
+- Filter nodes have slopes of 6, 12, 18, 24 and 48 dB/oct; the crossover of *Speaker design* sends its filters to the routing graph with them.
+- Ctrl+C over the spectrum copies the read-out under the pointer; a right click on a read-out in a tool window copies it.
+- *Sidebar > Response time* sets how fast the display follows (live, average, fade).
+- Interface language: *Options > Language* (English, German built in; put a `lang_<name>.txt` with `English<TAB>translation` lines next to the settings file for another one).
 
 ## Safety buffer
 

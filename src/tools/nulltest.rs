@@ -391,7 +391,7 @@ impl NullTest {
         if let Some(s) = sig {
             ui.label(RichText::new(format!("{}  {:.1} s, {} Hz", s.name, s.x.len() as f32 / s.sr as f32, s.sr)).small().weak());
         } else if cur != Src::File {
-            ui.label(RichText::new("press Capture").small().weak());
+            ui.label(RichText::new(crate::lang::tr("press Capture")).small().weak());
         }
     }
 }
@@ -622,33 +622,33 @@ impl Tool for NullTest {
             if ui.add_enabled(live, egui::Button::new(format!("Capture {:.0} s", self.secs))).on_hover_text(if cx.graph_on { "Take the last seconds of what the Analyzer node receives (left and right channel: use Split / Merge nodes to put the two signals there)" } else { "Take the last seconds of the left and right input channel chosen in the side bar" }).clicked() {
                 self.capture(cx);
             }
-            ui.add(egui::DragValue::new(&mut self.secs).range(0.5..=20.0).speed(0.1).suffix(" s")).on_hover_text("Length of a capture");
+            ui.add(egui::DragValue::new(&mut self.secs).range(0.5..=20.0).speed(0.1).suffix(" s")).on_hover_text(crate::lang::tr("Length of a capture"));
         });
         ui.horizontal_wrapped(|ui| {
             let ready = self.a.is_some() && self.b.is_some();
             let mut ch = false;
             let rate = self.sr.max(1) as f64;
-            ui.label(RichText::new("Delay of B").small().weak());
-            ch |= ui.add_enabled(ready, egui::DragValue::new(&mut self.delay).speed(0.05).range(-96000.0..=96000.0).max_decimals(2).suffix(" smp")).on_hover_text("Samples B is delayed by to line up with A (negative: moved earlier). Fractions are interpolated").changed();
+            ui.label(RichText::new(crate::lang::tr("Delay of B")).small().weak());
+            ch |= ui.add_enabled(ready, egui::DragValue::new(&mut self.delay).speed(0.05).range(-96000.0..=96000.0).max_decimals(2).suffix(crate::lang::tr(" smp"))).on_hover_text(crate::lang::tr("Samples B is delayed by to line up with A (negative: moved earlier). Fractions are interpolated")).changed();
             let mut ms = (self.delay / rate * 1000.0) as f32;
-            if ui.add_enabled(ready, egui::DragValue::new(&mut ms).speed(0.01).max_decimals(3).suffix(" ms")).changed() {
+            if ui.add_enabled(ready, egui::DragValue::new(&mut ms).speed(0.01).max_decimals(3).suffix(crate::lang::tr(" ms"))).changed() {
                 self.delay = (ms as f64 * rate / 1000.0).clamp(-96000.0, 96000.0);
                 ch = true;
             }
-            ui.label(RichText::new("Level").small().weak());
-            ch |= ui.add_enabled(ready, egui::DragValue::new(&mut self.gain_db).speed(0.02).range(-60.0..=60.0).max_decimals(2).suffix(" dB")).changed();
-            ch |= ui.add_enabled(ready, egui::Checkbox::new(&mut self.invert, "Invert B")).on_hover_text("Turn B upside down before subtracting (when the signals have opposite polarity)").changed();
-            if ui.add_enabled(ready, egui::Button::new("Align")).on_hover_text("Find the delay, polarity and level difference automatically").clicked() {
+            ui.label(RichText::new(crate::lang::tr("Level")).small().weak());
+            ch |= ui.add_enabled(ready, egui::DragValue::new(&mut self.gain_db).speed(0.02).range(-60.0..=60.0).max_decimals(2).suffix(crate::lang::tr(" dB"))).changed();
+            ch |= ui.add_enabled(ready, egui::Checkbox::new(&mut self.invert, "Invert B")).on_hover_text(crate::lang::tr("Turn B upside down before subtracting (when the signals have opposite polarity)")).changed();
+            if ui.add_enabled(ready, egui::Button::new(crate::lang::tr("Align"))).on_hover_text(crate::lang::tr("Find the delay, polarity and level difference automatically")).clicked() {
                 self.align();
             }
-            ui.checkbox(&mut self.auto, "auto").on_hover_text("Align automatically after every capture or file");
+            ui.checkbox(&mut self.auto, crate::lang::tr("auto")).on_hover_text(crate::lang::tr("Align automatically after every capture or file"));
             if ch {
                 self.recompute();
             }
         });
         // listening
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Listen").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Listen")).small().weak());
             let was = self.mode;
             for (i, (n, c)) in [("A", COL_A), ("B", COL_B), ("A - B", COL_R)].into_iter().enumerate() {
                 if ui.selectable_label(self.mode == i, RichText::new(n).color(c)).on_hover_text(["Signal A", "Signal B after delay, level and polarity", "The difference: silence means the signals are identical"][i]).clicked() {
@@ -667,9 +667,9 @@ impl Tool for NullTest {
                     self.player = None;
                 }
             }
-            ui.add(egui::DragValue::new(&mut self.vol_db).range(-60.0..=0.0).suffix(" dB").speed(0.2)).on_hover_text("Volume");
+            ui.add(egui::DragValue::new(&mut self.vol_db).range(-60.0..=0.0).suffix(crate::lang::tr(" dB")).speed(0.2)).on_hover_text(crate::lang::tr("Volume"));
             if self.mode == 2 {
-                if ui.add(egui::DragValue::new(&mut self.boost_db).range(0.0..=60.0).prefix("boost ").suffix(" dB").speed(0.2)).on_hover_text("Amplify the difference to hear small errors (limited at full scale)").changed() {
+                if ui.add(egui::DragValue::new(&mut self.boost_db).range(0.0..=60.0).prefix(crate::lang::tr("boost ")).suffix(crate::lang::tr(" dB")).speed(0.2)).on_hover_text(crate::lang::tr("Amplify the difference to hear small errors (limited at full scale)")).changed() {
                     if let Some(p) = &self.player {
                         p.sh.lock().boost = db_to_lin(self.boost_db);
                     }
@@ -690,7 +690,7 @@ impl Tool for NullTest {
                 self.out_dev.clone()
             };
             if cx.graph_on {
-                ui.label(RichText::new("plays on the first Output node").small().weak());
+                ui.label(RichText::new(crate::lang::tr("plays on the first Output node")).small().weak());
             }
             if self.playing && ready {
                 self.ensure_player(&dev);
@@ -709,7 +709,7 @@ impl Tool for NullTest {
         }
         let Some(a) = self.a.clone().filter(|_| self.b.is_some()) else {
             ui.add_space(8.0);
-            ui.label(RichText::new("Choose two signals: input channels (Capture takes the last seconds) or files.\nThey are lined up and subtracted: the quieter the difference, the more alike the signals are.\nExamples: a device against its own recording, a plug-in on and off, two converters, a lossy file against its original.").weak());
+            ui.label(RichText::new(crate::lang::tr("Choose two signals: input channels (Capture takes the last seconds) or files.\nThey are lined up and subtracted: the quieter the difference, the more alike the signals are.\nExamples: a device against its own recording, a plug-in on and off, two converters, a lossy file against its original.")).weak());
             return;
         };
         if self.spec_dirty && !ui.input(|i| i.pointer.any_down()) {

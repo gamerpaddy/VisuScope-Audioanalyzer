@@ -142,7 +142,7 @@ impl Impulse {
                                 }
                             }
                             None => {
-                                ui.label(RichText::new("no data above the noise (or band above Nyquist)").small().weak());
+                                ui.label(RichText::new(crate::lang::tr("no data above the noise (or band above Nyquist)")).small().weak());
                             }
                         }
                         ui.end_row();
@@ -178,7 +178,7 @@ impl Impulse {
             }
             4 => {
                 let (Some(Some(c)), Some((tex, _, _))) = (&a.csd, &self.csd_tex) else {
-                    ui.label(RichText::new("impulse response too short for a waterfall").weak());
+                    ui.label(RichText::new(crate::lang::tr("impulse response too short for a waterfall")).weak());
                     return;
                 };
                 let (resp, painter, rect) = canvas(ui, 140.0);
@@ -201,7 +201,7 @@ impl Impulse {
             }
             5 => {
                 let Some(Some(s)) = &a.sti else {
-                    ui.label(RichText::new("STI needs all octave bands from 125 Hz to 8 kHz below Nyquist, and a usable decay.").weak());
+                    ui.label(RichText::new(crate::lang::tr("STI needs all octave bands from 125 Hz to 8 kHz below Nyquist, and a usable decay.")).weak());
                     return;
                 };
                 ui.horizontal(|ui| {
@@ -226,11 +226,11 @@ impl Impulse {
                     painter.text(Pos2::new(x + w * 0.5, plot.ty(m) - 2.0), Align2::CENTER_BOTTOM, format!("{m:.2}"), FontId::proportional(10.0), Color32::WHITE);
                 }
                 painter.text(Pos2::new(rect.left() + 2.0, pr.top()), Align2::LEFT_TOP, "MTI", FontId::proportional(9.0), crate::views::TXT);
-                ui.label(RichText::new("Indirect STI from the impulse response (modulation transfer, male weighting). No background noise, masking or level weighting: it describes the room only.").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Indirect STI from the impulse response (modulation transfer, male weighting). No background noise, masking or level weighting: it describes the room only.")).small().weak());
             }
             _ => {
                 let Some(Some(m)) = &a.modes else {
-                    ui.label(RichText::new("impulse response too short for a modal analysis").weak());
+                    ui.label(RichText::new(crate::lang::tr("impulse response too short for a modal analysis")).weak());
                     return;
                 };
                 let (resp, painter, rect) = canvas(ui, 120.0);
@@ -335,7 +335,7 @@ impl Tool for Impulse {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let Some(r) = &cx.sweep.result else {
             ui.add_space(8.0);
-            ui.label(RichText::new("No measurement yet. Run one in the Response window (the sweep also gives the impulse response).").weak());
+            ui.label(RichText::new(crate::lang::tr("No measurement yet. Run one in the Response window (the sweep also gives the impulse response).")).weak());
             return;
         };
         if self.ana.as_ref().map(|a| a.id) != Some(r.id) {
@@ -344,24 +344,24 @@ impl Tool for Impulse {
         self.ensure(&r.ir, ui.ctx());
         ui.horizontal_wrapped(|ui| {
             for (i, v) in VIEWS.iter().enumerate() {
-                ui.selectable_value(&mut self.view, i, *v);
+                ui.selectable_value(&mut self.view, i, crate::lang::tr(*v));
             }
-            ui.add(egui::Slider::new(&mut self.zoom_ms, 0.0..=1500.0).logarithmic(true).text("view ms").custom_formatter(|v, _| if v < 1.0 { "auto".into() } else { format!("{v:.0}") }));
+            ui.add(egui::Slider::new(&mut self.zoom_ms, 0.0..=1500.0).logarithmic(true).text(crate::lang::tr("view ms")).custom_formatter(|v, _| if v < 1.0 { "auto".into() } else { format!("{v:.0}") }));
             if self.view == 4 {
-                ui.add(egui::DragValue::new(&mut self.csd_range).range(20.0..=90.0).speed(0.5).prefix("range ").suffix(" dB"));
+                ui.add(egui::DragValue::new(&mut self.csd_range).range(20.0..=90.0).speed(0.5).prefix(crate::lang::tr("range ")).suffix(crate::lang::tr(" dB")));
             }
             if self.view == 6 {
-                ui.checkbox(&mut self.show_room, "Room modes").on_hover_text("Axial modes of a rectangular room (c = 343 m/s)");
+                ui.checkbox(&mut self.show_room, crate::lang::tr("Room modes")).on_hover_text(crate::lang::tr("Axial modes of a rectangular room (c = 343 m/s)"));
                 for (i, n) in ["L", "W", "H"].iter().enumerate() {
                     ui.add_enabled(self.show_room, egui::DragValue::new(&mut self.room[i]).range(0.5..=60.0).speed(0.05).prefix(format!("{n} ")).suffix(" m"));
                 }
             }
-            if ui.add_enabled(self.save.is_none(), egui::Button::new("CSV")).on_hover_text("Export the impulse response").clicked() {
+            if ui.add_enabled(self.save.is_none(), egui::Button::new(crate::lang::tr("CSV"))).on_hover_text(crate::lang::tr("Export the impulse response")).clicked() {
                 self.save = Some(dialogs::save("Export impulse response", "CSV", &["csv"], "impulse.csv".into()));
             }
         });
         let Some(a) = &self.ana else {
-            ui.label("impulse response too short");
+            ui.label(crate::lang::tr("impulse response too short"));
             return;
         };
         let m = &a.m;
@@ -380,7 +380,7 @@ impl Tool for Impulse {
             }
         });
         if m.snr_db < 35.0 {
-            ui.colored_label(Color32::from_rgb(255, 190, 80), "Low signal-to-noise: T30 / EDT may be unreliable. Raise the level or average more runs.");
+            ui.colored_label(Color32::from_rgb(255, 190, 80), crate::lang::tr("Low signal-to-noise: T30 / EDT may be unreliable. Raise the level or average more runs."));
         }
 
         if self.view >= 3 {

@@ -193,7 +193,7 @@ enum Job {
     /// the takes (track, audio, where it starts), whether a gap was possible, and the punch range
     Recorded(Vec<(u32, Arc<Source>, i64)>, bool, Option<(i64, i64)>),
     Analysis(AnKey, Arc<AnalysisOut>),
-    Saved(Result<PathBuf, String>, bool),
+    Saved(Result<PathBuf, String>, bool, u64),
     Loaded(Result<file::Loaded, String>, bool, PathBuf),
     Bounced(Arc<Source>, i64),
     /// the mix of several tracks: the new source, where it starts, the tracks it replaces (may be empty), and where
@@ -268,6 +268,11 @@ pub struct Daw {
     /// bumped by every edit (analysis cache key)
     rev: u64,
     saved_rev: u64,
+    named_rev: u64,
+    keyboard_active: bool,
+    pending_replace: Option<bool>,
+    replace_after_save: bool,
+    replace_ready: bool,
     last_edit: Instant,
     // view
     t0: f64,
@@ -411,6 +416,11 @@ impl Daw {
             edited: false,
             rev: 1,
             saved_rev: 1,
+            named_rev: 1,
+            keyboard_active: false,
+            pending_replace: None,
+            replace_after_save: false,
+            replace_ready: false,
             last_edit: Instant::now(),
             t0: 0.0,
             pps: 80.0,
@@ -565,7 +575,8 @@ impl Daw {
     fn spawn_job(&self, name: &str, f: impl FnOnce(&Mutex<Vec<Job>>) + Send + 'static) {
         let (jobs, busy) = (self.jobs.clone(), self.busy.clone());
         busy.fetch_add(1, Relaxed);
-        std::thread::Builder::new()
+        let spawn_busy = busy.clone();
+        let result = std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
                 // a task that panics (a damaged file, a bug) must not leave the program waiting for it
@@ -573,8 +584,8 @@ impl Daw {
                     jobs.lock().push(Job::Done("A background task failed (see the log); the file may be damaged".into()));
                 }
                 busy.fetch_sub(1, Relaxed);
-            })
-            .ok();
+            });
+        if let Err(e) = result { spawn_busy.fetch_sub(1, Relaxed); self.jobs.lock().push(Job::Done(format!("Cannot start background task: {e}"))); }
     }
 
     // ------------------------------------------------------------------ import
@@ -585,6 +596,10 @@ impl Daw {
 
     /// Import files; the first one goes onto the given track at the given frame, the others get new tracks.
     pub(super) fn import_at(&mut self, paths: Vec<PathBuf>, target: Option<(u32, i64)>) {
+        if self.jobs.lock().iter().any(|j| matches!(j, Job::Loaded(..))) {
+            self.note = "Wait for the project to finish opening before importing".into();
+            return;
+        }
         let mut at = self.cursor.max(0);
         // Options: new audio goes to the start of the timeline, whatever the cursor says
         if self.pos() == 0 || IMPORT_AT_START.load(Relaxed) {
@@ -800,6 +815,7 @@ impl Daw {
             let (stamp, _) = utc_stamp(now_unix());
             let mut out = Vec::new();
             let mut gap = false;
+            let mut errors = Vec::new();
             for r in &plan {
                 let Some(t) = takes.get(&r.dev) else { continue };
                 gap |= t.gap;
@@ -832,12 +848,14 @@ impl Daw {
                 }
                 let s = Source::new(file::next_src_id(&ids), format!("{} {}", r.name, &stamp[9..]), chans);
                 let path = dir.join(format!("take_{stamp}_{}.wav", r.track_id));
-                if file::write_wav(&path, &s, sr).is_ok() {
-                    *s.saved.lock() = Some(path);
+                match file::write_wav(&path, &s, sr) {
+                    Ok(()) => *s.saved.lock() = Some(path),
+                    Err(e) => errors.push(format!("{}: {e}", path.display())),
                 }
                 out.push((r.track_id, Arc::new(s), place));
             }
             jobs.lock().push(Job::Recorded(out, gap, punch));
+            if !errors.is_empty() { jobs.lock().push(Job::Done(format!("Recording is in memory; WAV save failed: {}. Save the project to preserve it.", errors.join("; ")))); }
         });
     }
 
@@ -1044,10 +1062,14 @@ impl Daw {
                     self.an_done = Some(key);
                     self.an_out = Some(out);
                 }
-                Job::Saved(res, auto) => match res {
+                Job::Saved(res, auto, revision) => match res {
                     Ok(p) => {
+                        if auto { self.saved_rev = revision; }
                         if !auto {
+                            self.named_rev = revision;
+                            if self.replace_after_save && revision == self.rev { self.replace_ready = true; }
                             self.path = Some(p.clone());
+                            let _ = std::fs::write(autosave_path().with_extension("origin"), p.to_string_lossy().as_bytes());
                             self.note = format!("Project saved: {}", p.display());
                         }
                     }
@@ -1070,8 +1092,14 @@ impl Daw {
                         self.redo.clear();
                         self.sel.clear();
                         self.rev += 1;
-                        self.saved_rev = self.rev;
+                        self.saved_rev = if restore { self.rev } else { self.rev.wrapping_sub(1) };
+                        self.named_rev = if restore { self.rev.wrapping_sub(1) } else { self.rev };
+                        if restore {
+                            self.path = std::fs::read_to_string(autosave_path().with_extension("origin")).ok().filter(|s| !s.is_empty()).map(PathBuf::from);
+                            self.note = "Recovered timeline; save to update your project file".into();
+                        }
                         if !restore {
+                            let _ = std::fs::write(autosave_path().with_extension("origin"), path.to_string_lossy().as_bytes());
                             self.path = Some(path.clone());
                             self.note = if l.missing > 0 { format!("Opened {} ({} clips lost: audio files missing)", path.display(), l.missing) } else { format!("Opened {}", path.display()) };
                         }

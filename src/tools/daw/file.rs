@@ -113,7 +113,7 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
             let _ = writeln!(out, "clip {}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", t.id, c.id, c.src.id, c.start, c.off, c.len, c.gain_db, c.fade_in, c.fade_out, c.reverse as u8, c.muted as u8, esc(&c.name), c.xf);
         }
     }
-    std::fs::write(path, out).map_err(|e| e.to_string())
+    atomic_write(path, out.as_bytes()).map_err(|e| e.to_string())
 }
 
 pub struct Loaded {
@@ -150,7 +150,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
     }
     for l in lines {
         if let Some(v) = l.strip_prefix("sr ") {
-            proj.sr = v.trim().parse().unwrap_or(48000).clamp(8000, 384000);
+            proj.sr = v.trim().parse().unwrap_or(48000).clamp(2000, 768000);
         } else if let Some(v) = l.strip_prefix("master ") {
             proj.master_db = v.trim().parse().unwrap_or(0.0);
         } else if let Some(r) = l.strip_prefix("drawtrack ") {
@@ -436,4 +436,53 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    static SERIAL: AtomicU32 = AtomicU32::new(0);
+    let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), SERIAL.fetch_add(1, Relaxed)));
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        #[cfg(windows)] {
+            use std::os::windows::ffi::OsStrExt;
+            let a: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+            let b: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            unsafe extern "system" { fn MoveFileExW(a: *const u16, b: *const u16, flags: u32) -> i32; }
+            if unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), 1 | 8) } == 0 { return Err(std::io::Error::last_os_error()); }
+        }
+        #[cfg(not(windows))] std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(tmp); }
+    result
+}
+
+#[cfg(test)] mod review_tests {
+ use super::*;
+ #[test] fn supported_rates_roundtrip_without_changing_clip_length() {
+ let dir = std::env::temp_dir().join(format!("vs-rates-{}", std::process::id()));
+ std::fs::create_dir_all(&dir).unwrap();
+ for sr in [2000, 4000, 8000, 44100, 384000, 768000] {
+ let mut p = Project::new(sr);
+ let t = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+ p.add_clip(t, Arc::new(Source::new(sr, "tone".into(), vec![vec![0.2; 128]])), 13);
+ let path = dir.join(format!("{sr}.vsproj")); save(&p, &path).unwrap();
+ let loaded = load(&path).unwrap(); assert_eq!(loaded.proj.sr, sr); assert_eq!(loaded.missing, 0);
+ assert_eq!(loaded.proj.tracks[0].clips[0].len, 128);
+ }
+ std::fs::remove_dir_all(dir).unwrap();
+ }
+ #[test] fn atomic_replace_preserves_previous_file_on_failure() {
+ let dir = std::env::temp_dir().join(format!("vs-atomic-{}", std::process::id()));
+ std::fs::create_dir_all(&dir).unwrap(); let p = dir.join("project");
+ atomic_write(&p, b"old").unwrap(); atomic_write(&p, b"new").unwrap();
+ assert_eq!(std::fs::read(&p).unwrap(), b"new");
+ assert!(atomic_write(&dir, b"invalid").is_err());
+ assert_eq!(std::fs::read(&p).unwrap(), b"new");
+ std::fs::remove_dir_all(dir).unwrap();
+ }
 }

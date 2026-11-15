@@ -59,6 +59,9 @@ pub fn short_label(label: &str) -> String {
 struct Buf {
     /// store samples while set
     rec: AtomicBool,
+    stopped: AtomicBool,
+    rec_sr: AtomicU32,
+    limit: AtomicU64,
     /// lanes (device channels, then the mono mix) that are stored
     need: Vec<AtomicBool>,
     data: Mutex<Vec<Vec<f32>>>,
@@ -102,6 +105,9 @@ pub struct Take {
 fn new_buf() -> Arc<Buf> {
     Arc::new(Buf {
         rec: AtomicBool::new(false),
+        stopped: AtomicBool::new(false),
+        rec_sr: AtomicU32::new(48000),
+        limit: AtomicU64::new(0),
         need: (0..=MAX_LANES).map(|_| AtomicBool::new(false)).collect(),
         data: Mutex::new(Vec::new()),
         peak: (0..=MAX_LANES).map(|_| AtomicU32::new(0)).collect(),
@@ -125,6 +131,9 @@ impl Capture {
     pub fn feed(&self, l: &[f32], r: &[f32]) {
         let b = &self.buf;
         let mut pk = [0f32; 3];
+        if b.rec.load(Relaxed) && b.frames.load(Relaxed) + l.len() as u64 > b.limit.load(Relaxed) {
+            b.rec.store(false, Relaxed); b.stopped.store(true, Relaxed);
+        }
         let rec = b.rec.load(Relaxed);
         let mut g = if rec { Some(b.data.lock()) } else { None };
         let (n0, n1, n2) = (b.need[0].load(Relaxed), b.need[1].load(Relaxed), b.need[2].load(Relaxed));
@@ -211,8 +220,16 @@ impl Capture {
     }
 
     /// Start storing the given lanes.
+    pub fn interrupted(&self) -> bool { self.buf.stopped.load(Relaxed) }
+
     pub fn begin(&self, lanes: &[usize]) {
         let (sr, ch) = self.format().unwrap_or((48000, 2));
+        self.buf.rec_sr.store(sr, Relaxed);
+        self.buf.stopped.store(false, Relaxed);
+        // Bound each device to a quarter of the free memory, so a long take stops cleanly before memory runs out.
+        let bytes = crate::tools::wavio::free_memory().unwrap_or(2 << 30) / 4;
+        let count = lanes.iter().copied().collect::<std::collections::BTreeSet<_>>().len().max(1);
+        self.buf.limit.store((bytes / 4 / count as u64).max(1), Relaxed);
         let mut d = self.buf.data.lock();
         d.clear();
         d.resize(ch.min(MAX_LANES) + 1, Vec::new());
@@ -221,7 +238,11 @@ impl Capture {
         }
         for &l in lanes {
             if let Some(v) = d.get_mut(l) {
-                v.reserve(sr as usize * 30);
+                // room for ten minutes: memory that is reserved but not written costs nothing, and the sound thread never has to move the take
+                let want = (sr as usize * 600).min(self.buf.limit.load(Relaxed) as usize);
+                if v.try_reserve(want).is_err() {
+                    v.reserve((sr as usize * 30).min(want));
+                }
             }
         }
         self.buf.frames.store(0, Relaxed);
@@ -232,7 +253,7 @@ impl Capture {
 
     pub fn finish(&self) -> Take {
         self.buf.rec.store(false, Relaxed);
-        let (sr, _) = self.format().unwrap_or((48000, 2));
+        let sr = self.buf.rec_sr.load(Relaxed);
         // the callback may still be inside its critical section: this lock waits for it
         let lanes = std::mem::take(&mut *self.buf.data.lock());
         Take { sr, lanes, gap: self.buf.gap.swap(false, Relaxed) }
@@ -271,6 +292,8 @@ fn run(id: String, buf: Arc<Buf>, stop: Arc<AtomicBool>, info: Arc<Mutex<Option<
                 if dead.load(Relaxed) && !stop.load(Relaxed) {
                     if buf.rec.load(Relaxed) {
                         buf.gap.store(true, Relaxed);
+                        buf.rec.store(false, Relaxed);
+                        buf.stopped.store(true, Relaxed);
                     }
                     *info.lock() = None;
                     *status.lock() = "device changed, reconnecting...".into();
@@ -335,7 +358,14 @@ where
     let mut f = in_body::<T>(buf, ch, cfg.sample_rate, dead.clone());
     dev.build_input_stream(
         cfg,
-        move |data: &[T], _: &_| f(data),
+        move |data: &[T], info: &cpal::InputCallbackInfo| {
+            // how old the block is when it arrives, and how long it is (shown by the profiler print)
+            let ts = info.timestamp();
+            crate::audio::CAP_LAT_US.store(ts.callback.duration_since(ts.capture).as_micros() as u32, Relaxed);
+            crate::audio::CAP_FRAMES.store((data.len() / ch) as u32, Relaxed);
+            crate::lattest::mark(2, data.iter().any(|s| f32::from_sample(*s).abs() > 0.01));
+            f(data)
+        },
         move |e| match e.kind() {
             cpal::ErrorKind::Xrun => {
                 crate::prof::C.xruns.fetch_add(1, Relaxed);
@@ -369,6 +399,9 @@ where
             }
             timer.begin();
             peak.iter_mut().for_each(|p| *p = 0.0);
+            if buf.rec.load(Relaxed) && buf.frames.load(Relaxed) + (data.len() / ch) as u64 > buf.limit.load(Relaxed) {
+                buf.rec.store(false, Relaxed); buf.stopped.store(true, Relaxed);
+            }
             let rec = buf.rec.load(Relaxed);
             if rec {
                 need.clear();
@@ -437,4 +470,20 @@ where
             }
             timer.done(data.len() / ch, in_sr);
     }
+}
+
+#[cfg(test)] mod review_tests {
+ use super::*;
+ #[test] fn memory_limit_preserves_completed_samples() {
+ let c = Capture::virtual_input("test".into(), 48000);
+ c.begin(&[0, 1]); c.buf.limit.store(4, Relaxed);
+ c.feed(&[0.25; 4], &[0.5; 4]); c.feed(&[1.0], &[1.0]);
+ assert!(c.interrupted()); let t = c.finish(); assert_eq!(t.lanes[0], vec![0.25; 4]);
+ }
+ #[test] fn take_keeps_original_rate() {
+ let c = Capture::virtual_input("test".into(), 44100);
+ c.begin(&[0]); c.feed(&[0.25; 4], &[0.5; 4]);
+ *c.info.lock() = Some((48000, 2));
+ assert_eq!(c.finish().sr, 44100);
+ }
 }

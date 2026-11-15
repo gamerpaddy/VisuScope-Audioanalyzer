@@ -206,7 +206,7 @@ impl Tool for Logger {
                     self.start();
                 }
             }
-            ui.add(egui::DragValue::new(&mut self.interval).range(0.1..=3600.0).speed(0.1).prefix("every ").suffix(" s"));
+            ui.add(egui::DragValue::new(&mut self.interval).range(0.1..=3600.0).speed(0.1).prefix(crate::lang::tr("every ")).suffix(" s"));
         });
         if let Some(lf) = &self.log {
             ui.horizontal(|ui| {
@@ -229,7 +229,7 @@ impl Tool for Logger {
                 let (name, unit) = (r.name(), r.unit());
                 ui.checkbox(&mut r.on, name);
                 ui.add(egui::DragValue::new(&mut r.thr).range(-200.0..=200.0).speed(0.2).suffix(unit));
-                ui.add(egui::DragValue::new(&mut r.hold).range(0.0..=3600.0).speed(0.1).prefix("for ").suffix(" s"));
+                ui.add(egui::DragValue::new(&mut r.hold).range(0.0..=3600.0).speed(0.1).prefix(crate::lang::tr("for ")).suffix(" s"));
                 ui.label("");
                 ui.end_row();
             }
@@ -238,7 +238,7 @@ impl Tool for Logger {
         heading(ui, "Events");
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if self.events.is_empty() {
-                ui.label(RichText::new("none").weak());
+                ui.label(RichText::new(crate::lang::tr("none")).weak());
             }
             for (t, e) in &self.events {
                 ui.label(RichText::new(format!("{t}   {e}")).monospace().small());

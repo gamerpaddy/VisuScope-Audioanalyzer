@@ -373,6 +373,7 @@ where
                 stored = ctl.cush.state();
                 learned_put(&key, stored);
             }
+            crate::lattest::mark(1, q.buf.iter().take(16).any(|s| s.0.abs() > 1e-4 || s.1.abs() > 1e-4));
             for frame in data.chunks_mut(ch) {
                 while frac >= 1.0 {
                     prev = next;

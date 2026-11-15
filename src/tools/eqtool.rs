@@ -178,32 +178,32 @@ impl Tool for EqTool {
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Measurement").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Measurement")).small().weak());
             let cur = self.src.clone().unwrap_or_else(|| "Last sweep".into());
             egui::ComboBox::from_id_salt("eq_src").width(130.0).selected_text(cur).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.src, None, "Last sweep");
+                ui.selectable_value(&mut self.src, None, crate::lang::tr("Last sweep"));
                 for m in &cx.lib.items {
                     ui.selectable_value(&mut self.src, Some(m.name.clone()), &m.name);
                 }
             });
-            ui.label(RichText::new("Smooth").small().weak());
-            egui::ComboBox::from_id_salt("eq_sm").width(78.0).selected_text(SMOOTH[self.smooth].1).show_ui(ui, |ui| {
+            ui.label(RichText::new(crate::lang::tr("Smooth")).small().weak());
+            egui::ComboBox::from_id_salt("eq_sm").width(78.0).selected_text(crate::lang::tr(SMOOTH[self.smooth].1)).show_ui(ui, |ui| {
                 for (i, s) in SMOOTH.iter().enumerate() {
                     ui.selectable_value(&mut self.smooth, i, s.1);
                 }
             });
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Correct").small().weak());
-            ui.add(egui::DragValue::new(&mut self.band.0).range(20.0..=2000.0).speed(1.0).suffix(" Hz"));
-            ui.label("to");
-            ui.add(egui::DragValue::new(&mut self.band.1).range(100.0..=20000.0).speed(5.0).suffix(" Hz"));
+            ui.label(RichText::new(crate::lang::tr("Correct")).small().weak());
+            ui.add(egui::DragValue::new(&mut self.band.0).range(20.0..=2000.0).speed(1.0).suffix(crate::lang::tr(" Hz")));
+            ui.label(crate::lang::tr("to"));
+            ui.add(egui::DragValue::new(&mut self.band.1).range(100.0..=20000.0).speed(5.0).suffix(crate::lang::tr(" Hz")));
             self.band.1 = self.band.1.max(self.band.0 * 1.5);
-            ui.add(egui::DragValue::new(&mut self.n_filters).range(1..=20).suffix(" filters"));
-            ui.add(egui::DragValue::new(&mut self.max_boost).range(0.0..=12.0).speed(0.1).prefix("boost +").suffix(" dB")).on_hover_text("Boosting a room null wastes headroom and rarely works: keep this small");
-            ui.add(egui::DragValue::new(&mut self.max_cut).range(0.0..=24.0).speed(0.1).prefix("cut -").suffix(" dB"));
-            ui.add(egui::DragValue::new(&mut self.qmax).range(1.0..=20.0).speed(0.1).prefix("Q max "));
-            ui.add(egui::DragValue::new(&mut self.tilt).range(-6.0..=6.0).speed(0.05).prefix("tilt ").suffix(" dB/oct")).on_hover_text("Target slope around 1 kHz: negative rolls the highs off, as in a house curve");
+            ui.add(egui::DragValue::new(&mut self.n_filters).range(1..=20).suffix(crate::lang::tr(" filters")));
+            ui.add(egui::DragValue::new(&mut self.max_boost).range(0.0..=12.0).speed(0.1).prefix(crate::lang::tr("boost +")).suffix(crate::lang::tr(" dB"))).on_hover_text(crate::lang::tr("Boosting a room null wastes headroom and rarely works: keep this small"));
+            ui.add(egui::DragValue::new(&mut self.max_cut).range(0.0..=24.0).speed(0.1).prefix(crate::lang::tr("cut -")).suffix(crate::lang::tr(" dB")));
+            ui.add(egui::DragValue::new(&mut self.qmax).range(1.0..=20.0).speed(0.1).prefix(crate::lang::tr("Q max ")));
+            ui.add(egui::DragValue::new(&mut self.tilt).range(-6.0..=6.0).speed(0.05).prefix(crate::lang::tr("tilt ")).suffix(crate::lang::tr(" dB/oct"))).on_hover_text(crate::lang::tr("Target slope around 1 kHz: negative rolls the highs off, as in a house curve"));
         });
         let Some(&fmax) = self.f.last() else {
             ui.add_space(8.0);
@@ -258,7 +258,7 @@ impl Tool for EqTool {
             });
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Export for").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Export for")).small().weak());
             egui::ComboBox::from_id_salt("eq_rate").width(78.0).selected_text(format!("{} Hz", RATES[self.rate])).show_ui(ui, |ui| {
                 for (i, r) in RATES.iter().enumerate() {
                     ui.selectable_value(&mut self.rate, i, format!("{r} Hz"));
@@ -281,13 +281,13 @@ impl Tool for EqTool {
             b(ui, 1, "Biquads", "Coefficients for the chosen sample rate", "Export biquad coefficients", "CSV", &["csv"], "eq_biquads.csv", self);
             b(ui, 2, "FIR linear", "Linear-phase FIR WAV (latency of half the taps)", "Export FIR", "WAV", &["wav"], "eq_fir_linear.wav", self);
             b(ui, 3, "FIR min-phase", "Minimum-phase FIR WAV (least delay)", "Export FIR", "WAV", &["wav"], "eq_fir_minphase.wav", self);
-            if cx.graph_on && ui.add_enabled(has, egui::Button::new("Send to routing")).on_hover_text("Put these filters into an equaliser node of the routing graph (the selected one, the first one, or a new one in front of the output) and listen to the correction").clicked() {
+            if cx.graph_on && ui.add_enabled(has, egui::Button::new(crate::lang::tr("Send to routing"))).on_hover_text(crate::lang::tr("Put these filters into an equaliser node of the routing graph (the selected one, the first one, or a new one in front of the output) and listen to the correction")).clicked() {
                 let bands: Vec<[f32; 3]> = self.filts.iter().map(|f| [f.f, f.gain, f.q]).collect();
                 *crate::graph::bus().eq_send.lock() = Some((bands, -eq::peak_boost(&self.filts, self.design_sr())));
                 cx.req.note = Some("EQ filters sent to the routing graph".into());
             }
         });
-        ui.label(RichText::new("Low frequencies need long FIRs: 8192 taps or more at 48 kHz for filters below 100 Hz. Correct only what the room does at one position of the microphone: cuts of peaks work, boosts of nulls do not.").small().weak());
+        ui.label(RichText::new(crate::lang::tr("Low frequencies need long FIRs: 8192 taps or more at 48 kHz for filters below 100 Hz. Correct only what the room does at one position of the microphone: cuts of peaks work, boosts of nulls do not.")).small().weak());
     }
 
     fn save(&self, o: &mut SettingsOut) {

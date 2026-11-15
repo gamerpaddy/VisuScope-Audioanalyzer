@@ -417,22 +417,22 @@ impl App {
             }
             ui.checkbox(&mut s.show[0], RichText::new("L").color(s.col[0]));
             ui.checkbox(&mut s.show[1], RichText::new("R").color(s.col[1]));
-            ui.color_edit_button_srgba(&mut s.col[0]).on_hover_text("Colour of the left trace");
-            ui.color_edit_button_srgba(&mut s.col[1]).on_hover_text("Colour of the right trace");
-            ui.checkbox(&mut s.blend, "Blend").on_hover_text("The traces add up instead of one covering the other: where they overlap the two colours mix into a third one");
-            ui.label(RichText::new("Trig").small().weak());
+            ui.color_edit_button_srgba(&mut s.col[0]).on_hover_text(crate::lang::tr("Colour of the left trace"));
+            ui.color_edit_button_srgba(&mut s.col[1]).on_hover_text(crate::lang::tr("Colour of the right trace"));
+            ui.checkbox(&mut s.blend, crate::lang::tr("Blend")).on_hover_text(crate::lang::tr("The traces add up instead of one covering the other: where they overlap the two colours mix into a third one"));
+            ui.label(RichText::new(crate::lang::tr("Trig")).small().weak());
             egui::ComboBox::from_id_salt("tsrc").width(36.0).selected_text(["L", "R"][s.trig_src]).show_ui(ui, |ui| {
                 ui.selectable_value(&mut s.trig_src, 0, "L");
                 ui.selectable_value(&mut s.trig_src, 1, "R");
             });
             egui::ComboBox::from_id_salt("tmode").width(64.0).selected_text(["Auto", "Normal", "Single", "Roll"][s.mode as usize]).show_ui(ui, |ui| {
                 for (i, n) in ["Auto", "Normal", "Single", "Roll"].iter().enumerate() {
-                    ui.selectable_value(&mut s.mode, i as u8, *n);
+                    ui.selectable_value(&mut s.mode, i as u8, crate::lang::tr(*n));
                 }
             });
             egui::ComboBox::from_id_salt("tedge").width(58.0).selected_text(if s.rising { "Rising" } else { "Falling" }).show_ui(ui, |ui| {
-                ui.selectable_value(&mut s.rising, true, "Rising");
-                ui.selectable_value(&mut s.rising, false, "Falling");
+                ui.selectable_value(&mut s.rising, true, crate::lang::tr("Rising"));
+                ui.selectable_value(&mut s.rising, false, crate::lang::tr("Falling"));
             });
             if s.mode == 2 && crate::mapping::btn(ui, "Arm").clicked() {
                 s.armed = true;
@@ -444,18 +444,18 @@ impl App {
                 ui.spacing_mut().slider_width = 130.0;
                 ui.add(
                     egui::Slider::new(&mut s.level, -fs..=fs)
-                        .text("level")
+                        .text(crate::lang::tr("level"))
                         .custom_formatter(move |v, _| if cal_on { fmt_volts(v as f32) } else { format!("{v:+.3} FS") }),
                 )
-                .on_hover_text("Trigger level over the full range, also above or below the visible window");
+                .on_hover_text(crate::lang::tr("Trigger level over the full range, also above or below the visible window"));
             });
             let mut pct = s.pos * 100.0;
-            if ui.add(egui::DragValue::new(&mut pct).range(2.0..=98.0).suffix("%").prefix("pos ")).changed() {
+            if ui.add(egui::DragValue::new(&mut pct).range(2.0..=98.0).suffix("%").prefix(crate::lang::tr("pos "))).changed() {
                 s.pos = pct / 100.0;
             }
-            ui.add(egui::DragValue::new(&mut s.hyst).range(0.0..=20.0).speed(0.05).suffix("% hyst"));
-            ui.checkbox(&mut s.hf_reject, "HF reject").on_hover_text("Low-pass filter on the trigger signal only. The displayed trace is not filtered.");
-            ui.add_enabled(s.hf_reject, egui::DragValue::new(&mut s.hf_hz).range(100.0..=96000.0).speed(20.0).suffix(" Hz"));
+            ui.add(egui::DragValue::new(&mut s.hyst).range(0.0..=20.0).speed(0.05).suffix(crate::lang::tr("% hyst")));
+            ui.checkbox(&mut s.hf_reject, crate::lang::tr("HF reject")).on_hover_text(crate::lang::tr("Low-pass filter on the trigger signal only. The displayed trace is not filtered."));
+            ui.add_enabled(s.hf_reject, egui::DragValue::new(&mut s.hf_hz).range(100.0..=96000.0).speed(20.0).suffix(crate::lang::tr(" Hz")));
         });
 
         let sh = self.sh.clone();

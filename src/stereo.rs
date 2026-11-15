@@ -202,8 +202,8 @@ impl App {
             if icon_btn(ui, if single { Ico::Restore } else { Ico::Maximize }, if single { "Restore window size" } else { "Maximize window" }, single) {
                 self.max_req = Some(2);
             }
-            crate::windows::sticky_menu(ui, "Show", |ui| {
-                ui.label(RichText::new("What this window shows").small().weak());
+            crate::windows::sticky_menu(ui, crate::lang::tr("Show"), |ui| {
+                ui.label(RichText::new(crate::lang::tr("What this window shows")).small().weak());
                 for (k, name) in ["XY display (goniometer)", "Controls under the XY display", "Correlation meter", "Correlation history", "Correlation against frequency"].into_iter().enumerate() {
                     // (the order of the list is not the order of the flags: 0 xy, 4 controls, 1 meter, 2 history, 3 frequency)
                     let idx = [0, 4, 1, 2, 3][k];
@@ -297,24 +297,24 @@ impl App {
             return;
         }
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.stereo.auto, "Auto gain");
-            { let r = ui.add_enabled(!self.stereo.auto, egui::Slider::new(&mut self.stereo.gain_db, -20.0..=60.0).suffix(" dB")); crate::slider::reset(ui, &r, &mut self.stereo.gain_db, 0.0); }
+            ui.checkbox(&mut self.stereo.auto, crate::lang::tr("Auto gain"));
+            { let r = ui.add_enabled(!self.stereo.auto, egui::Slider::new(&mut self.stereo.gain_db, -20.0..=60.0).suffix(crate::lang::tr(" dB"))); crate::slider::reset(ui, &r, &mut self.stereo.gain_db, 0.0); }
         });
         ui.horizontal(|ui| {
             let r = ui.add_enabled(
                 !self.stereo.hold,
-                egui::Slider::new(&mut self.stereo.persist_ms, 5.0..=5000.0).logarithmic(true).suffix(" ms").text("Persist"),
+                egui::Slider::new(&mut self.stereo.persist_ms, 5.0..=5000.0).logarithmic(true).suffix(crate::lang::tr(" ms")).text(crate::lang::tr("Persist")),
             );
             crate::slider::reset(ui, &r, &mut self.stereo.persist_ms, 60.0);
         });
         ui.horizontal(|ui| {
-            { let r = ui.add(egui::Slider::new(&mut self.stereo.brightness, 0.1..=8.0).logarithmic(true).text("Brightness").custom_formatter(|v, _| format!("x{v:.2}"))); crate::slider::reset(ui, &r, &mut self.stereo.brightness, 1.0); }
-            if crate::mapping::small_btn(ui, "1x").on_hover_text("Default brightness").clicked() {
+            { let r = ui.add(egui::Slider::new(&mut self.stereo.brightness, 0.1..=8.0).logarithmic(true).text(crate::lang::tr("Brightness")).custom_formatter(|v, _| format!("x{v:.2}"))); crate::slider::reset(ui, &r, &mut self.stereo.brightness, 1.0); }
+            if crate::mapping::small_btn(ui, "1x").on_hover_text(crate::lang::tr("Default brightness")).clicked() {
                 self.stereo.brightness = 1.0;
             }
         });
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.stereo.hold, "Infinite");
+            ui.checkbox(&mut self.stereo.hold, crate::lang::tr("Infinite"));
             if crate::mapping::btn(ui, "Clear").clicked() {
                 self.stereo.clear = true;
             }

@@ -167,7 +167,7 @@ impl Tool for Octave {
             let combo = |ui: &mut Ui, id: &str, cur: &mut usize, items: &[&str], w: f32| {
                 egui::ComboBox::from_id_salt(id).width(w).selected_text(items[*cur]).show_ui(ui, |ui| {
                     for (i, t) in items.iter().enumerate() {
-                        ui.selectable_value(cur, i, *t);
+                        ui.selectable_value(cur, i, crate::lang::tr_s(t));
                     }
                 });
             };
@@ -177,15 +177,15 @@ impl Tool for Octave {
             combo(ui, "oct_t", &mut self.time, &TIMES, 96.0);
             ui.selectable_value(&mut self.ch, 0, RichText::new("L").color(crate::app::CH_COLORS[0]));
             ui.selectable_value(&mut self.ch, 1, RichText::new("R").color(crate::app::CH_COLORS[1]));
-            ui.checkbox(&mut self.hold, "Hold").on_hover_text("Keep peak markers (clear by switching off)");
-            ui.checkbox(&mut self.target, "Target").on_hover_text("Target curve: flat for pink noise, tilted for others");
-            ui.checkbox(&mut self.deviation, "Deviation").on_hover_text("Show level minus target");
+            ui.checkbox(&mut self.hold, crate::lang::tr("Hold")).on_hover_text(crate::lang::tr("Keep peak markers (clear by switching off)"));
+            ui.checkbox(&mut self.target, crate::lang::tr("Target")).on_hover_text(crate::lang::tr("Target curve: flat for pink noise, tilted for others"));
+            ui.checkbox(&mut self.deviation, crate::lang::tr("Deviation")).on_hover_text(crate::lang::tr("Show level minus target"));
         });
         if self.target {
             ui.horizontal(|ui| {
-                { let r = ui.add(egui::Slider::new(&mut self.tilt, -6.0..=6.0).text("tilt dB/oct").fixed_decimals(1)); crate::slider::reset(ui, &r, &mut self.tilt, 0.0); }
-                { let r = ui.add(egui::Slider::new(&mut self.target_db, -120.0..=0.0).text("at 1 kHz").fixed_decimals(0)); crate::slider::reset(ui, &r, &mut self.target_db, -30.0); }
-                if crate::mapping::btn(ui, "Fit").on_hover_text("Set the target level to the mean band level").clicked() && !self.level.is_empty() {
+                { let r = ui.add(egui::Slider::new(&mut self.tilt, -6.0..=6.0).text(crate::lang::tr("tilt dB/oct")).fixed_decimals(1)); crate::slider::reset(ui, &r, &mut self.tilt, 0.0); }
+                { let r = ui.add(egui::Slider::new(&mut self.target_db, -120.0..=0.0).text(crate::lang::tr("at 1 kHz")).fixed_decimals(0)); crate::slider::reset(ui, &r, &mut self.target_db, -30.0); }
+                if crate::mapping::btn(ui, "Fit").on_hover_text(crate::lang::tr("Set the target level to the mean band level")).clicked() && !self.level.is_empty() {
                     let mean: f32 = self.level.iter().enumerate().map(|(i, l)| l - self.tilt * (self.bands[i].fc / 1000.0).log2()).sum::<f32>() / self.level.len() as f32;
                     self.target_db = mean;
                 }
@@ -195,8 +195,8 @@ impl Tool for Octave {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Total {:.1} {}{}", self.total + off, cx.unit_name, ["", "(A)", "(C)"][self.weight])).monospace());
             if !self.deviation {
-                ui.add(egui::DragValue::new(&mut self.y_lo).speed(0.5).range(-200.0..=self.y_hi - 10.0).prefix("min "));
-                ui.add(egui::DragValue::new(&mut self.y_hi).speed(0.5).range(self.y_lo + 10.0..=40.0).prefix("max "));
+                ui.add(egui::DragValue::new(&mut self.y_lo).speed(0.5).range(-200.0..=self.y_hi - 10.0).prefix(crate::lang::tr("min ")));
+                ui.add(egui::DragValue::new(&mut self.y_hi).speed(0.5).range(self.y_lo + 10.0..=40.0).prefix(crate::lang::tr("max ")));
             }
         });
 

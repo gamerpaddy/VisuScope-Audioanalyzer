@@ -242,6 +242,11 @@ pub fn wants_wide(i: usize) -> bool {
     i >= BUILTIN && tools::INFO[i - BUILTIN].short == "Timeline"
 }
 
+/// Height of the strip for the wide windows: its share of the height, between 28 % and 55 %, and never taller than wide.
+fn strip_height(inner: Rect, ww: f32, wr: f32) -> f32 {
+    (inner.height() * ww / (ww + wr)).clamp(inner.height() * 0.28, inner.height() * 0.55).min(inner.width() / 1.6).max(40.0_f32.min(inner.height() * 0.5))
+}
+
 /// The arrangement auto tiling produces. Wide windows (the timeline) get a full-width strip at the bottom,
 /// wider than tall whenever the area allows it; the rest is a weighted treemap, so the heaviest window
 /// (the routing graph) gets the most room. Gaps of `gap` between windows.
@@ -254,8 +259,7 @@ pub fn tile_rects(items: &[(usize, f32)], area: Rect, gap: f32) -> Vec<(usize, R
         return out;
     }
     let (ww, wr): (f32, f32) = (wide.iter().map(|w| w.1).sum(), rest.iter().map(|w| w.1).sum());
-    // the strip takes its share of the height but stays between 28 % and 55 %, and never taller than wide
-    let h = (inner.height() * ww / (ww + wr)).clamp(inner.height() * 0.28, inner.height() * 0.55).min(inner.width() / 1.6).max(40.0_f32.min(inner.height() * 0.5));
+    let h = strip_height(inner, ww, wr);
     let strip = Rect::from_min_max(pos2(inner.min.x, inner.max.y - h), inner.max);
     let upper = Rect::from_min_max(inner.min, pos2(inner.max.x, inner.max.y - h - gap));
     split_rects(&rest, upper, gap, &mut out);
@@ -327,6 +331,10 @@ fn arrange_like(cur: &[(usize, Rect)], area: Rect, gap: f32, out: &mut Vec<(usiz
 
 impl App {
     pub fn win_title(&self, i: usize) -> &'static str {
+        crate::lang::tr(self.win_title_en(i))
+    }
+
+    fn win_title_en(&self, i: usize) -> &'static str {
         match i {
             0 => "Spectrum",
             1 => {
@@ -353,13 +361,44 @@ impl App {
         if items.is_empty() {
             return;
         }
+        // Wide windows (the timeline) always get a full-width strip, whatever the arrangement was: at the top when they were
+        // above the others, else at the bottom, as tall as the user had them when they were a strip already.
+        let inner = area.shrink(GAP);
+        let (wide, rest): (Vec<(usize, f32)>, Vec<(usize, f32)>) = items.iter().copied().partition(|(i, _)| wants_wide(*i));
+        let mut placed: Vec<(usize, Rect)> = Vec::new();
+        let rest_area = if wide.is_empty() || rest.is_empty() {
+            inner
+        } else {
+            let (ww, wr): (f32, f32) = (wide.iter().map(|w| w.1).sum(), rest.iter().map(|w| w.1).sum());
+            let mut h = strip_height(inner, ww, wr);
+            let wr_now: Vec<Rect> = wide.iter().filter_map(|&(i, _)| self.wins[i].rect).collect();
+            let rr_now: Vec<Rect> = rest.iter().filter_map(|&(i, _)| self.wins[i].rect).collect();
+            if let Some(r) = wr_now.first().filter(|r| r.width() >= inner.width() * 0.7 && r.width() >= r.height() * 1.6) {
+                h = r.height().clamp(inner.height() * 0.2, inner.height() * 0.7);
+            }
+            let mean = |v: &[Rect]| v.iter().map(|r| r.center().y).sum::<f32>() / v.len().max(1) as f32;
+            let top = !wr_now.is_empty() && !rr_now.is_empty() && mean(&wr_now) < mean(&rr_now);
+            let (strip, other) = if top {
+                (Rect::from_min_max(inner.min, pos2(inner.max.x, inner.min.y + h)), Rect::from_min_max(pos2(inner.min.x, inner.min.y + h + GAP), inner.max))
+            } else {
+                (Rect::from_min_max(pos2(inner.min.x, inner.max.y - h), inner.max), Rect::from_min_max(inner.min, pos2(inner.max.x, inner.max.y - h - GAP)))
+            };
+            // several wide windows are stacked, never side by side
+            let n = wide.len() as f32;
+            let each = (strip.height() - GAP * (n - 1.0)) / n;
+            for (k, &(i, _)) in wide.iter().enumerate() {
+                placed.push((i, Rect::from_min_size(pos2(strip.min.x, strip.min.y + k as f32 * (each + GAP)), vec2(strip.width(), each))));
+            }
+            other
+        };
+        let items: Vec<(usize, f32)> = if placed.is_empty() { items } else { rest };
         // keep the arrangement: the windows stay where they are relative to each other (the spectrum left of the scope stays
         // left of it), only moved and scaled to fill the area. A window that is new takes half of the biggest one.
         let mut cur: Vec<(usize, Rect)> = items.iter().filter_map(|&(i, _)| self.wins[i].rect.map(|r| (i, r))).collect();
         let fresh: Vec<usize> = items.iter().map(|x| x.0).filter(|i| self.wins[*i].rect.is_none()).collect();
         let known = cur.len();
-        let placed: Vec<(usize, Rect)> = if known == 0 || !cur.iter().all(|(_, r)| r.is_positive() && r.width() > 20.0 && r.height() > 20.0) {
-            tile_rects(&items, area, GAP)
+        if known == 0 || !cur.iter().all(|(_, r)| r.is_positive() && r.width() > 20.0 && r.height() > 20.0) {
+            split_rects(&items, rest_area, GAP, &mut placed);
         } else {
             for i in fresh {
                 if let Some(k) = (0..cur.len()).max_by(|&a, &b| (cur[a].1.width() * cur[a].1.height()).total_cmp(&(cur[b].1.width() * cur[b].1.height()))) {
@@ -373,10 +412,14 @@ impl App {
                     cur.push((i, b));
                 }
             }
-            let mut out = Vec::new();
-            arrange_like(&cur, area.shrink(GAP), GAP, &mut out);
-            out
-        };
+            arrange_like(&cur, rest_area, GAP, &mut placed);
+            // a sliver (far taller than wide, or far wider than tall) means the kept arrangement no longer fits: tile afresh
+            let n0 = placed.len() - cur.len();
+            if placed[n0..].iter().any(|(_, r)| r.width() < 120.0 || r.height() < 80.0 || r.height() > r.width() * 4.0) {
+                placed.truncate(n0);
+                split_rects(&items, rest_area, GAP, &mut placed);
+            }
+        }
         for (i, r) in placed {
             if self.prof {
                 eprintln!("tile {i} {}: {:?}", self.win_title(i), r);
@@ -433,6 +476,10 @@ impl App {
 
     /// Contents of window `i` (shared by the floating window and the pop-out viewport).
     fn window_content(&mut self, ui: &mut Ui, i: usize) {
+        // the windows are dark inside in both themes: their plots and colours are made for a dark ground
+        if self.light {
+            *ui.visuals_mut() = egui::Visuals::dark();
+        }
         match i {
             0 => {
                 self.window_settings(ui, 0);
@@ -989,24 +1036,24 @@ impl App {
                     self.input_menu(ui);
                     ui.separator();
                 }
-                ui.label(egui::RichText::new("Windows").weak());
+                ui.label(egui::RichText::new(crate::lang::tr("Windows")).weak());
                 for i in 0..BUILTIN {
                     let mut o = self.wins[i].open;
-                    if ui.toggle_value(&mut o, win_short(i)).on_hover_text("Show / hide this window").changed() {
+                    if ui.toggle_value(&mut o, crate::lang::tr(win_short(i))).on_hover_text(crate::lang::tr("Show / hide this window")).changed() {
                         self.wins[i].open = o;
                     }
                 }
                 if let Some(k) = (0..TOOL_COUNT).find(|&k| tools::INFO[k].short == "Timeline") {
                     let i = BUILTIN + k;
                     let mut o = self.wins[i].open;
-                    if ui.toggle_value(&mut o, egui::RichText::new("Timeline").strong()).on_hover_text(tools::INFO[k].tip).changed() {
+                    if ui.toggle_value(&mut o, egui::RichText::new(crate::lang::tr("Timeline")).strong()).on_hover_text(crate::lang::tr(tools::INFO[k].tip)).changed() {
                         self.wins[i].open = o;
                     }
                 }
                 if self.graph_on {
                     let i = BUILTIN + tools::ROUTING;
                     let mut o = self.wins[i].open;
-                    if ui.toggle_value(&mut o, egui::RichText::new("Routing").strong()).on_hover_text(tools::INFO[tools::ROUTING].tip).changed() {
+                    if ui.toggle_value(&mut o, egui::RichText::new(crate::lang::tr("Routing")).strong()).on_hover_text(crate::lang::tr(tools::INFO[tools::ROUTING].tip)).changed() {
                         self.wins[i].open = o;
                     }
                 }
@@ -1035,14 +1082,14 @@ impl App {
                 self.layouts_menu(ui);
                 self.snapshots_menu(ui);
                 ui.separator();
-                let tb = crate::mapping::btn(ui, "Tile").on_hover_text("Fill the area without gaps; visual windows get the most space");
+                let tb = crate::mapping::btn(ui, "Tile").on_hover_text(crate::lang::tr("Fill the area without gaps; visual windows get the most space"));
                 crate::mapping::button_menu(&tb, &crate::mapping::Target::toggle("tile", "Tile the windows", false));
                 if tb.clicked() {
                     self.need_tile = true;
                 }
-                ui.checkbox(&mut self.auto_tile, "Auto").on_hover_text("Re-tile automatically when a window is opened or closed");
-                ui.checkbox(&mut self.snap_on, "Snap").on_hover_text("Windows snap to each other and dock against the edges.\nCtrl while dragging: free. Alt while resizing: do not move neighbours.");
-                if crate::mapping::btn(ui, "Reset layout").on_hover_text("Default windows, tiled").clicked() {
+                ui.checkbox(&mut self.auto_tile, crate::lang::tr("Auto")).on_hover_text(crate::lang::tr("Re-tile automatically when a window is opened or closed"));
+                ui.checkbox(&mut self.snap_on, crate::lang::tr("Snap")).on_hover_text(crate::lang::tr("Windows snap to each other and dock against the edges.\nCtrl while dragging: free. Alt while resizing: do not move neighbours."));
+                if crate::mapping::btn(ui, "Reset layout").on_hover_text(crate::lang::tr("Default windows, tiled")).clicked() {
                     for i in 0..WIN_COUNT {
                         self.wins[i] = WinState::new(i);
                         self.popped[i] = false;
@@ -1050,20 +1097,20 @@ impl App {
                     self.need_tile = true;
                 }
                 ui.separator();
-                let lbl = if self.p.paused { "Resume" } else { "Freeze" };
-                let fb = ui.selectable_label(self.p.paused, lbl).on_hover_text("Freeze the analysis");
+                let lbl = crate::lang::tr(if self.p.paused { "Resume" } else { "Freeze" });
+                let fb = ui.selectable_label(self.p.paused, lbl).on_hover_text(crate::lang::tr("Freeze the analysis"));
                 crate::mapping::button_menu(&fb, &crate::mapping::Target::toggle("freeze", "Freeze / resume the analysis", true));
                 if fb.clicked() {
                     self.p.paused = !self.p.paused;
                 }
-                if crate::mapping::btn(ui, "Options").on_hover_text("Frame rate, window behaviour, folders ...").clicked() {
+                if crate::mapping::btn(ui, "Options").on_hover_text(crate::lang::tr("Frame rate, window behaviour, folders ...")).clicked() {
                     self.opts_open = !self.opts_open;
                 }
                 });
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let on = self.assist.open;
-                    if ui.selectable_label(on, egui::RichText::new("Assistant").strong()).on_hover_text("Describe what you want to measure and it sets up the input, windows and settings (and can start the measurement)").clicked() {
+                    if ui.selectable_label(on, egui::RichText::new(crate::lang::tr("Assistant")).strong()).on_hover_text(crate::lang::tr("Describe what you want to measure and it sets up the input, windows and settings (and can start the measurement)")).clicked() {
                         self.assist.open = !on;
                     }
                     ui.label(egui::RichText::new(format!("v{}", crate::VERSION)).small().weak()).on_hover_text(format!("VisuScope {}", crate::VERSION_FULL));
@@ -1092,7 +1139,7 @@ impl App {
                     ui.add(egui::Label::new(egui::RichText::new(format!("{status}   xruns {xr}")).small()).truncate());
                 });
                 if self.sh.feeding_silence.load(std::sync::atomic::Ordering::Relaxed) {
-                    ui.label(egui::RichText::new("no audio from device (silent loopback or stalled stream) - showing silence").small().color(egui::Color32::from_rgb(255, 190, 80)));
+                    ui.label(egui::RichText::new(crate::lang::tr("no audio from device (silent loopback or stalled stream) - showing silence")).small().color(egui::Color32::from_rgb(255, 190, 80)));
                 }
                 ui.separator();
                 // the alarms and recording messages of the tools share one box of constant size
@@ -1107,7 +1154,7 @@ impl App {
                     None => "In to out delay -".to_string(),
                 };
                 cell(ui, 140.0, &mut |ui| {
-                    ui.add(egui::Label::new(egui::RichText::new(&delay).small()).truncate()).on_hover_text("From the input device to the output device: buffers, the engine block, the output cushion, the safety buffer and what the nodes add (shifter, phase ...)");
+                    ui.add(egui::Label::new(egui::RichText::new(&delay).small()).truncate()).on_hover_text(crate::lang::tr("From the input device to the output device: buffers, the engine block, the output cushion, the safety buffer and what the nodes add (shifter, phase ...)"));
                 });
                 ui.separator();
                 let perf = format!("UI {:.0} fps ({:.1} ms)   DSP {:.0} fps ({:.2} ms)", self.ui_fps, self.ms[WIN_COUNT], self.an.dsp_fps, self.an.dsp_ms);

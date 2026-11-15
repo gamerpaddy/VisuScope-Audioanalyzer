@@ -12,6 +12,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 pub mod decode;
+pub mod devtests;
 pub mod distortion;
 pub mod daw;
 pub mod dialogs;
@@ -31,6 +32,7 @@ pub mod reference;
 pub mod response;
 pub mod room;
 pub mod stats;
+pub mod speaker;
 pub mod spl;
 pub mod sequence;
 pub mod sweep;
@@ -41,7 +43,7 @@ pub mod ts;
 pub mod transfer;
 pub mod wavio;
 
-pub const TOOL_COUNT: usize = 20;
+pub const TOOL_COUNT: usize = 22;
 /// Index of the routing graph's window in `INFO` (it only exists while the graph is switched on).
 pub const ROUTING: usize = 15;
 
@@ -75,13 +77,15 @@ pub const INFO: [ToolInfo; TOOL_COUNT] = [
     ToolInfo { short: "Null test", title: "Null test (difference of two signals)", weight: 2.4, tip: "Line up two signals (input channels or files), subtract them and see and hear what is left" },
     ToolInfo { short: "Traces", title: "Traces (stored curves)", weight: 2.0, tip: "The stored frequency response curves of the measurement windows: show, hide, colour, name, compare against one, average, save and load" },
     ToolInfo { short: "Impedance", title: "Impedance measurement", weight: 2.4, tip: "Impedance and phase of a speaker, headphone or any device through a known series resistor, with calibration, stored measurements and overlays" },
+    ToolInfo { short: "Speaker", title: "Speaker design", weight: 2.4, tip: "Box simulation from the Thiele-Small parameters, crossover design from stored traces, near-field / far-field merge and polar / directivity plots" },
+    ToolInfo { short: "Tests", title: "Device tests", weight: 2.0, tip: "Crosstalk and channel matching, wow and flutter, multitone distortion" },
 ];
 
 /// How the Tools menu groups the tools (indices into `INFO`).
 pub const GROUPS: [(&str, &[usize]); 4] = [
-    ("Measure", &[1, 2, 10, 19, 9, 4]),
+    ("Measure", &[1, 2, 10, 19, 21, 9, 4]),
     ("Analyse", &[0, 3, 5, 8, 7, 17, 16, 18]),
-    ("Test & design", &[11, 13]),
+    ("Test & design", &[11, 13, 20]),
     ("Record & report", &[14, 15, 6, 12]),
 ];
 
@@ -107,6 +111,8 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(nulltest::NullTest::new()),
         Box::new(tracewin::TraceWin::new()),
         Box::new(impedance::Impedance::new()),
+        Box::new(speaker::Speaker::new()),
+        Box::new(devtests::DevTests::new()),
     ];
     debug_assert_eq!(v.len(), TOOL_COUNT);
     v
@@ -130,6 +136,8 @@ pub struct GenCmd {
     /// both channels
     pub level_db: Option<f32>,
     pub on: Option<bool>,
+    /// mute the left / the right channel of the generator
+    pub mute: Option<[bool; 2]>,
 }
 
 /// A measurement report to create.
@@ -196,6 +204,7 @@ pub struct SpecOverlay<'a> {
 }
 
 pub trait Tool {
+    fn shutdown(&mut self, _cx: &mut Ctx) {}
     /// Called every frame, also while the window is closed (`visible == false`).
     fn update(&mut self, _cx: &mut Ctx, _visible: bool) {}
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx);

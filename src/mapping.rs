@@ -92,8 +92,8 @@ pub struct ActionDef {
 }
 
 pub fn actions() -> Vec<ActionDef> {
-    let b = |id: &str, label: &str, group: &'static str| ActionDef { id: id.into(), label: label.into(), group, slider: None };
-    let s = |id: &str, label: &str, group: &'static str, min: f32, max: f32, log: bool, unit: &'static str| ActionDef { id: id.into(), label: label.into(), group, slider: Some((min, max, log, unit)) };
+    let b = |id: &str, label: &str, group: &'static str| ActionDef { id: id.into(), label: crate::lang::tr_s(label), group, slider: None };
+    let s = |id: &str, label: &str, group: &'static str, min: f32, max: f32, log: bool, unit: &'static str| ActionDef { id: id.into(), label: crate::lang::tr_s(label), group, slider: Some((min, max, log, unit)) };
     let mut v = vec![
         b("freeze", "Freeze / resume the analysis", "Analysis"),
         b("reset_minmax", "Reset average / max / min", "Analysis"),
@@ -124,6 +124,9 @@ pub fn actions() -> Vec<ActionDef> {
     ];
     for k in 1..=9 {
         v.push(b(&format!("layout_{k}"), &format!("Layout {k}"), "Layouts"));
+    }
+    for (n, _) in crate::serial::cfg().cmds {
+        v.push(b(&format!("serial:{n}"), &format!("Serial: {n}"), "Serial"));
     }
     for i in 0..crate::windows::WIN_COUNT {
         let n = crate::windows::win_short(i);
@@ -204,7 +207,7 @@ pub struct LearnMeta {
 /// The entries "Input binding" of the right-click menu of a control: bind, range or mode, remove.
 pub fn bind_menu(ui: &mut eframe::egui::Ui, t: &Target) {
     use eframe::egui::{self, RichText};
-    ui.label(RichText::new("Input binding").small().weak());
+    ui.label(RichText::new(crate::lang::tr("Input binding")).small().weak());
     let snap = SNAP.lock().as_ref().and_then(|m| m.get(&t.id).cloned());
     if let Some(s) = &snap {
         ui.label(RichText::new(&s.src).small().monospace());
@@ -222,21 +225,21 @@ pub fn bind_menu(ui: &mut eframe::egui::Ui, t: &Target) {
         match &t.kind {
             TKind::Slider { min, max, unit, .. } => {
                 ui.horizontal(|ui| {
-                    ui.label("Lowest / button off");
+                    ui.label(crate::lang::tr("Lowest / button off"));
                     ch |= ui.add(egui::DragValue::new(&mut s.min).range(*min..=*max).speed((max - min) * 0.002).suffix(*unit)).changed();
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Highest / button on");
+                    ui.label(crate::lang::tr("Highest / button on"));
                     ch |= ui.add(egui::DragValue::new(&mut s.max).range(*min..=*max).speed((max - min) * 0.002).suffix(*unit)).changed();
                 });
-                ch |= ui.checkbox(&mut s.invert, "Reversed").changed();
+                ch |= ui.checkbox(&mut s.invert, crate::lang::tr("Reversed")).changed();
             }
             TKind::Toggle { stateful: true } => {
-                ch |= ui.radio_value(&mut s.momentary, false, "Toggle: each press switches").changed();
-                ch |= ui.radio_value(&mut s.momentary, true, "Momentary: on while held").changed();
+                ch |= ui.radio_value(&mut s.momentary, false, crate::lang::tr("Toggle: each press switches")).changed();
+                ch |= ui.radio_value(&mut s.momentary, true, crate::lang::tr("Momentary: on while held")).changed();
                 // (a setting of a node: the other way round, off while held)
                 if t.id.starts_with("nodet:") && s.momentary {
-                    ch |= ui.checkbox(&mut s.invert, "Inverted: off while held, on when let go").changed();
+                    ch |= ui.checkbox(&mut s.invert, crate::lang::tr("Inverted: off while held, on when let go")).changed();
                 }
             }
             TKind::Toggle { stateful: false } => {}
@@ -244,7 +247,7 @@ pub fn bind_menu(ui: &mut eframe::egui::Ui, t: &Target) {
         if ch {
             REQS.lock().push(Req::Edit { id: t.id.clone(), min: s.min, max: s.max, invert: s.invert, momentary: s.momentary });
         }
-        if ui.button("Remove binding").clicked() {
+        if ui.button(crate::lang::tr("Remove binding")).clicked() {
             REQS.lock().push(Req::Clear(t.id.clone()));
             ui.close();
         }
@@ -295,7 +298,10 @@ pub fn attach(mut r: eframe::egui::Response, label: &str) -> eframe::egui::Respo
 pub fn btn(ui: &mut eframe::egui::Ui, text: impl Into<eframe::egui::WidgetText>) -> eframe::egui::Response {
     let text = text.into();
     let label = text.text().to_string();
-    let r = ui.button(text);
+    let r = match crate::lang::lookup(&label) {
+        Some(t) => ui.button(t),
+        None => ui.button(text),
+    };
     attach(r, &label)
 }
 
@@ -303,7 +309,10 @@ pub fn btn(ui: &mut eframe::egui::Ui, text: impl Into<eframe::egui::WidgetText>)
 pub fn small_btn(ui: &mut eframe::egui::Ui, text: impl Into<eframe::egui::WidgetText>) -> eframe::egui::Response {
     let text = text.into();
     let label = text.text().to_string();
-    let r = ui.small_button(text);
+    let r = match crate::lang::lookup(&label) {
+        Some(t) => ui.small_button(t),
+        None => ui.small_button(text),
+    };
     attach(r, &label)
 }
 

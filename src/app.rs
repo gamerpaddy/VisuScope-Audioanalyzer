@@ -168,6 +168,8 @@ pub struct App {
     pub ui_fps: f32,
     pub fps_cap: f32,
     /// size of the whole interface (text and widgets): 1.0 = normal, for high-resolution screens
+    /// light menus, panels and window frames (the plots stay dark)
+    pub light: bool,
     pub ui_scale: f32,
     /// the size chosen in Options but not applied yet (applying changes the size of the slider itself)
     pub ui_scale_edit: Option<f32>,
@@ -279,7 +281,14 @@ pub fn is_not_finite(v: &str) -> bool {
     s.starts_with("nan") || s.starts_with("inf")
 }
 
-fn settings_path() -> std::path::PathBuf {
+/// Bring the keys of an older settings file to the meaning they have now. Every step is one `if ver < n`.
+fn migrate_settings<'a>(ver: u32, m: std::collections::HashMap<&'a str, &'a str>) -> std::collections::HashMap<&'a str, &'a str> {
+    // version 1 is the first with a number: nothing to change yet
+    let _ = ver;
+    m
+}
+
+pub fn settings_path() -> std::path::PathBuf {
     let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
     base.join("visuscope").join("settings.txt")
 }
@@ -414,6 +423,7 @@ impl App {
             frames: 0,
             ui_fps: 0.0,
             fps_cap: 60.0,
+            light: std::env::var_os("VISUSCOPE_LIGHT").is_some(),
             ui_scale: 1.0,
             ui_scale_edit: None,
             map: crate::mapping::Mapper::load(),
@@ -481,6 +491,8 @@ impl App {
         let mut kv = |k: &str, v: &dyn std::fmt::Display| {
             let _ = writeln!(s, "{k}={v}");
         };
+        // the version of this file's format: a later version that changes a key reads it to carry old files over
+        kv("settings_ver", &1);
         if let Some(d) = self.devices.get(self.sel_dev) {
             kv("device", &d.id);
         }
@@ -531,6 +543,8 @@ impl App {
         kv("readout_hz", &self.readout_hz);
         kv("fps_cap", &self.fps_cap);
         kv("ui_scale", &self.ui_scale);
+        kv("light", &self.light);
+        kv("lang", &crate::lang::current());
         kv("import_at_start", &self.import_at_start);
         kv("snap_peak", &self.snap_peak);
         kv("spec_density", &self.spec_density);
@@ -597,6 +611,9 @@ impl App {
             // a number that is NaN or infinite (a damaged file) is treated as missing: it would poison every calculation
             m.get(k).filter(|v| !is_not_finite(v)).and_then(|v| v.trim().parse().ok())
         }
+        // the version that wrote the file (0 = before versions were written): changes of meaning between versions go here
+        let ver = get::<u32>(&m, "settings_ver").unwrap_or(0);
+        let m = migrate_settings(ver, m);
         if let Some(id) = m.get("device") {
             if let Some(i) = self.devices.iter().position(|d| d.id == *id) {
                 self.sel_dev = i;
@@ -726,6 +743,12 @@ impl App {
             self.readout_hz = v.clamp(0.5, 10.0);
         }
         set!(self.import_at_start, "import_at_start");
+        if let Some(v) = std::env::var("VISUSCOPE_LANG").ok().or_else(|| m.get("lang").map(|v| v.trim().to_string())) {
+            crate::lang::set(&v);
+        }
+        if let Some(v) = get::<bool>(&m, "light") {
+            self.light = v;
+        }
         if let Some(v) = get::<f32>(&m, "ui_scale") {
             self.ui_scale = v.clamp(0.7, 3.0);
         }
@@ -857,7 +880,7 @@ impl App {
             return;
         }
         // screenshot and test runs must not change the user's settings
-        if self.shot_env.is_some() || std::env::var_os("VISUSCOPE_GRAPH").is_some() || std::env::var_os("VISUSCOPE_LAYOUT").is_some() {
+        if self.shot_env.is_some() || std::env::var_os("VISUSCOPE_GRAPH").is_some() || std::env::var_os("VISUSCOPE_LAYOUT").is_some() || std::env::var_os("VISUSCOPE_LATENCY_TEST").is_some() {
             return;
         }
         let s = self.settings_string();
@@ -1298,7 +1321,7 @@ impl App {
     }
 
     pub fn calibration_ui(&mut self, ui: &mut Ui) {
-        ui.heading("Voltage calibration");
+        ui.heading(crate::lang::tr("Voltage calibration"));
         if self.cal.on {
             for c in 0..2 {
                 let vpk = self.cal.vpk[c];
@@ -1308,10 +1331,10 @@ impl App {
                 ui.label(RichText::new(format!("{}: 0 dBFS = {} pk = {} rms ({dbv:+.2} dBV, {dbu:+.2} dBu)", ["L", "R"][c], fmt_volts(vpk), fmt_volts(vrms))).small());
             }
         } else {
-            ui.label(RichText::new("Not calibrated - showing dBFS / full-scale units").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Not calibrated - showing dBFS / full-scale units")).small().weak());
         }
         ui.horizontal(|ui| {
-            ui.label("Display unit");
+            ui.label(crate::lang::tr("Display unit"));
             let mut u = self.unit;
             ui.add_enabled_ui(self.cal.on, |ui| {
                 egui::ComboBox::from_id_salt("unit").width(70.0).selected_text(self.unit_name()).show_ui(ui, |ui| {
@@ -1325,13 +1348,13 @@ impl App {
             }
         });
 
-        ui.label(RichText::new("Know your converter's full scale? 0 dBFS equals:").small());
+        ui.label(RichText::new(crate::lang::tr("Know your converter's full scale? 0 dBFS equals:")).small());
         let mut apply: Option<[bool; 2]> = None;
         ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut self.cal.entry_val).speed(0.01));
             egui::ComboBox::from_id_salt("entryunit").width(60.0).selected_text(["Vpk", "Vrms", "dBV", "dBu"][self.cal.entry_unit as usize]).show_ui(ui, |ui| {
                 for (i, n) in ["Vpk", "Vrms", "dBV", "dBu"].iter().enumerate() {
-                    ui.selectable_value(&mut self.cal.entry_unit, i as u8, *n);
+                    ui.selectable_value(&mut self.cal.entry_unit, i as u8, crate::lang::tr(*n));
                 }
             });
             if crate::mapping::small_btn(ui, "L").clicked() {
@@ -1351,13 +1374,13 @@ impl App {
             }
         }
 
-        ui.label(RichText::new("Or apply a known sine / signal and calibrate:").small());
+        ui.label(RichText::new(crate::lang::tr("Or apply a known sine / signal and calibrate:")).small());
         let mut cal_mask: Option<[bool; 2]> = None;
         ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut self.cal.ref_vrms).speed(0.005).range(1e-6..=1000.0).suffix(" Vrms"));
+            ui.add(egui::DragValue::new(&mut self.cal.ref_vrms).speed(0.005).range(1e-6..=1000.0).suffix(crate::lang::tr(" Vrms")));
             egui::ComboBox::from_id_salt("calmethod").width(78.0).selected_text(["Tone", "Wideband"][self.cal.method as usize]).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.cal.method, 0, "Tone (fundamental)");
-                ui.selectable_value(&mut self.cal.method, 1, "Wideband (RMS)");
+                ui.selectable_value(&mut self.cal.method, 0, crate::lang::tr("Tone (fundamental)"));
+                ui.selectable_value(&mut self.cal.method, 1, crate::lang::tr("Wideband (RMS)"));
             });
         });
         ui.horizontal(|ui| {
@@ -1391,64 +1414,64 @@ impl App {
                 self.note = "Calibrated from measurement".into();
             }
         }
-        ui.label(RichText::new("Tone mode uses the detected fundamental (sine). Wideband uses the time-domain RMS (any waveform).").small().weak());
+        ui.label(RichText::new(crate::lang::tr("Tone mode uses the detected fundamental (sine). Wideband uses the time-domain RMS (any waveform).")).small().weak());
     }
 
     pub fn measurements_ui(&mut self, ui: &mut Ui) {
         let m = self.sm_metrics[self.meas_ch];
         let ch = self.meas_ch;
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.readout_hz, 0.5..=10.0).text("readout Hz"));
-            ui.checkbox(&mut self.readout_hold, "Hold");
+            ui.add(egui::Slider::new(&mut self.readout_hz, 0.5..=10.0).text(crate::lang::tr("readout Hz")));
+            ui.checkbox(&mut self.readout_hold, crate::lang::tr("Hold"));
         });
         ui.heading(format!("Measurements ({})", if ch == 0 { "Left" } else { "Right" }));
         if !m.valid {
-            ui.label(RichText::new("No tone detected (need a signal above -110 dBFS)").weak());
+            ui.label(RichText::new(crate::lang::tr("No tone detected (need a signal above -110 dBFS)")).weak());
         }
         let col = if m.valid { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
         let big = |t: String| RichText::new(t).size(20.0).strong().color(col);
         egui::Grid::new("meas").num_columns(2).spacing([14.0, 2.0]).show(ui, |ui| {
-            ui.label("Fundamental");
+            ui.label(crate::lang::tr("Fundamental"));
             ui.label(RichText::new(format!("{} @ {:.1} dBFS", fmt_hz(m.fund_hz), m.fund_dbfs)).color(col));
             ui.end_row();
-            ui.label("THD+N");
+            ui.label(crate::lang::tr("THD+N"));
             ui.label(big(format!("{:.2} dB  ({})", m.thdn_db, fmt_pct(m.thdn_db))));
             ui.end_row();
-            ui.label("THD");
+            ui.label(crate::lang::tr("THD"));
             ui.label(RichText::new(format!("{:.2} dB  ({})", m.thd_db, fmt_pct(m.thd_db))).color(col));
             ui.end_row();
-            ui.label("SINAD");
+            ui.label(crate::lang::tr("SINAD"));
             ui.label(RichText::new(format!("{:.2} dB", m.sinad_db)).color(col));
             ui.end_row();
-            ui.label("SNR");
+            ui.label(crate::lang::tr("SNR"));
             ui.label(RichText::new(format!("{:.2} dB", m.snr_db)).color(col));
             ui.end_row();
-            ui.label("ENOB");
+            ui.label(crate::lang::tr("ENOB"));
             ui.label(big(format!("{:.2} bits", m.enob)));
             ui.end_row();
-            ui.label("ENOB (FS-ref)");
+            ui.label(crate::lang::tr("ENOB (FS-ref)"));
             ui.label(RichText::new(format!("{:.2} bits", m.enob_fs)).color(col));
             ui.end_row();
-            ui.label("SFDR");
+            ui.label(crate::lang::tr("SFDR"));
             ui.label(RichText::new(format!("{:.1} dBc", m.sfdr_db)).color(col));
             ui.end_row();
-            ui.label("Noise floor");
+            ui.label(crate::lang::tr("Noise floor"));
             ui.label(RichText::new(format!("{:.1} dBFS/bin", m.noise_floor_dbfs)).color(col));
             ui.end_row();
-            ui.label("RMS / Peak");
+            ui.label(crate::lang::tr("RMS / Peak"));
             ui.label(format!("{:.1} / {:.1} dBFS", self.sm_rms[ch], self.sm_peak[ch]));
             ui.end_row();
             if self.cal.on {
                 let vs = self.cal.vpk[ch];
                 let a = 10f32.powf(m.fund_dbfs / 20.0) * vs;
-                ui.label("Fund (voltage)");
+                ui.label(crate::lang::tr("Fund (voltage)"));
                 ui.label(RichText::new(format!("{} rms  ({} pk)", fmt_volts(a / std::f32::consts::SQRT_2), fmt_volts(a))).color(col));
                 ui.end_row();
-                ui.label("RMS / Peak (V)");
+                ui.label(crate::lang::tr("RMS / Peak (V)"));
                 ui.label(format!("{} / {}", fmt_volts(10f32.powf(self.sm_rms[ch] / 20.0) * vs), fmt_volts(10f32.powf(self.sm_peak[ch] / 20.0) * vs)));
                 ui.end_row();
             }
-            ui.label("Crest / DC");
+            ui.label(crate::lang::tr("Crest / DC"));
             ui.label(format!("{:.1} dB / {:+.5}", self.sm_peak[ch] - self.sm_rms[ch] - 3.01, self.sm_dc[ch]));
             ui.end_row();
         });
@@ -1473,15 +1496,15 @@ impl App {
     }
 
     pub fn cursors_ui(&mut self, ui: &mut Ui) {
-        ui.heading("Cursors");
+        ui.heading(crate::lang::tr("Cursors"));
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.snap_peak, "Peak level correction").on_hover_text("Read the true level of a peak between two bins (undoes the loss of the window). Shift+click puts a cursor on the nearest peak; a plain click puts it exactly where you click.");
+            ui.checkbox(&mut self.snap_peak, crate::lang::tr("Peak level correction")).on_hover_text(crate::lang::tr("Read the true level of a peak between two bins (undoes the loss of the window). Shift+click puts a cursor on the nearest peak; a plain click puts it exactly where you click."));
             if crate::mapping::btn(ui, "Clear").clicked() {
                 self.cur_a = None;
                 self.cur_b = None;
             }
         });
-        ui.label(RichText::new("Click = A, right-click = B (spectrum / spectrogram)").small().weak());
+        ui.label(RichText::new(crate::lang::tr("Click = A, right-click = B (spectrum / spectrogram)")).small().weak());
         let line = |ui: &mut Ui, name: &str, c: Color32, f: Option<f32>, app: &App| {
             if let Some(f) = f {
                 let l = app.level_at(f, 0).map(|v| format!("{:.1}", v + app.unit_off(0))).unwrap_or("-".into());
@@ -1502,11 +1525,11 @@ impl App {
     }
 
     pub fn snapshots_ui(&mut self, ui: &mut Ui) {
-        ui.heading("Snapshots");
+        ui.heading(crate::lang::tr("Snapshots"));
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("snapsrc").width(70.0).selected_text(["Live", "Avg", "Max", "Min"][self.snap_src]).show_ui(ui, |ui| {
                 for (i, n) in ["Live", "Avg", "Max", "Min"].iter().enumerate() {
-                    ui.selectable_value(&mut self.snap_src, i, *n);
+                    ui.selectable_value(&mut self.snap_src, i, crate::lang::tr(*n));
                 }
             });
             if crate::mapping::btn(ui, "Capture").clicked() {
@@ -1550,6 +1573,7 @@ impl App {
 
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown_tools();
         self.save_settings(true);
         self.lib.save_auto();
     }
@@ -1646,8 +1670,17 @@ impl eframe::App for App {
         self.poll_mic_dialog();
         self.manage_monitor();
         self.tools_update();
-        self.handle_hotkeys(&ctx);
         self.inputs_frame(&ctx);
+        self.handle_hotkeys(&ctx);
+        self.palette_ui(&ctx);
+        self.latency_test();
+        if std::env::var_os("VISUSCOPE_LATENCY_TEST").is_some() {
+            ctx.request_repaint();
+        }
+        let theme = if self.light { egui::Theme::Light } else { egui::Theme::Dark };
+        if ctx.theme() != theme {
+            ctx.set_theme(theme);
+        }
 
         beat(self, 6);
         self.top_bar_ui(ui);
@@ -1695,6 +1728,7 @@ impl eframe::App for App {
             self.frames = 0;
             self.prof_t = Instant::now();
             if self.prof {
+                eprintln!("capture: block {} frames, age at callback {:.1} ms, ring-to-analysis hop {:.1} ms, fft {} = {:.0} ms window, avg {}", crate::audio::CAP_FRAMES.load(std::sync::atomic::Ordering::Relaxed), crate::audio::CAP_LAT_US.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0, 1000.0 / self.p.update_hz, self.p.fft_size, self.p.fft_size as f32 / self.sr().max(1.0) * 1000.0, self.p.avg_count);
                 eprintln!(
                     "ui fps {:.0} | ms: spectrum {:.2} spectrogram {:.2} stereo {:.2} 3d {:.2} scope {:.2} frame {:.2} | dsp {:.2} ms @ {:.0} fps",
                     self.ui_fps, self.ms[0], self.ms[1], self.ms[2], self.ms[3], self.ms[4], self.ms[WIN_COUNT], self.an.dsp_ms, self.an.dsp_fps

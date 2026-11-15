@@ -775,23 +775,23 @@ impl App {
         let mut do_plan = false;
         let mut apply: Option<bool> = None;
         let mut walk = false;
-        egui::Window::new("Assistant").order(egui::Order::Foreground).open(&mut open).pivot(Align2::RIGHT_TOP).default_pos(ctx.content_rect().right_top() + vec2(-8.0, 34.0)).default_width(400.0).collapsible(false).resizable(true).show(ctx, |ui| {
+        egui::Window::new(crate::lang::tr("Assistant")).order(egui::Order::Foreground).open(&mut open).pivot(Align2::RIGHT_TOP).default_pos(ctx.content_rect().right_top() + vec2(-8.0, 34.0)).default_width(400.0).collapsible(false).resizable(true).show(ctx, |ui| {
             if self.assist.wiz.is_some() {
                 self.wizard_ui(ui);
                 return;
             }
-            ui.label(RichText::new("Say what you want to measure or look at. I set up the input, windows, layout and settings, and can start the measurement.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Say what you want to measure or look at. I set up the input, windows, layout and settings, and can start the measurement.")).small().weak());
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut self.assist.text).desired_width(ui.available_width() - 62.0).hint_text("e.g. frequency response and distortion with a sweep on input mic1"));
+                let r = ui.add(egui::TextEdit::singleline(&mut self.assist.text).desired_width(ui.available_width() - 62.0).hint_text(crate::lang::tr("e.g. frequency response and distortion with a sweep on input mic1")));
                 if !self.assist.focus {
                     r.request_focus();
                     self.assist.focus = true;
                 }
-                if (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) | ui.add_enabled(!self.assist.text.trim().is_empty(), egui::Button::new("Plan")).clicked() {
+                if (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) | ui.add_enabled(!self.assist.text.trim().is_empty(), egui::Button::new(crate::lang::tr("Plan"))).clicked() {
                     do_plan = true;
                 }
             });
-            ui.label(RichText::new("Examples: press one to plan it (the sentence is filled in, change it as you like)").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Examples: press one to plan it (the sentence is filled in, change it as you like)")).small().weak());
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 for (label, sentence) in EXAMPLES {
@@ -801,7 +801,7 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new("Understands English, German, French and Spanish keywords and fixes small typos. It is not an AI: it looks for task words, numbers and device names.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Understands English, German, French and Spanish keywords and fixes small typos. It is not an AI: it looks for task words, numbers and device names.")).small().weak());
             if let Some(p) = self.assist.plan.clone() {
                 ui.separator();
                 if !p.title.is_empty() {
@@ -821,10 +821,10 @@ impl App {
                 }
                 if !p.actions.is_empty() {
                     ui.horizontal(|ui| {
-                        if crate::mapping::btn(ui, RichText::new("Walk me through").strong()).on_hover_text("Choose the input, the output, a calibration file and the parameters step by step, then everything is set up in that order").clicked() {
+                        if crate::mapping::btn(ui, RichText::new(crate::lang::tr("Walk me through")).strong()).on_hover_text(crate::lang::tr("Choose the input, the output, a calibration file and the parameters step by step, then everything is set up in that order")).clicked() {
                             walk = true;
                         }
-                        if !p.runs.is_empty() && crate::mapping::btn(ui, RichText::new("Set up and start").strong()).clicked() {
+                        if !p.runs.is_empty() && crate::mapping::btn(ui, RichText::new(crate::lang::tr("Set up and start")).strong()).clicked() {
                             apply = Some(true);
                         }
                         if crate::mapping::btn(ui, if p.runs.is_empty() { "Set up" } else { "Set up only" }).clicked() {

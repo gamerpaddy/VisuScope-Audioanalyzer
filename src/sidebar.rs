@@ -21,7 +21,7 @@ impl App {
             5 => &["Distortion measurement", "Voltage calibration"],
             _ => return,
         };
-        egui::CollapsingHeader::new(RichText::new("Settings").strong()).id_salt(("win_settings", win)).default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new(RichText::new(crate::lang::tr("Settings")).strong()).id_salt(("win_settings", win)).default_open(false).show(ui, |ui| {
             // a long list scrolls inside the window instead of pushing everything away
             let max_h = (ui.ctx().content_rect().height() * 0.5).max(160.0);
             egui::ScrollArea::vertical().max_height(max_h).auto_shrink([true, true]).show(ui, |ui| {
@@ -59,7 +59,7 @@ impl App {
     fn input_section(&mut self, ui: &mut Ui) {
         let mut restart = false;
         let cur = self.devices.get(self.sel_dev).map(|d| d.label.clone()).unwrap_or_else(|| "-".into());
-        ui.label("Device");
+        ui.label(crate::lang::tr("Device"));
         egui::ComboBox::from_id_salt("dev").width(ui.available_width() - 8.0).selected_text(cur).show_ui(ui, |ui| {
             for (i, d) in self.devices.iter().enumerate() {
                 if ui.selectable_value(&mut self.sel_dev, i, &d.label).clicked() {
@@ -79,7 +79,7 @@ impl App {
                 self.request_scan();
             }
         });
-        ui.label(RichText::new("[Loopback] entries capture what a playback device is playing.").small().weak());
+        ui.label(RichText::new(crate::lang::tr("[Loopback] entries capture what a playback device is playing.")).small().weak());
         self.monitor_ui(ui);
         if restart {
             self.start_selected();
@@ -134,7 +134,7 @@ impl App {
 
     fn monitor_ui(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            let mc = ui.checkbox(&mut self.mon_on, "Monitor").on_hover_text("Play the analysed input (L and R) on an output device");
+            let mc = ui.checkbox(&mut self.mon_on, crate::lang::tr("Monitor")).on_hover_text(crate::lang::tr("Play the analysed input (L and R) on an output device"));
             crate::mapping::button_menu(&mc, &crate::mapping::Target::toggle("monitor", "Monitor on / off", true));
             ui.add_enabled_ui(self.mon_on, |ui| {
                 crate::slider::bound(ui, &mut self.mon_gain_db, -60.0, 6.0, false, -10.0, &crate::mapping::Target::slider("mon_gain", "Monitor volume", -60.0, 6.0, false, " dB"), crate::slider::Fmt::new(" dB", 1), |_| {});
@@ -149,7 +149,7 @@ impl App {
         });
         if self.mon_on {
             if self.mon_feedback() {
-                ui.colored_label(egui::Color32::from_rgb(255, 130, 100), "This loopback input captures the monitor output: choose another output (feedback).");
+                ui.colored_label(egui::Color32::from_rgb(255, 130, 100), crate::lang::tr("This loopback input captures the monitor output: choose another output (feedback)."));
             } else {
                 let s = self.mon_status.lock().clone();
                 if !s.is_empty() {
@@ -187,7 +187,7 @@ impl App {
             }
         })
         .response
-        .on_hover_text("Which input channels of the device are analysed as L and R.");
+        .on_hover_text(crate::lang::tr("Which input channels of the device are analysed as L and R."));
         let h = 46.0;
         let bw = ((ui.available_width() - 8.0) / n as f32).clamp(8.0, 26.0);
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(bw * n as f32, h + 14.0), egui::Sense::click());
@@ -227,7 +227,7 @@ impl App {
                 self.ch_b = c;
             }
         }
-        ui.label(RichText::new("Click a meter = L, right-click = R").small().weak());
+        ui.label(RichText::new(crate::lang::tr("Click a meter = L, right-click = R")).small().weak());
         // the audio thread reads these every callback
         self.sh.ch_a.store(self.ch_a, Relaxed);
         self.sh.ch_b.store(self.ch_b, Relaxed);
@@ -284,7 +284,7 @@ impl App {
     fn mic_section(&mut self, ui: &mut Ui) {
         let mut changed = false;
         ui.horizontal(|ui| {
-            if ui.add_enabled(self.mic_dialog.is_none(), egui::Button::new("Load file...")).on_hover_text("Calibration file of the microphone (frequency and dB pairs). A name containing 90 is stored as the 90° file.").clicked() {
+            if ui.add_enabled(self.mic_dialog.is_none(), egui::Button::new(crate::lang::tr("Load file..."))).on_hover_text(crate::lang::tr("Calibration file of the microphone (frequency and dB pairs). A name containing 90 is stored as the 90° file.")).clicked() {
                 self.mic_dialog = Some(crate::tools::dialogs::open("Load microphone calibration", "Calibration", &["txt", "cal", "csv", "frd"]));
             }
             if crate::mapping::btn(ui, "Clear").clicked() {
@@ -300,7 +300,7 @@ impl App {
         }
         let cur = self.mic[self.mic_angle].as_ref().or(self.mic[0].as_ref()).or(self.mic[1].as_ref());
         let Some(c) = cur else {
-            ui.label(RichText::new("No file loaded. The spectrum then shows what the input hears, including the microphone's own response.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("No file loaded. The spectrum then shows what the input hears, including the microphone's own response.")).small().weak());
             if changed {
                 self.push_mic();
             }
@@ -309,20 +309,20 @@ impl App {
         if let Some(s) = c.sens {
             ui.label(RichText::new(format!("File header: Sens Factor {s:+.2} dB{}", c.again.map(|g| format!(", analog gain {g:.0} dB")).unwrap_or_default())).small().weak());
         }
-        changed |= ui.checkbox(&mut self.mic_on, "Correct the spectrum").changed();
+        changed |= ui.checkbox(&mut self.mic_on, crate::lang::tr("Correct the spectrum")).changed();
         if self.mic[0].is_some() && self.mic[1].is_some() {
             ui.horizontal(|ui| {
-                ui.label("Angle");
-                changed |= ui.selectable_value(&mut self.mic_angle, 0, "0° (on axis)").changed();
+                ui.label(crate::lang::tr("Angle"));
+                changed |= ui.selectable_value(&mut self.mic_angle, 0, crate::lang::tr("0° (on axis)")).changed();
                 changed |= ui.selectable_value(&mut self.mic_angle, 1, "90°").changed();
             });
         }
         ui.horizontal(|ui| {
-            ui.label("Apply to");
+            ui.label(crate::lang::tr("Apply to"));
             changed |= ui.checkbox(&mut self.mic_mask[0], RichText::new("L").color(CH_COLORS[0])).changed();
             changed |= ui.checkbox(&mut self.mic_mask[1], RichText::new("R").color(CH_COLORS[1])).changed();
         });
-        ui.label(RichText::new("Corrects spectrum, spectrogram, 3D and snapshots. Measurements and the SPL meter use the raw signal.").small().weak());
+        ui.label(RichText::new(crate::lang::tr("Corrects spectrum, spectrogram, 3D and snapshots. Measurements and the SPL meter use the raw signal.")).small().weak());
         if changed {
             self.push_mic();
         }
@@ -331,30 +331,39 @@ impl App {
     fn analysis_section(&mut self, ui: &mut Ui) {
         let srv = self.sr();
         egui::Grid::new("an_grid").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
-            ui.label("FFT size");
+            ui.label(crate::lang::tr("FFT size"));
             egui::ComboBox::from_id_salt("fft").selected_text(format!("{}", self.p.fft_size)).show_ui(ui, |ui| {
                 for s in [1024usize, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144] {
                     ui.selectable_value(&mut self.p.fft_size, s, format!("{s}  ({:.2} Hz/bin){}", srv / s as f32, if s >= 131072 { "  heavy" } else { "" }));
                 }
             });
             ui.end_row();
-            ui.label("Window");
+            ui.label(crate::lang::tr("Window"));
             egui::ComboBox::from_id_salt("win").selected_text(self.p.window.name()).show_ui(ui, |ui| {
                 for w in Window::ALL {
                     ui.selectable_value(&mut self.p.window, w, w.name());
                 }
             });
             ui.end_row();
-            ui.label("FFT rate");
-            { let r = ui.add(egui::Slider::new(&mut self.p.update_hz, 10.0..=240.0).suffix(" Hz")); crate::slider::reset(ui, &r, &mut self.p.update_hz, 120.0); }
+            ui.label(crate::lang::tr("FFT rate"));
+            { let r = ui.add(egui::Slider::new(&mut self.p.update_hz, 10.0..=240.0).suffix(crate::lang::tr(" Hz"))); crate::slider::reset(ui, &r, &mut self.p.update_hz, 120.0); }
             ui.end_row();
-            ui.label("Average");
+            ui.label(crate::lang::tr("Average"));
             { let r = ui.add(egui::Slider::new(&mut self.p.avg_count, 1.0..=512.0).logarithmic(true)); crate::slider::reset(ui, &r, &mut self.p.avg_count, 16.0); }
             ui.end_row();
+            // how long the display needs to follow the sound: the window has to fill, the average has to settle
+            {
+                let win = self.p.fft_size as f32 / self.sr().max(1.0) * 1000.0;
+                let tau = self.p.avg_count.max(1.0) / self.p.update_hz.max(1.0) * 1000.0;
+                ui.label(crate::lang::tr("Response time"));
+                ui.label(egui::RichText::new(format!("Live {:.0} ms, Avg {:.0} ms, fades in {:.0} ms", win * 0.6, win * 0.6 + 2.3 * tau, win + 6.9 * tau)).small().weak())
+                    .on_hover_text(crate::lang::tr("How long a new sound needs to reach its level in the Live and in the Avg trace, and how long a sound that stopped stays visible in the Avg trace (60 dB down). It comes from the length of the FFT window and from the averaging, not from the audio path (that is about 20 ms). A smaller FFT size or less averaging makes the display faster, at the price of coarser frequency steps or a noisier curve."));
+                ui.end_row();
+            }
         });
         ui.horizontal(|ui| {
             let mut log = self.p.log_freq;
-            if ui.checkbox(&mut log, "Log frequency").changed() {
+            if ui.checkbox(&mut log, crate::lang::tr("Log frequency")).changed() {
                 self.p.log_freq = log;
                 self.f_lo = 0.0;
                 self.f_hi = 1.0;
@@ -365,7 +374,7 @@ impl App {
                 self.p.reset_gen = self.p.reset_gen.wrapping_add(1);
             }
         });
-        ui.checkbox(&mut self.spec_density, "Noise density (per Hz)").on_hover_text("Shows the level of the noise in a bandwidth of 1 Hz instead of in one FFT bin: a noise then reads the same whatever the FFT size (at a larger size the bins are narrower and a noise reads lower in each). A tone reads lower than its level in this mode, by the same amount, and more so at a larger size.");
+        ui.checkbox(&mut self.spec_density, crate::lang::tr("Noise density (per Hz)")).on_hover_text(crate::lang::tr("Shows the level of the noise in a bandwidth of 1 Hz instead of in one FFT bin: a noise then reads the same whatever the FFT size (at a larger size the bins are narrower and a noise reads lower in each). A tone reads lower than its level in this mode, by the same amount, and more so at a larger size."));
         if self.an.n > 0 {
             ui.label(RichText::new(format!("bin {:.3} Hz  ENBW {:.2} bins  CG {:.3}", self.an.sr / self.an.n as f32, self.an.enbw_bins, self.an.coherent_gain)).small().weak());
             ui.label(
@@ -381,32 +390,32 @@ impl App {
 
     fn trace_section(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.show_live, "Live");
-            ui.checkbox(&mut self.show_avg, "Avg");
-            ui.checkbox(&mut self.show_max, "Max");
-            ui.checkbox(&mut self.show_min, "Min");
+            ui.checkbox(&mut self.show_live, crate::lang::tr("Live"));
+            ui.checkbox(&mut self.show_avg, crate::lang::tr("Avg"));
+            ui.checkbox(&mut self.show_max, crate::lang::tr("Max"));
+            ui.checkbox(&mut self.show_min, crate::lang::tr("Min"));
         });
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.show_ch[0], RichText::new("L").color(CH_COLORS[0]));
             ui.checkbox(&mut self.show_ch[1], RichText::new("R").color(CH_COLORS[1]));
-            ui.checkbox(&mut self.fill, "Fill");
+            ui.checkbox(&mut self.fill, crate::lang::tr("Fill"));
         });
         ui.horizontal(|ui| {
-            ui.label("Smoothing");
-            egui::ComboBox::from_id_salt("spec_smooth").width(80.0).selected_text(SMOOTH_OCT[self.smooth_oct].1).show_ui(ui, |ui| {
+            ui.label(crate::lang::tr("Smoothing"));
+            egui::ComboBox::from_id_salt("spec_smooth").width(80.0).selected_text(crate::lang::tr(SMOOTH_OCT[self.smooth_oct].1)).show_ui(ui, |ui| {
                 for (i, s) in SMOOTH_OCT.iter().enumerate() {
                     ui.selectable_value(&mut self.smooth_oct, i, s.1);
                 }
             });
         })
         .response
-        .on_hover_text("Fractional-octave smoothing of the displayed spectrum (power average). Cursor readouts stay unsmoothed.");
-        { let r = ui.add(egui::Slider::new(&mut self.line_w, 0.5..=3.0).text("Line width")); crate::slider::reset(ui, &r, &mut self.line_w, 1.2); }
+        .on_hover_text(crate::lang::tr("Fractional-octave smoothing of the displayed spectrum (power average). Cursor readouts stay unsmoothed."));
+        { let r = ui.add(egui::Slider::new(&mut self.line_w, 0.5..=3.0).text(crate::lang::tr("Line width"))); crate::slider::reset(ui, &r, &mut self.line_w, 1.2); }
     }
 
     fn spectro_section(&mut self, ui: &mut Ui) {
         egui::Grid::new("sg_grid").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
-            ui.label("Colormap");
+            ui.label(crate::lang::tr("Colormap"));
             egui::ComboBox::from_id_salt("cmap").selected_text(self.cmap.name()).show_ui(ui, |ui| {
                 for c in Cmap::ALL {
                     if ui.selectable_value(&mut self.cmap, c, c.name()).clicked() {
@@ -416,32 +425,32 @@ impl App {
                 }
             });
             ui.end_row();
-            ui.label("Floor");
-            let ar = ui.add(egui::Slider::new(&mut self.col_lo, -160.0..=-20.0).suffix(" dB"));
+            ui.label(crate::lang::tr("Floor"));
+            let ar = ui.add(egui::Slider::new(&mut self.col_lo, -160.0..=-20.0).suffix(crate::lang::tr(" dB")));
             let a = ar.changed() | crate::slider::reset(ui, &ar, &mut self.col_lo, -120.0);
             ui.end_row();
-            ui.label("Ceiling");
-            let br = ui.add(egui::Slider::new(&mut self.col_hi, -80.0..=10.0).suffix(" dB"));
+            ui.label(crate::lang::tr("Ceiling"));
+            let br = ui.add(egui::Slider::new(&mut self.col_hi, -80.0..=10.0).suffix(crate::lang::tr(" dB")));
             let b = br.changed() | crate::slider::reset(ui, &br, &mut self.col_hi, -10.0);
             ui.end_row();
             if a || b {
                 self.col_hi = self.col_hi.max(self.col_lo + 10.0);
                 self.rebuild_dyn_lut();
             }
-            ui.label("Columns/s");
+            ui.label(crate::lang::tr("Columns/s"));
             { let r = ui.add(egui::Slider::new(&mut self.p.cols_per_sec, 2.0..=240.0).logarithmic(true)); crate::slider::reset(ui, &r, &mut self.p.cols_per_sec, 60.0); }
             ui.end_row();
-            ui.label("Source");
+            ui.label(crate::lang::tr("Source"));
             let before = self.p.spectro_src;
             egui::ComboBox::from_id_salt("sgsrc").selected_text(["Left", "Right", "Max(L,R)", "Difference L - R"][self.p.spectro_src.min(3) as usize]).show_ui(ui, |ui| {
                 for (i, n) in ["Left", "Right", "Max(L,R)", "Difference L - R"].iter().enumerate() {
-                    ui.selectable_value(&mut self.p.spectro_src, i as u8, *n);
+                    ui.selectable_value(&mut self.p.spectro_src, i as u8, crate::lang::tr(*n));
                 }
-            }).response.on_hover_text("Difference: what is louder in the left than in the right channel is orange, the other way round blue. Put two signals on L and R to compare them (a before / after, two microphones)");
+            }).response.on_hover_text(crate::lang::tr("Difference: what is louder in the left than in the right channel is orange, the other way round blue. Put two signals on L and R to compare them (a before / after, two microphones)"));
             if self.p.spectro_src == 3 {
                 ui.end_row();
                 ui.label("");
-                ui.label(RichText::new("Difference mode has its own colours: colormap, floor and ceiling do not apply.").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Difference mode has its own colours: colormap, floor and ceiling do not apply.")).small().weak());
             }
             if (before == 3) != (self.p.spectro_src == 3) {
                 // the history holds another kind of value: start over, with the matching colours
@@ -455,20 +464,20 @@ impl App {
 
     fn view3d_section(&mut self, ui: &mut Ui) {
         egui::Grid::new("d3_grid").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
-            ui.label("Depth rows");
+            ui.label(crate::lang::tr("Depth rows"));
             ui.add(egui::Slider::new(&mut self.d3.rows, 32..=crate::view3d::D3_MAX));
             ui.end_row();
-            ui.label("Freq detail");
+            ui.label(crate::lang::tr("Freq detail"));
             ui.add(egui::Slider::new(&mut self.d3.cols, 64..=1024));
             ui.end_row();
-            ui.label("Rows/s");
+            ui.label(crate::lang::tr("Rows/s"));
             ui.add(egui::Slider::new(&mut self.d3.rate, 2.0..=60.0));
             ui.end_row();
-            ui.label("Height");
+            ui.label(crate::lang::tr("Height"));
             ui.add(egui::Slider::new(&mut self.d3.hscale, 0.2..=2.0));
             ui.end_row();
         });
-        ui.checkbox(&mut self.d3.wire, "Wire overlay");
+        ui.checkbox(&mut self.d3.wire, crate::lang::tr("Wire overlay"));
     }
 
     fn thd_section(&mut self, ui: &mut Ui) {
@@ -478,18 +487,18 @@ impl App {
                 .weak(),
         );
         ui.horizontal(|ui| {
-            ui.label("Band");
-            ui.add(egui::DragValue::new(&mut self.p.bw_lo).range(1.0..=2000.0).suffix(" Hz"));
+            ui.label(crate::lang::tr("Band"));
+            ui.add(egui::DragValue::new(&mut self.p.bw_lo).range(1.0..=2000.0).suffix(crate::lang::tr(" Hz")));
             ui.label("-");
-            ui.add(egui::DragValue::new(&mut self.p.bw_hi).range(100.0..=96000.0).suffix(" Hz"));
+            ui.add(egui::DragValue::new(&mut self.p.bw_hi).range(100.0..=96000.0).suffix(crate::lang::tr(" Hz")));
         });
-        ui.add(egui::Slider::new(&mut self.p.harmonics, 2..=MAXH).text("Harmonics"));
+        ui.add(egui::Slider::new(&mut self.p.harmonics, 2..=MAXH).text(crate::lang::tr("Harmonics")));
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.p.manual_fund, "Manual f0");
-            ui.add_enabled(self.p.manual_fund, egui::DragValue::new(&mut self.p.fund_hz).range(10.0..=96000.0).suffix(" Hz"));
+            ui.checkbox(&mut self.p.manual_fund, crate::lang::tr("Manual f0"));
+            ui.add_enabled(self.p.manual_fund, egui::DragValue::new(&mut self.p.fund_hz).range(10.0..=96000.0).suffix(crate::lang::tr(" Hz")));
         });
         ui.horizontal(|ui| {
-            ui.label("Channel");
+            ui.label(crate::lang::tr("Channel"));
             ui.selectable_value(&mut self.meas_ch, 0, "L");
             ui.selectable_value(&mut self.meas_ch, 1, "R");
         });

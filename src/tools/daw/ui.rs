@@ -4,6 +4,10 @@ use super::*;
 use crate::tools::plot::{hz_label, inset, Plot};
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, CursorIcon, FontId, Layout, Painter, Pos2, Rect, RichText, Sense, Shape, Stroke, UiBuilder};
 
+mod draw;
+mod tracks;
+mod panel;
+
 const HEADER_W: f32 = 178.0;
 const RULER_H: f32 = 22.0;
 /// Height of the upper bar of a track row: a click there selects, a click below it (in the waveform) places the playback cursor.
@@ -121,7 +125,7 @@ fn icon_button(ui: &mut Ui, icon: Icon, on: bool, tip: &str) -> bool {
     let r = resp.on_hover_text(tip);
     let (id, label) = match icon {
         Icon::Start => ("daw_home", "Timeline: to the start"),
-        Icon::Play | Icon::Stop => ("daw_play", "Timeline: play / pause"),
+        Icon::Play | Icon::Stop => ("daw_play", "Timeline: play / stop"),
         Icon::Rec => ("daw_record", "Timeline: record / stop"),
         Icon::Loop => ("daw_loop", "Timeline: loop on / off"),
     };
@@ -229,6 +233,10 @@ impl Daw {
         let mut p = self.proj.lock().clone();
         self.edited = false;
         let whole = ui.max_rect();
+        if ui.input(|i| i.pointer.any_pressed()) { self.keyboard_active = ui.rect_contains_pointer(whole); }
+        self.project_confirmation(ui, cx);
+        if self.pending_replace.is_some() { return; }
+        p = self.proj.lock().clone();
         self.handle_drops(ui, whole);
         self.toolbar(ui, cx, &mut p);
         let avail = ui.available_rect_before_wrap();
@@ -245,6 +253,7 @@ impl Daw {
             }
         }
         self.an_hidden = self.an_open && an_h == 0.0 && an_w == 0.0;
+        if self.an_hidden { ui.painter().text(avail.left_bottom() - vec2(0.0, 12.0), Align2::LEFT_BOTTOM, "Analysis hidden: enlarge the Timeline window", FontId::proportional(12.0), Color32::YELLOW); }
         let body = Rect::from_min_max(avail.min, pos2(avail.max.x - an_w, avail.max.y - an_h));
         self.keys(ui, cx, &mut p, whole);
         self.edit_windows(ui, &p);
@@ -319,43 +328,43 @@ impl Daw {
             if icon_button(ui, Icon::Loop, self.loop_on, "Loop the selection (or the whole project) (L)") {
                 self.loop_on = !self.loop_on;
             }
-            ui.toggle_value(&mut self.follow, "Follow").on_hover_text("Scroll the view with the playhead");
-            ui.toggle_value(&mut self.show_clip, "Clip").on_hover_text("Show samples above full scale in red on the waveforms and in the track meters (switch off to see the plain waveform)");
-            ui.toggle_value(&mut self.punch, "Punch").on_hover_text("Punch in / out: a recording keeps only the selected time range (the audio it replaces stays on the track as an older take). Select the range first.");
-            ui.toggle_value(&mut self.snap, "Snap").on_hover_text("Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Alt to move freely, hold Shift while selecting to snap to the beat of the tracks that show it)");
-            if ui.add_enabled_ui(self.range.is_some(), |ui| crate::mapping::small_btn(ui, "Selection to new track")).inner.on_hover_text("A new track with the selected time range: the clips of the selected track cut to it (the originals stay), or with no track selected the whole mix over that range").clicked() {
+            ui.toggle_value(&mut self.follow, crate::lang::tr("Follow")).on_hover_text(crate::lang::tr("Scroll the view with the playhead"));
+            ui.toggle_value(&mut self.show_clip, crate::lang::tr("Clipping highlights")).on_hover_text(crate::lang::tr("Show samples above full scale in red on the waveforms and in the track meters (switch off to see the plain waveform)"));
+            ui.toggle_value(&mut self.punch, crate::lang::tr("Punch")).on_hover_text(crate::lang::tr("Punch in / out: a recording keeps only the selected time range (the audio it replaces stays on the track as an older take). Select the range first."));
+            ui.toggle_value(&mut self.snap, crate::lang::tr("Snap")).on_hover_text(crate::lang::tr("Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Alt to move freely, hold Shift while selecting to snap to the beat of the tracks that show it)"));
+            if ui.add_enabled_ui(self.range.is_some(), |ui| crate::mapping::small_btn(ui, "Selection to new track")).inner.on_hover_text(crate::lang::tr("A new track with the selected time range: the clips of the selected track cut to it (the originals stay), or with no track selected the whole mix over that range")).clicked() {
                 self.act_track_from_range(p);
             }
             ui.separator();
-            let ub = ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").small()).on_hover_text("Undo the last timeline edit (Ctrl+Z)");
+            let ub = ui.add_enabled(!self.undo.is_empty(), egui::Button::new(crate::lang::tr("Undo")).small()).on_hover_text(crate::lang::tr("Undo the last timeline edit (Ctrl+Z)"));
             crate::mapping::button_menu(&ub, &crate::mapping::Target::toggle("daw_undo", "Timeline: undo", false));
             if ub.clicked() {
                 self.undo(p);
             }
-            let rb = ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo").small()).on_hover_text("Redo (Ctrl+Y)");
+            let rb = ui.add_enabled(!self.redo.is_empty(), egui::Button::new(crate::lang::tr("Redo")).small()).on_hover_text(crate::lang::tr("Redo (Ctrl+Y)"));
             crate::mapping::button_menu(&rb, &crate::mapping::Target::toggle("daw_redo", "Timeline: redo", false));
             if rb.clicked() {
                 self.redo(p);
             }
             ui.separator();
-            if crate::mapping::small_btn(ui, "-").on_hover_text("Zoom out (mouse wheel over the tracks)").clicked() {
+            if crate::mapping::small_btn(ui, "-").on_hover_text(crate::lang::tr("Zoom out (mouse wheel over the tracks)")).clicked() {
                 self.zoom_by(0.7, None);
             }
-            if crate::mapping::small_btn(ui, "+").on_hover_text("Zoom in (mouse wheel over the tracks; Shift+wheel scrolls sideways)").clicked() {
+            if crate::mapping::small_btn(ui, "+").on_hover_text(crate::lang::tr("Zoom in (mouse wheel over the tracks; Shift+wheel scrolls sideways)")).clicked() {
                 self.zoom_by(1.4, None);
             }
-            if crate::mapping::small_btn(ui, "Fit").on_hover_text("Show the whole project").clicked() {
+            if crate::mapping::small_btn(ui, "Fit").on_hover_text(crate::lang::tr("Show the whole project")).clicked() {
                 self.fit_view();
             }
             ui.separator();
-            ui.menu_button("+ Track", |ui| {
+            ui.menu_button(crate::lang::tr("+ Track"), |ui| {
                 if crate::mapping::btn(ui, "Empty track").clicked() {
                     self.checkpoint(p);
                     let n = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
                     self.sel_track = Some(p.tracks[n].id);
                     ui.close();
                 }
-                if crate::mapping::btn(ui, "Draw track (a control signal)").on_hover_text("Draw a curve over the timeline with the mouse. It is not heard in the master mix: pick it in a Timeline out node of the Routing window, and let it control a setting of a node (right-click a value there)").clicked() {
+                if crate::mapping::btn(ui, "Draw track (a control signal)").on_hover_text(crate::lang::tr("Draw a curve over the timeline with the mouse. It is not heard in the master mix: pick it in a Timeline out node of the Routing window, and let it control a setting of a node (right-click a value there)")).clicked() {
                     self.checkpoint(p);
                     let n = p.add_draw_track();
                     self.sel_track = Some(p.tracks[n].id);
@@ -363,7 +372,7 @@ impl Daw {
                 }
                 ui.separator();
                 if graph_on() {
-                    if crate::mapping::btn(ui, "Track that records from the Routing window").on_hover_text("An armed track plus a Timeline record node to connect").clicked() {
+                    if crate::mapping::btn(ui, "Track that records from the Routing window").on_hover_text(crate::lang::tr("An armed track plus a Timeline record node to connect")).clicked() {
                         self.checkpoint(p);
                         let n = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
                         let id = p.tracks[n].id;
@@ -375,9 +384,9 @@ impl Daw {
                     }
                     return;
                 }
-                ui.label(RichText::new("Record from an input (armed)").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Record from an input (armed)")).small().weak());
                 if self.devs_v.is_empty() {
-                    ui.label(RichText::new("scanning inputs...").small().weak());
+                    ui.label(RichText::new(crate::lang::tr("scanning inputs...")).small().weak());
                 }
                 let devs = self.devs_v.clone();
                 for d in devs {
@@ -405,11 +414,11 @@ impl Daw {
                     });
                 }
             });
-            if crate::mapping::btn(ui, "Import...").on_hover_text("Add audio files (WAV, FLAC, MP3 ...) as tracks. Files can also be dropped on the window.").clicked() && self.open_dlg.is_none() {
+            if crate::mapping::btn(ui, "Import...").on_hover_text(crate::lang::tr("Add audio files (WAV, FLAC, MP3 ...) as tracks. Files can also be dropped on the window.")).clicked() && self.open_dlg.is_none() {
                 self.open_dlg = Some(dialogs::open_many("Add audio files", "Audio files", decode::EXTENSIONS));
             }
-            ui.menu_button("Edit", |ui| self.edit_menu(ui, p));
-            ui.menu_button("Export", |ui| {
+            ui.menu_button(crate::lang::tr("Edit"), |ui| self.edit_menu(ui, p));
+            ui.menu_button(crate::lang::tr("Export"), |ui| {
                 let range = self.range;
                 if crate::mapping::btn(ui, if range.is_some() { "Mix of the selection to WAV..." } else { "Mix to WAV..." }).clicked() {
                     self.ask_export(Export::Mix(range));
@@ -426,35 +435,35 @@ impl Daw {
                     }
                 }
                 ui.separator();
-                if crate::mapping::btn(ui, "Bounce mix to a new track").on_hover_text("Render the selection (or everything) into one new track").clicked() {
+                if crate::mapping::btn(ui, "Bounce mix to a new track").on_hover_text(crate::lang::tr("Render the selection (or everything) into one new track")).clicked() {
                     self.act_bounce(p, false);
                     ui.close();
                 }
-                if ui.add_enabled(self.sel_track.is_some(), egui::Button::new("Bounce selected track")).clicked() {
+                if ui.add_enabled(self.sel_track.is_some(), egui::Button::new(crate::lang::tr("Bounce selected track"))).clicked() {
                     self.act_bounce(p, true);
                     ui.close();
                 }
             });
-            ui.menu_button("Project", |ui| {
-                if crate::mapping::btn(ui, "New").clicked() {
-                    self.new_project(cx);
-                    p.tracks.clear();
+            ui.menu_button(crate::lang::tr("Project"), |ui| {
+                if ui.add_enabled(self.busy.load(Relaxed) == 0 && self.jobs.lock().is_empty() && self.rec.is_none(), egui::Button::new(crate::lang::tr("New"))).on_disabled_hover_text(crate::lang::tr("Wait for pending work and stop recording")).clicked() {
+                    if self.rev != self.named_rev { self.pending_replace = Some(false); }
+                    else { self.new_project(cx); *p = self.proj.lock().clone(); }
                     ui.close();
                 }
-                if crate::mapping::btn(ui, "Open...").clicked() {
-                    self.open_clicked();
+                if ui.add_enabled(self.busy.load(Relaxed) == 0 && self.jobs.lock().is_empty() && self.rec.is_none() && self.play.is_none(), egui::Button::new(crate::lang::tr("Open..."))).on_disabled_hover_text(crate::lang::tr("Stop playback and recording; wait for pending work")).clicked() {
+                    if self.rev != self.named_rev { self.pending_replace = Some(true); } else { self.open_clicked(); }
                     ui.close();
                 }
-                if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
+                if ui.add_enabled(self.busy.load(Relaxed) == 0 && self.jobs.lock().is_empty(), egui::Button::new(crate::lang::tr("Save")).shortcut_text("Ctrl+S")).on_disabled_hover_text(crate::lang::tr("Wait for pending timeline work")).clicked() {
                     self.save_clicked(false);
                     ui.close();
                 }
-                if crate::mapping::btn(ui, "Save as...").clicked() {
+                if ui.add_enabled(self.busy.load(Relaxed) == 0 && self.jobs.lock().is_empty(), egui::Button::new(crate::lang::tr("Save as..."))).on_disabled_hover_text(crate::lang::tr("Wait for pending timeline work")).clicked() {
                     self.save_clicked(true);
                     ui.close();
                 }
                 ui.separator();
-                if crate::mapping::btn(ui, "Add demo tracks").on_hover_text("Tone, sweep, noise and kick: something to edit and analyse").clicked() {
+                if crate::mapping::btn(ui, "Add demo tracks").on_hover_text(crate::lang::tr("Tone, sweep, noise and kick: something to edit and analyse")).clicked() {
                     self.demo();
                     ui.close();
                 }
@@ -463,15 +472,15 @@ impl Daw {
                     ui.label(RichText::new(path.display().to_string()).small().weak());
                 }
             });
-            ui.toggle_value(&mut self.an_open, "Analysis").on_hover_text(if self.an_hidden { "Statistics, spectrum and spectrogram of the selection: the window is too small to show them, make it larger" } else { "Statistics, spectrum and spectrogram of the selection (below the tracks, or to their right in a low, wide window)" });
-            crate::windows::sticky_menu(ui, "Output", |ui| {
+            ui.toggle_value(&mut self.an_open, crate::lang::tr("Analysis")).on_hover_text(if self.an_hidden { "Statistics, spectrum and spectrogram of the selection: the window is too small to show them, make it larger" } else { "Statistics, spectrum and spectrogram of the selection (below the tracks, or to their right in a low, wide window)" });
+            crate::windows::sticky_menu(ui, crate::lang::tr("Output"), |ui| {
                 if graph_on() {
-                    ui.label("The timeline plays into the Routing window:\nconnect its Timeline out node to an output or the analyser.");
-                    ui.add(egui::DragValue::new(&mut self.rec_off_ms).range(-500.0..=500.0).speed(0.5).suffix(" ms")).on_hover_text("Shift new recordings earlier by this much to make up for the interface latency");
-                    ui.label(RichText::new("recording latency compensation").small().weak());
+                    ui.label(crate::lang::tr("The timeline plays into the Routing window:\nconnect its Timeline out node to an output or the analyser."));
+                    ui.add(egui::DragValue::new(&mut self.rec_off_ms).range(-500.0..=500.0).speed(0.5).suffix(crate::lang::tr(" ms"))).on_hover_text(crate::lang::tr("Shift new recordings earlier by this much to make up for the interface latency"));
+                    ui.label(RichText::new(crate::lang::tr("recording latency compensation")).small().weak());
                     return;
                 }
-                ui.checkbox(&mut self.sound, "Play through a sound device");
+                ui.checkbox(&mut self.sound, crate::lang::tr("Play through a sound device"));
                 ui.add_enabled_ui(self.sound, |ui| {
                     let cur = cx.out_devs.iter().find(|d| d.id == self.mon_dev).or(cx.out_devs.first()).map(|d| d.label.clone()).unwrap_or_else(|| "no output".into());
                     egui::ComboBox::from_id_salt("daw_out").width(220.0).selected_text(cur).show_ui(ui, |ui| {
@@ -479,22 +488,25 @@ impl Daw {
                             ui.selectable_value(&mut self.mon_dev, d.id.clone(), &d.label);
                         }
                     });
-                    { let r = ui.add(egui::Slider::new(&mut self.mon_vol, 0.0..=1.0).text("volume")); crate::slider::reset(ui, &r, &mut self.mon_vol, 0.7); }
+                    { let r = ui.add(egui::Slider::new(&mut self.mon_vol, 0.0..=1.0).text(crate::lang::tr("volume"))); crate::slider::reset(ui, &r, &mut self.mon_vol, 0.7); }
                 });
                 ui.separator();
-                ui.checkbox(&mut self.feed_analysers, "Show the timeline in the analysers").on_hover_text("Off: playing leaves the live input in the spectrum, scope, loudness ... windows.\nOn: they follow the timeline while it plays (the live input pauses).\n'Loop & play' in the analysis panel always does this.");
+                ui.checkbox(&mut self.feed_analysers, crate::lang::tr("Show the timeline in the analysers")).on_hover_text(crate::lang::tr("Off: playing leaves the live input in the spectrum, scope, loudness ... windows.\nOn: they follow the timeline while it plays (the live input pauses).\n'Loop & play' in the analysis panel always does this."));
                 ui.add_enabled_ui(self.feed_analysers, |ui| {
-                    ui.radio_value(&mut self.an_src, AnSrc::Master, "the master mix");
-                    ui.radio_value(&mut self.an_src, AnSrc::Track, "the selected track");
+                    ui.radio_value(&mut self.an_src, AnSrc::Master, crate::lang::tr("the master mix"));
+                    ui.radio_value(&mut self.an_src, AnSrc::Track, crate::lang::tr("the selected track"));
                 });
                 ui.separator();
-                ui.add(egui::DragValue::new(&mut self.rec_off_ms).range(-500.0..=500.0).speed(0.5).suffix(" ms")).on_hover_text("Shift new recordings earlier by this much to make up for the interface latency");
-                ui.label(RichText::new("recording latency compensation").small().weak());
+                ui.add(egui::DragValue::new(&mut self.rec_off_ms).range(-500.0..=500.0).speed(0.5).suffix(crate::lang::tr(" ms"))).on_hover_text(crate::lang::tr("Shift new recordings earlier by this much to make up for the interface latency"));
+                ui.label(RichText::new(crate::lang::tr("recording latency compensation")).small().weak());
                 if crate::mapping::btn(ui, "Rescan input devices").clicked() {
                     let d2 = self.devs.clone();
                     std::thread::Builder::new().name("daw-probe".into()).spawn(move || *d2.lock() = Some(capture::probe_all())).ok();
                 }
             });
+            ui.label(if self.rev != self.named_rev { "Unsaved project changes" } else { "Project saved" });
+            ui.label(if self.rev == self.saved_rev { "Recovery saved" } else { "Recovery pending" });
+            if self.keyboard_active { ui.label(crate::lang::tr("Timeline shortcuts active")); }
             // master
             ui.separator();
             let (mr, _) = ui.allocate_exact_size(vec2(54.0, 14.0), Sense::hover());
@@ -571,27 +583,27 @@ impl Daw {
             self.act_trim_to_range(p);
             ui.close();
         }
-        ui.menu_button("Process", |ui| {
+        ui.menu_button(crate::lang::tr("Process"), |ui| {
             let ids: Vec<u32> = self.sel.iter().copied().collect();
-            if ui.add_enabled(self.sel.len() == 1, egui::Button::new("Spectral editor...")).on_hover_text("Mark regions on the spectrogram of the clip and attenuate or remove them").clicked() {
+            if ui.add_enabled(self.sel.len() == 1, egui::Button::new(crate::lang::tr("Spectral editor..."))).on_hover_text(crate::lang::tr("Mark regions on the spectrogram of the clip and attenuate or remove them")).clicked() {
                 if let Some(id) = ids.first() {
                     self.open_spec(p, *id);
                 }
                 ui.close();
             }
-            if ui.add_enabled(has_sel, egui::Button::new("Time-stretch / pitch-shift...")).clicked() {
+            if ui.add_enabled(has_sel, egui::Button::new(crate::lang::tr("Time-stretch / pitch-shift..."))).clicked() {
                 self.stretch = Some(edit_ui::StretchDlg { tempo_pct: 100.0, semis: 0.0, mode: 0 });
                 ui.close();
             }
-            if ui.add_enabled(has_sel, egui::Button::new("Remove clicks")).clicked() {
+            if ui.add_enabled(has_sel, egui::Button::new(crate::lang::tr("Remove clicks"))).clicked() {
                 self.act_process(p, ids.clone(), edit_ui::EditKind::Declick(12.0));
                 ui.close();
             }
-            if ui.add_enabled(has_sel, egui::Button::new("Remove 50 Hz hum")).clicked() {
+            if ui.add_enabled(has_sel, egui::Button::new(crate::lang::tr("Remove 50 Hz hum"))).clicked() {
                 self.act_process(p, ids.clone(), edit_ui::EditKind::Dehum(50.0));
                 ui.close();
             }
-            if ui.add_enabled(has_sel, egui::Button::new("Remove 60 Hz hum")).clicked() {
+            if ui.add_enabled(has_sel, egui::Button::new(crate::lang::tr("Remove 60 Hz hum"))).clicked() {
                 self.act_process(p, ids, edit_ui::EditKind::Dehum(60.0));
                 ui.close();
             }
@@ -608,20 +620,20 @@ impl Daw {
             self.act_clip_prop(p, |c| c.muted = !c.muted);
             ui.close();
         }
-        ui.menu_button("Gain", |ui| {
+        ui.menu_button(crate::lang::tr("Gain"), |ui| {
             for (t, d) in [("+1 dB", 1.0f32), ("-1 dB", -1.0), ("+6 dB", 6.0), ("-6 dB", -6.0)] {
                 if ui.add_enabled(has_sel, egui::Button::new(t)).clicked() {
                     self.act_clip_prop(p, |c| c.gain_db = (c.gain_db + d).clamp(-90.0, 36.0));
                     ui.close();
                 }
             }
-            if ui.add_enabled(has_sel, egui::Button::new("Reset to 0 dB")).clicked() {
+            if ui.add_enabled(has_sel, egui::Button::new(crate::lang::tr("Reset to 0 dB"))).clicked() {
                 self.act_clip_prop(p, |c| c.gain_db = 0.0);
                 ui.close();
             }
         });
-        ui.menu_button("Crossfade length", |ui| {
-            ui.label(RichText::new("Where this clip overlaps another one on the track").small().weak());
+        ui.menu_button(crate::lang::tr("Crossfade length"), |ui| {
+            ui.label(RichText::new(crate::lang::tr("Where this clip overlaps another one on the track")).small().weak());
             let sr = p.sr as f32;
             for (t, ms) in [("Default (12 ms)", 0.0f32), ("5 ms", 5.0), ("25 ms", 25.0), ("50 ms", 50.0), ("100 ms", 100.0), ("250 ms", 250.0), ("500 ms", 500.0), ("1 s", 1000.0), ("2 s", 2000.0)] {
                 if ui.add_enabled(has_sel, egui::Button::new(t)).clicked() {
@@ -630,7 +642,7 @@ impl Daw {
                 }
             }
         });
-        ui.menu_button("Fades", |ui| {
+        ui.menu_button(crate::lang::tr("Fades"), |ui| {
             let sr = p.sr as f32;
             for (t, s) in [("10 ms", 0.01f32), ("100 ms", 0.1), ("500 ms", 0.5), ("2 s", 2.0)] {
                 if ui.add_enabled(has_sel, egui::Button::new(format!("In and out {t}"))).clicked() {
@@ -642,7 +654,7 @@ impl Daw {
                     ui.close();
                 }
             }
-            if ui.add_enabled(has_sel, egui::Button::new("Remove fades")).clicked() {
+            if ui.add_enabled(has_sel, egui::Button::new(crate::lang::tr("Remove fades"))).clicked() {
                 self.act_clip_prop(p, |c| {
                     c.fade_in = 0;
                     c.fade_out = 0;
@@ -654,9 +666,9 @@ impl Daw {
 
     // ------------------------------------------------------------------ keyboard
 
-    fn keys(&mut self, ui: &mut Ui, cx: &mut Ctx, p: &mut Project, whole: Rect) {
+    fn keys(&mut self, ui: &mut Ui, cx: &mut Ctx, p: &mut Project, _whole: Rect) {
         let ctx = ui.ctx().clone();
-        if !ui.rect_contains_pointer(whole) || ctx.egui_wants_keyboard_input() {
+        if !self.keyboard_active || ctx.egui_wants_keyboard_input() || self.pending_replace.is_some() {
             return;
         }
         use egui::{Key, Modifiers};
@@ -1167,7 +1179,7 @@ impl Daw {
                     self.touch();
                     ui.close();
                 }
-                if crate::mapping::btn(ui, "Smooth the drawing").on_hover_text("Average every point with its neighbours").clicked() {
+                if crate::mapping::btn(ui, "Smooth the drawing").on_hover_text(crate::lang::tr("Average every point with its neighbours")).clicked() {
                     self.checkpoint(p);
                     let c = p.tracks[ti].curve.clone();
                     for i in 1..c.len().saturating_sub(1) {
@@ -1185,7 +1197,7 @@ impl Daw {
                         ui.close();
                     }
                     if !graph_on() {
-                        ui.menu_button("Record input of this track", |ui| self.input_menu(ui, p, ti));
+                        ui.menu_button(crate::lang::tr("Record input of this track"), |ui| self.input_menu(ui, p, ti));
                     }
                     ui.separator();
                 }
@@ -1193,15 +1205,15 @@ impl Daw {
                     self.act_split(p);
                     ui.close();
                 }
-                if ui.add_enabled(!self.clip_buf.is_empty(), egui::Button::new("Paste")).clicked() {
+                if ui.add_enabled(!self.clip_buf.is_empty(), egui::Button::new(crate::lang::tr("Paste"))).clicked() {
                     self.act_paste(p);
                     ui.close();
                 }
-                if ui.add_enabled(self.range.is_some(), egui::Button::new("Delete the selected time range")).clicked() {
+                if ui.add_enabled(self.range.is_some(), egui::Button::new(crate::lang::tr("Delete the selected time range"))).clicked() {
                     self.act_delete(p);
                     ui.close();
                 }
-                if ui.add_enabled(self.range.is_some(), egui::Button::new("New track from the selection")).on_hover_text("The selected time range on a new track: the clips of the selected track cut to it, or with no track selected the mix of everything").clicked() {
+                if ui.add_enabled(self.range.is_some(), egui::Button::new(crate::lang::tr("New track from the selection"))).on_hover_text(crate::lang::tr("The selected time range on a new track: the clips of the selected track cut to it, or with no track selected the mix of everything")).clicked() {
                     self.act_track_from_range(p);
                     ui.close();
                 }
@@ -1258,7 +1270,7 @@ impl Daw {
                 self.touch();
                 ui.close();
             }
-            if ui.add_enabled(self.range.is_some_and(|r| r.1 > r.0), egui::Button::new("Add a region from the selection")).clicked() {
+            if ui.add_enabled(self.range.is_some_and(|r| r.1 > r.0), egui::Button::new(crate::lang::tr("Add a region from the selection"))).clicked() {
                 if let Some((a, b)) = self.range {
                     self.checkpoint(p);
                     p.add_mark(a, b - a, None);
@@ -1406,7 +1418,7 @@ impl Daw {
             let r = ui.interact(ar.intersect(tracks_rect), ui.scope_id().with("daw_add"), Sense::click());
             hp.rect_filled(ar, 4.0, if r.hovered() { Color32::from_rgb(44, 54, 72) } else { Color32::from_rgb(32, 39, 52) });
             hp.text(ar.center(), Align2::CENTER_CENTER, "+ Add track", FontId::proportional(11.0), Color32::from_rgb(170, 185, 205));
-            if r.on_hover_text("Add an empty track").clicked() && p.tracks.len() < MAX_TRACKS {
+            if r.on_hover_text(crate::lang::tr("Add an empty track")).clicked() && p.tracks.len() < MAX_TRACKS {
                 self.checkpoint(p);
                 let n = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
                 self.sel_track = Some(p.tracks[n].id);
@@ -1541,1079 +1553,27 @@ impl Daw {
         self.touch();
     }
 
-    fn draw_grid(&self, lp: &Painter, view: &View, lane: Rect) {
-        let step = time_step(70.0 / view.pps);
-        let t_left = (lane.left() - view.left) as f64 / view.pps + view.t0;
-        let t_right = (lane.right() - view.left) as f64 / view.pps + view.t0;
-        let mut t = (t_left / step).floor() * step;
-        while t <= t_right {
-            let x = view.left + ((t - view.t0) * view.pps) as f32;
-            lp.line_segment([pos2(x, lane.top()), pos2(x, lane.bottom())], Stroke::new(1.0, GRID_LINE));
-            t += step;
-        }
-    }
+}
 
-    /// The volume automation of a track: a line over its lane, with dots to drag while it is being edited.
-    /// The drawing of a draw track: a zero line and the curve.
-    fn draw_curve(&self, lp: &Painter, view: &View, lane: Rect, row: Rect, t: &Track) {
-        let y_of = |v: f32| row.bottom() - 4.0 - ((v + 1.0) * 0.5).clamp(0.0, 1.0) * (row.height() - 8.0);
-        let col = track_color(t);
-        let y0 = y_of(0.0);
-        lp.line_segment([pos2(lane.left(), y0), pos2(lane.right(), y0)], Stroke::new(1.0, Color32::from_white_alpha(36)));
-        if t.curve.is_empty() {
-            lp.text(pos2(lane.left() + 6.0, row.center().y), Align2::LEFT_CENTER, "draw here with the mouse: a control signal from -1 to 1, not heard in the master mix", FontId::proportional(10.0), Color32::from_white_alpha(90));
-            return;
-        }
-        let mut pts: Vec<Pos2> = Vec::with_capacity(t.curve.len() + 2);
-        let first = t.curve[0];
-        pts.push(pos2(lane.left(), y_of(first.1)));
-        for (f, v) in &t.curve {
-            let x = view.x(*f);
-            // (points far outside the view are skipped, the line still passes through)
-            if x > lane.left() - 200.0 && x < lane.right() + 200.0 || pts.len() == 1 {
-                pts.push(pos2(x, y_of(*v)));
-            }
-        }
-        let last = t.curve[t.curve.len() - 1];
-        pts.push(pos2(lane.right(), y_of(last.1)));
-        lp.add(Shape::line(pts, Stroke::new(1.8, col)));
-    }
-
-    /// The track of a drawing under a position (its index, and the value the height means).
-    fn draw_row_at(p: &Project, rows: &[Rect], pos: Pos2) -> Option<(usize, f32)> {
-        let ti = rows.iter().position(|r| pos.y >= r.top() && pos.y < r.bottom())?;
-        let t = p.tracks.get(ti).filter(|t| t.draw)?;
-        let _ = t;
-        let row = rows[ti];
-        Some((ti, (((row.bottom() - 4.0 - pos.y) / (row.height() - 8.0).max(1.0)).clamp(0.0, 1.0) * 2.0 - 1.0)))
-    }
-
-    fn draw_auto(&self, lp: &Painter, view: &View, lane: Rect, row: Rect, t: &Track) {
-        let editing = self.auto_edit == Some(t.id);
-        let y_of = |db: f32| row.bottom() - 4.0 - ((db - AUTO_RANGE.0) / (AUTO_RANGE.1 - AUTO_RANGE.0)).clamp(0.0, 1.0) * (row.height() - 8.0);
-        let col = Color32::from_rgb(250, 140, 200);
-        let stroke = Stroke::new(if editing { 1.8 } else { 1.2 }, col.gamma_multiply(if editing { 1.0 } else { 0.7 }));
-        if editing {
-            let y0 = y_of(0.0);
-            lp.line_segment([pos2(lane.left(), y0), pos2(lane.right(), y0)], Stroke::new(1.0, Color32::from_white_alpha(40)));
-            lp.text(pos2(lane.left() + 4.0, y0 - 2.0), Align2::LEFT_BOTTOM, "0 dB   double-click: new point, drag: move, right-click: delete", FontId::proportional(9.0), Color32::from_white_alpha(110));
-        }
-        let mut pts: Vec<Pos2> = Vec::with_capacity(t.auto.len() + 2);
-        if let Some(first) = t.auto.first() {
-            pts.push(pos2(lane.left(), y_of(first.1)));
-        }
-        for (f, d) in &t.auto {
-            pts.push(pos2(view.x(*f), y_of(*d)));
-        }
-        if let Some(last) = t.auto.last() {
-            pts.push(pos2(lane.right(), y_of(last.1)));
-        }
-        if pts.len() >= 2 {
-            lp.add(Shape::line(pts, stroke));
-        }
-        if editing {
-            for (f, d) in &t.auto {
-                lp.circle_filled(pos2(view.x(*f), y_of(*d)), 4.0, col);
-                lp.circle_stroke(pos2(view.x(*f), y_of(*d)), 4.0, Stroke::new(1.0, Color32::BLACK));
-            }
-        }
-    }
-
-    /// The automation point of the edited track under a position (track index, point index).
-    fn auto_hit(&self, p: &Project, view: &View, rows: &[Rect], pos: Pos2) -> Option<(usize, usize)> {
-        let ti = self.auto_edit.and_then(|id| p.track_index(id))?;
-        let row = *rows.get(ti)?;
-        let t = &p.tracks[ti];
-        let y_of = |db: f32| row.bottom() - 4.0 - ((db - AUTO_RANGE.0) / (AUTO_RANGE.1 - AUTO_RANGE.0)).clamp(0.0, 1.0) * (row.height() - 8.0);
-        t.auto.iter().enumerate().map(|(i, (f, d))| (i, (view.x(*f) - pos.x).hypot(y_of(*d) - pos.y))).filter(|(_, dist)| *dist <= 9.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| (ti, i))
-    }
-
-    fn draw_ruler(&self, painter: &Painter, view: &View, ruler: Rect, rect: Rect, marks: &[Mark]) {
-        painter.rect_filled(ruler, 0.0, Color32::from_rgb(26, 31, 42));
-        let rp = painter.with_clip_rect(ruler);
-        let step = time_step(80.0 / view.pps);
-        let t_left = (ruler.left() - view.left) as f64 / view.pps + view.t0;
-        let t_right = (ruler.right() - view.left) as f64 / view.pps + view.t0;
-        let mut t = (t_left / step).floor() * step;
-        while t <= t_right {
-            let x = view.left + ((t - view.t0) * view.pps) as f32;
-            rp.line_segment([pos2(x, ruler.bottom() - 9.0), pos2(x, ruler.bottom())], Stroke::new(1.0, Color32::from_rgb(110, 122, 142)));
-            for k in 1..5 {
-                let xm = x + (step * k as f64 / 5.0 * view.pps) as f32;
-                rp.line_segment([pos2(xm, ruler.bottom() - 4.0), pos2(xm, ruler.bottom())], Stroke::new(1.0, Color32::from_rgb(64, 74, 92)));
-            }
-            rp.text(pos2(x + 3.0, ruler.top() + 2.0), Align2::LEFT_TOP, ruler_label(t.max(0.0), step), FontId::proportional(9.5), Color32::from_rgb(150, 162, 182));
-            t += step;
-        }
-        if let Some((a, b)) = self.range {
-            let r = Rect::from_min_max(pos2(view.x(a), ruler.top()), pos2(view.x(b), ruler.bottom()));
-            rp.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(110, 160, 255, 60));
-        }
-        // loop markers
-        if self.loop_on {
-            let (a, b) = self.range.unwrap_or((0, 0));
-            if b > a {
-                rp.rect_filled(Rect::from_min_max(pos2(view.x(a), ruler.top()), pos2(view.x(b), ruler.top() + 3.0)), 0.0, Color32::from_rgb(110, 200, 140));
-            }
-        }
-        for (i, m) in marks.iter().enumerate() {
-            let col = Color32::from_rgb(255, 196, 80);
-            let x = view.x(m.at);
-            if m.len > 0 {
-                let x2 = view.x(m.at + m.len);
-                rp.rect_filled(Rect::from_min_max(pos2(x, ruler.bottom() - 5.0), pos2(x2, ruler.bottom())), 0.0, col.gamma_multiply(0.55));
-                rp.line_segment([pos2(x, ruler.bottom() - 11.0), pos2(x, ruler.bottom())], Stroke::new(1.5, col));
-                rp.line_segment([pos2(x2, ruler.bottom() - 11.0), pos2(x2, ruler.bottom())], Stroke::new(1.0, col.gamma_multiply(0.7)));
-            } else {
-                rp.add(Shape::convex_polygon(vec![pos2(x, ruler.bottom()), pos2(x - 4.0, ruler.bottom() - 8.0), pos2(x + 4.0, ruler.bottom() - 8.0)], col, Stroke::NONE));
-                rp.line_segment([pos2(x, ruler.bottom() - 8.0), pos2(x, ruler.top() + 11.0)], Stroke::new(1.0, col.gamma_multiply(0.6)));
-            }
-            // the name goes where there is room: up to the next mark
-            let next_x = marks.get(i + 1).map(|n| view.x(n.at)).unwrap_or(f32::MAX);
-            if next_x - x > 36.0 {
-                rp.with_clip_rect(Rect::from_min_max(pos2(x + 3.0, ruler.top()), pos2(next_x.min(ruler.right()) - 2.0, ruler.bottom()))).text(pos2(x + 6.0, ruler.bottom() - 11.0), Align2::LEFT_TOP, &m.name, FontId::proportional(9.0), col);
-            }
-        }
-        let px = view.x(self.pos());
-        rp.add(Shape::convex_polygon(vec![pos2(px - 5.0, ruler.top() + 1.0), pos2(px + 5.0, ruler.top() + 1.0), pos2(px, ruler.top() + 9.0)], PLAYHEAD, Stroke::NONE));
-        painter.line_segment([pos2(rect.left(), ruler.bottom()), pos2(rect.right(), ruler.bottom())], Stroke::new(1.0, Color32::from_rgb(8, 10, 14)));
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_clip(&self, lp: &Painter, view: &View, lane: Rect, c: &Clip, col: Color32, selected: bool, chans: &[Option<usize>], chm: [bool; 2], dimmed: bool, show_beats: bool) {
-        let (x0, x1) = (view.x(c.start), view.x(c.end()));
-        if x1 < lane.left() || x0 > lane.right() {
-            return;
-        }
-        let cr = Rect::from_min_max(pos2(x0, lane.top() + 3.0), pos2(x1.max(x0 + 1.5), lane.bottom() - 3.0));
-        let off = c.muted || dimmed;
-        let base = if off { Color32::from_gray(90) } else { col };
-        let vis = cr.intersect(lp.clip_rect());
-        let cp = lp.with_clip_rect(vis);
-        cp.rect_filled(cr, 4.0, base.gamma_multiply(if selected { 0.42 } else { 0.26 }));
-        // name strip
-        let strip = Rect::from_min_max(cr.min, pos2(cr.max.x, cr.min.y + 14.0));
-        cp.rect_filled(strip, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, base.gamma_multiply(if selected { 0.9 } else { 0.62 }));
-        let mut label = c.name.clone();
-        if c.gain_db.abs() > 0.05 {
-            label.push_str(&format!("   {:+.1} dB", c.gain_db));
-        }
-        if c.reverse {
-            label.push_str("   rev");
-        }
-        if c.muted {
-            label.push_str("   muted");
-        }
-        // (the name stays in view when the start of the clip is scrolled out of sight)
-        let nx = (strip.left().max(lane.left()) + 5.0).min((strip.right() - 40.0).max(strip.left() + 5.0));
-        cp.text(pos2(nx, strip.min.y + 1.5), Align2::LEFT_TOP, label, FontId::proportional(10.0), Color32::from_rgb(10, 12, 16));
-        // waveform
-        let inner = Rect::from_min_max(pos2(cr.left(), strip.bottom() + 1.0), pos2(cr.right(), cr.bottom() - 1.0));
-        let chans: &[Option<usize>] = if c.src.stereo() { chans } else { &[None] };
-        let wave_col = base.gamma_multiply(if selected { 1.0 } else { 0.85 });
-        let g = db_to_lin(c.gain_db);
-        let fpp = view.sr / view.pps;
-        let (xa, xb) = (vis.left().floor().max(cr.left().floor()), vis.right().ceil().min(cr.right().ceil()));
-        let n_ch = chans.len();
-        let lane_h = inner.height() / n_ch as f32;
-        let mut shapes: Vec<Shape> = Vec::with_capacity(((xb - xa).max(0.0) as usize) * n_ch);
-        let mut x = xa;
-        while x < xb {
-            let fa = ((x - view.left) as f64 / view.pps + view.t0) * view.sr - c.start as f64;
-            let a = fa.max(0.0) as usize;
-            let b = ((fa + fpp).ceil().max(0.0) as usize).min(c.len);
-            if b > a {
-                for (k, ch) in chans.iter().enumerate() {
-                    let (lo, hi) = wave_minmax(c, *ch, a, b);
-                    let sub = Rect::from_min_size(pos2(inner.left(), inner.top() + k as f32 * lane_h), vec2(inner.width(), lane_h));
-                    let (mid, half) = (sub.center().y, sub.height() * 0.5 * 0.94);
-                    let y0 = mid - (hi * g).clamp(-1.0, 1.0) * half;
-                    let y1 = (mid - (lo * g).clamp(-1.0, 1.0) * half).max(y0 + 1.0);
-                    let over = hi * g > 1.0 || -lo * g > 1.0;
-                    let silent = ch.is_some_and(|c| chm[c]);
-                    shapes.push(Shape::line_segment([pos2(x + 0.5, y0), pos2(x + 0.5, y1)], Stroke::new(1.0, if silent { Color32::from_gray(80) } else if over && !off && self.show_clip { Color32::from_rgb(255, 90, 90) } else { wave_col })));
-                }
-            }
-            x += 1.0;
-        }
-        cp.extend(shapes);
-        // the beat of the music (when this track shows it)
-        let mut bpm = 0.0;
-        if show_beats {
-            let sr = view.sr as u32;
-            if let Some(g) = c.src.grid(sr) {
-                bpm = g.bpm;
-                let mut last_x = f32::MIN;
-                for &b in &g.beats {
-                    if b < c.off || b >= c.off + c.len {
-                        continue;
-                    }
-                    let rel = b - c.off;
-                    let x = view.x(c.start + if c.reverse { (c.len - 1 - rel) as i64 } else { rel as i64 });
-                    if x < vis.left() - 1.0 || x > vis.right() + 1.0 || (x - last_x).abs() < 3.0 {
-                        continue;
-                    }
-                    last_x = x;
-                    let col = Color32::from_rgba_unmultiplied(255, 220, 120, 200);
-                    cp.line_segment([pos2(x, inner.top()), pos2(x, inner.bottom())], Stroke::new(1.0, col.gamma_multiply(0.7)));
-                    cp.add(Shape::convex_polygon(vec![pos2(x - 3.5, strip.bottom() + 1.0), pos2(x + 3.5, strip.bottom() + 1.0), pos2(x, strip.bottom() + 6.0)], col, Stroke::NONE));
-                }
-            } else if c.src.grid_pending() {
-                lp.ctx().request_repaint_after(std::time::Duration::from_millis(400));
-            }
-        }
-        if bpm > 0.0 {
-            cp.text(pos2(strip.right() - 5.0, strip.min.y + 1.5), Align2::RIGHT_TOP, format!("{bpm:.0} bpm"), FontId::proportional(10.0), Color32::from_rgb(10, 12, 16));
-        }
-        for k in 0..n_ch {
-            let y = inner.top() + (k as f32 + 0.5) * lane_h;
-            cp.line_segment([pos2(inner.left(), y), pos2(inner.right(), y)], Stroke::new(1.0, Color32::from_white_alpha(14)));
-            if n_ch == 2 && cr.width() > 40.0 {
-                let ytop = inner.top() + k as f32 * lane_h;
-                if k == 1 {
-                    cp.line_segment([pos2(inner.left(), ytop), pos2(inner.right(), ytop)], Stroke::new(1.0, Color32::from_white_alpha(40)));
-                }
-                cp.text(pos2(inner.left().max(lane.left()) + 4.0, ytop + 2.0), Align2::LEFT_TOP, if k == 0 { "L" } else { "R" }, FontId::proportional(9.0), Color32::from_white_alpha(140));
-            }
-        }
-        // fades
-        let (fi, fo) = (c.fade_in as f64 / fpp, c.fade_out as f64 / fpp);
-        let shade = Color32::from_black_alpha(110);
-        let fl = Stroke::new(1.2, Color32::from_white_alpha(170));
-        if fi >= 1.0 {
-            let w = fi as f32;
-            cp.add(Shape::convex_polygon(vec![pos2(x0, strip.bottom()), pos2(x0 + w, strip.bottom()), pos2(x0, cr.bottom())], shade, Stroke::NONE));
-            cp.line_segment([pos2(x0, cr.bottom()), pos2(x0 + w, strip.bottom())], fl);
-        }
-        if fo >= 1.0 {
-            let w = fo as f32;
-            cp.add(Shape::convex_polygon(vec![pos2(x1, strip.bottom()), pos2(x1 - w, strip.bottom()), pos2(x1, cr.bottom())], shade, Stroke::NONE));
-            cp.line_segment([pos2(x1, cr.bottom()), pos2(x1 - w, strip.bottom())], fl);
-        }
-        if selected && cr.width() >= 60.0 {
-            cp.circle_filled(pos2(x0 + fi as f32 + 7.0, strip.center().y), 3.0, Color32::from_white_alpha(200));
-            cp.circle_filled(pos2(x1 - fo as f32 - 7.0, strip.center().y), 3.0, Color32::from_white_alpha(200));
-        }
-        cp.rect_stroke(cr, 4.0, Stroke::new(if selected { 1.6 } else { 1.0 }, if selected { Color32::from_rgb(235, 240, 250) } else { base.gamma_multiply(0.9) }), egui::StrokeKind::Inside);
-    }
-
-    /// Live waveform of what is being recorded on an armed track.
-    fn draw_rec_preview(&self, lp: &Painter, view: &View, lane: Rect, t: &Track) {
-        let Some(rec) = &self.rec else { return };
-        let Some(plan) = rec.plan.iter().find(|r| r.track_id == t.id) else { return };
-        let Some(cap) = self.capt.get(&plan.dev) else { return };
-        let Some((dev_sr, _)) = cap.format() else { return };
-        let frames = cap.frames();
-        if frames == 0 {
-            return;
-        }
-        let proj_frames = (frames as f64 * view.sr / dev_sr as f64) as i64;
-        let (x0, x1) = (view.x(rec.start), view.x(rec.start + proj_frames));
-        let cr = Rect::from_min_max(pos2(x0, lane.top() + 3.0), pos2(x1.max(x0 + 2.0), lane.bottom() - 3.0));
-        lp.rect_filled(cr, 3.0, Color32::from_rgba_unmultiplied(235, 70, 70, 40));
-        lp.rect_stroke(cr, 3.0, Stroke::new(1.0, Color32::from_rgba_unmultiplied(235, 90, 90, 160)), egui::StrokeKind::Inside);
-        let vis = cr.intersect(lp.clip_rect());
-        if vis.width() < 1.0 {
-            return;
-        }
-        // columns of the visible part only
-        let lane_idx = plan.lanes[0];
-        let cols = vis.width().ceil() as usize;
-        let frac0 = ((vis.left() - cr.left()) / cr.width().max(1.0)) as f64;
-        let frac1 = ((vis.right() - cr.left()) / cr.width().max(1.0)) as f64;
-        let (a, b) = ((frac0 * frames as f64) as usize, (frac1 * frames as f64) as usize);
-        let mid = cr.center().y;
-        let half = (cr.height() - 4.0) * 0.5;
-        let mut shapes = Vec::new();
-        for (i, (lo, hi)) in cap.preview(lane_idx, a, b, cols).into_iter().enumerate() {
-            let x = vis.left() + i as f32 + 0.5;
-            shapes.push(Shape::line_segment([pos2(x, mid - hi.clamp(-1.0, 1.0) * half), pos2(x, (mid - lo.clamp(-1.0, 1.0) * half).max(mid - hi.clamp(-1.0, 1.0) * half + 1.0))], Stroke::new(1.0, Color32::from_rgb(255, 150, 150))));
-        }
-        lp.with_clip_rect(vis).extend(shapes);
-    }
-
-    /// A click on a track header: selects it; with Ctrl it joins or leaves the group of selected tracks.
-    fn click_track(&mut self, ui: &Ui, id: u32) {
-        if ui.input(|i| i.modifiers.command) {
-            if self.sel_tracks.is_empty() {
-                if let Some(cur) = self.sel_track {
-                    self.sel_tracks.insert(cur);
-                }
-            }
-            if !self.sel_tracks.remove(&id) {
-                self.sel_tracks.insert(id);
-            }
-        } else {
-            self.sel_tracks.clear();
-        }
-        self.sel_track = Some(id);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn track_header(&mut self, ui: &mut Ui, p: &mut Project, ti: usize, hr: Rect, clip: Rect, remove: &mut Option<usize>, swap: &mut Option<(usize, usize)>, dup: &mut Option<usize>) {
-        let selected = self.sel_track == Some(p.tracks[ti].id) || self.sel_tracks.contains(&p.tracks[ti].id);
-        let col = track_color(&p.tracks[ti]);
-        let painter = ui.painter().with_clip_rect(hr.intersect(clip));
-        painter.rect_filled(hr, 0.0, if selected { HDR_SEL } else { HDR_BG });
-        painter.rect_filled(Rect::from_min_size(hr.min, vec2(4.0, hr.height())), 0.0, col);
-        let id = p.tracks[ti].id;
-        // click on the empty header selects the track; right-click opens the track menu
-        let bg_resp = ui.interact(hr.intersect(clip), ui.scope_id().with(("daw_hdr", id)), Sense::click());
-        if bg_resp.clicked() {
-            self.click_track(ui, id);
-        }
-        bg_resp.context_menu(|ui| {
-            let mut editing = self.auto_edit == Some(id);
-            if ui.checkbox(&mut editing, "Edit volume automation").on_hover_text("Draw level changes over time on this track's lane: double-click adds a point, drag moves it, right-click deletes it. The level is added to the fader.").changed() {
-                self.auto_edit = if editing { Some(id) } else { None };
-                ui.close();
-            }
-            if !p.tracks[ti].auto.is_empty() && crate::mapping::btn(ui, "Clear the automation").clicked() {
-                self.checkpoint(p);
-                p.tracks[ti].auto.clear();
-                self.touch();
-                ui.close();
-            }
-            // takes: what a recording replaced is kept on the shelf of the track
-            if !p.tracks[ti].shelf.is_empty() {
-                let mut takes: Vec<u32> = p.tracks[ti].shelf.iter().map(|(k, _)| *k).collect();
-                takes.sort_unstable();
-                takes.dedup();
-                ui.menu_button(format!("Takes ({})", takes.len()), |ui| {
-                    let mut show = self.takes_view.contains(&id);
-                    if ui.checkbox(&mut show, "Show the takes under the track").changed() {
-                        if show { self.takes_view.insert(id); } else { self.takes_view.remove(&id); }
-                    }
-                    ui.separator();
-                    match self.range {
-                        Some((a, b)) if b > a => {
-                            ui.label(RichText::new("Use a take for the selected range:").small().weak());
-                            for k in &takes {
-                                let (lo, hi) = p.tracks[ti].shelf.iter().filter(|(t, _)| t == k).fold((i64::MAX, 0), |(lo, hi), (_, c)| (lo.min(c.start), hi.max(c.end())));
-                                let t = format!("Take {k}  ({} - {})", clock(lo as f32 / p.sr as f32), clock(hi as f32 / p.sr as f32));
-                                if crate::mapping::btn(ui, t).clicked() {
-                                    self.checkpoint(p);
-                                    if !p.comp_swap(ti, *k, a, b) {
-                                        self.note = format!("Take {k} has nothing in that range");
-                                    }
-                                    self.touch();
-                                    ui.close();
-                                }
-                            }
-                        }
-                        _ => {
-                            ui.label(RichText::new("Select a time range to use a take there").small().weak());
-                        }
-                    }
-                    ui.separator();
-                    if crate::mapping::btn(ui, "Delete the older takes").clicked() {
-                        self.checkpoint(p);
-                        p.tracks[ti].shelf.clear();
-                        self.takes_view.remove(&id);
-                        self.touch();
-                        ui.close();
-                    }
-                });
-            }
-            let mut bt = p.tracks[ti].beats;
-            if ui.checkbox(&mut bt, "Beatmarkers").on_hover_text("Finds the beat of the music on this track and marks it on the waveform. Hold Shift while selecting to snap to the beat. Off by default.").changed() {
-                p.tracks[ti].beats = bt;
-                self.touch();
-                ui.close();
-            }
-            ui.separator();
-            if crate::mapping::btn(ui, "Rename").clicked() {
-                self.renaming = Some((id, p.tracks[ti].name.clone()));
-                ui.close();
-            }
-            if crate::mapping::btn(ui, "Import audio file to this track...").on_hover_text("Place a file on this track at the playhead").clicked() && self.open_dlg.is_none() {
-                self.import_target = Some((id, if IMPORT_AT_START.load(Relaxed) { 0 } else { self.cursor }));
-                self.open_dlg = Some(dialogs::open_many("Add audio to the track", "Audio files", decode::EXTENSIONS));
-                ui.close();
-            }
-            if graph_on() {
-                if crate::mapping::btn(ui, "Record from the Routing window").on_hover_text("Arms the track and adds a Timeline record node you can connect to anything").clicked() {
-                    self.checkpoint(p);
-                    p.tracks[ti].input = graph_input(id);
-                    p.tracks[ti].arm = true;
-                    crate::graph::bus().request_rec_node(id, &p.tracks[ti].name);
-                    ui.close();
-                }
-            } else {
-                ui.menu_button("Record input", |ui| self.input_menu(ui, p, ti));
-            }
-            if p.tracks[ti].arm && crate::mapping::btn(ui, "Disarm").clicked() {
-                p.tracks[ti].arm = false;
-                self.touch();
-                ui.close();
-            }
-            if p.tracks[ti].clips.iter().any(|c| c.src.stereo()) {
-                ui.separator();
-                let t = &p.tracks[ti];
-                if t.chan == Chan::Stereo || t.chan == Chan::Mono {
-                    let mono = t.chan == Chan::Mono;
-                    if crate::mapping::btn(ui, if mono { "Back to stereo" } else { "Convert to mono" }).clicked() {
-                        self.checkpoint(p);
-                        p.tracks[ti].chan = if mono { Chan::Stereo } else { Chan::Mono };
-                        ui.close();
-                    }
-                    if crate::mapping::btn(ui, "Split into left and right tracks").on_hover_text("Two tracks, panned hard left and hard right").clicked() {
-                        self.split_req = Some(id);
-                        ui.close();
-                    }
-                } else if crate::mapping::btn(ui, "Back to stereo").clicked() {
-                    self.checkpoint(p);
-                    p.tracks[ti].chan = Chan::Stereo;
-                    p.tracks[ti].pan = 0.0;
-                    ui.close();
-                }
-                let expanded = p.tracks[ti].h >= 2;
-                if crate::mapping::btn(ui, if expanded { "Hide channel sub-tracks" } else { "Show channel sub-tracks" }).clicked() {
-                    p.tracks[ti].h = if expanded { 1 } else { 2 };
-                    self.touch();
-                    ui.close();
-                }
-            }
-            crate::windows::sticky_menu(ui, "Input trim (gain / delay)", |ui| {
-                ui.label(RichText::new("For recording from several interfaces at once:").small().weak());
-                let t = &mut p.tracks[ti];
-                let mut ch = false;
-                ui.horizontal(|ui| {
-                    ui.label("Gain");
-                    ch |= ui.add(egui::DragValue::new(&mut t.in_db).range(-60.0..=40.0).speed(0.1).suffix(" dB")).changed();
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Place earlier by");
-                    ch |= ui.add(egui::DragValue::new(&mut t.in_ms).range(-1000.0..=1000.0).speed(0.2).suffix(" ms")).changed();
-                });
-                ui.label(RichText::new("Use the delay for an interface whose audio arrives late (its latency),\nor a negative value to push a take later. Applied to the next recording.").small().weak());
-                if ch {
-                    self.touch();
-                }
-            });
-            ui.separator();
-            ui.menu_button("Colour", |ui| {
-                for (k, &(r, g, b)) in TRACK_COLORS.iter().enumerate() {
-                    if ui.add(egui::Button::new("      ").fill(Color32::from_rgb(r, g, b))).clicked() {
-                        p.tracks[ti].color = k;
-                        self.touch();
-                        ui.close();
-                    }
-                }
-            });
-            ui.menu_button("Height", |ui| {
-                for (k, n) in ["Small", "Normal", "Large (split channels)"].iter().enumerate() {
-                    if ui.selectable_label(p.tracks[ti].h as usize == k, *n).clicked() {
-                        p.tracks[ti].h = k as u8;
-                        self.touch();
-                        ui.close();
-                    }
-                }
-            });
-            if ui.add_enabled(ti > 0, egui::Button::new("Move up")).clicked() {
-                *swap = Some((ti, ti - 1));
-                ui.close();
-            }
-            if ui.add_enabled(ti + 1 < p.tracks.len(), egui::Button::new("Move down")).clicked() {
-                *swap = Some((ti, ti + 1));
-                ui.close();
-            }
-            if crate::mapping::btn(ui, "Duplicate track").clicked() {
-                *dup = Some(ti);
-                ui.close();
-            }
-            let n_sel = self.merge_ids(p).len();
-            ui.separator();
-            ui.label(RichText::new(if n_sel >= 2 { format!("{n_sel} tracks selected") } else { "Ctrl + click track names to select several".to_string() }).small().weak());
-            if ui.add_enabled(n_sel >= 2, egui::Button::new("Merge selected tracks into one")).on_hover_text("Mix them as they sound into one track and remove the originals (undo brings them back)").clicked() {
-                self.act_merge_tracks(p, true);
-                ui.close();
-            }
-            if ui.add_enabled(n_sel >= 2, egui::Button::new("Mix selected tracks to a new track")).on_hover_text("Keep the originals").clicked() {
-                self.act_merge_tracks(p, false);
-                ui.close();
-            }
-            if crate::mapping::btn(ui, "Delete track").clicked() {
-                *remove = Some(ti);
-                ui.close();
-            }
-        });
-        let content = Rect::from_min_max(hr.min + vec2(9.0, 3.0), pos2(hr.max.x - 12.0, hr.max.y - 2.0));
-        ui.scope_builder(UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::LEFT)), |ui| {
-            ui.shrink_clip_rect(content.intersect(clip));
-            ui.spacing_mut().item_spacing = vec2(3.0, 2.0);
-            ui.spacing_mut().interact_size.y = 15.0;
-            ui.spacing_mut().slider_width = 52.0;
-            ui.spacing_mut().slider_rail_height = 4.0;
-            // name + M S R
-            let w = content.width();
+impl Daw {
+    fn project_confirmation(&mut self, ui: &mut Ui, cx: &mut Ctx) {
+        if self.pending_replace.is_none() { return; }
+        egui::Window::new(crate::lang::tr("Unsaved timeline changes")).collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+            ui.label(crate::lang::tr("Save changes to your project before replacing this timeline?"));
+            ui.label(crate::lang::tr("Recovery autosave does not update your named project."));
             ui.horizontal(|ui| {
-                ui.set_height(17.0);
-                if self.renaming.as_ref().is_some_and(|r| r.0 == id) {
-                    let (_, text) = self.renaming.as_mut().unwrap();
-                    let r = ui.add(egui::TextEdit::singleline(text).desired_width(w - 66.0).font(FontId::proportional(11.5)));
-                    // focus once when the field appears; asking every frame would keep it from ever closing
-                    let init = ui.scope_id().with(("daw_rename_init", id));
-                    if !ui.data(|d| d.get_temp::<bool>(init).unwrap_or(false)) {
-                        r.request_focus();
-                        ui.data_mut(|d| d.insert_temp(init, true));
-                    }
-                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                    if r.lost_focus() {
-                        ui.data_mut(|d| d.insert_temp(init, false));
-                        let (_, text) = self.renaming.take().unwrap();
-                        if !esc && !text.trim().is_empty() {
-                            p.tracks[ti].name = text.trim().to_string();
-                            self.touch();
-                        }
-                    }
-                } else {
-                    let r = ui.add_sized(vec2(w - 62.0, 15.0), egui::Label::new(RichText::new(&p.tracks[ti].name).strong().size(11.5)).truncate().sense(Sense::click()));
-                    if r.double_clicked() {
-                        self.renaming = Some((id, p.tracks[ti].name.clone()));
-                    } else if r.clicked() {
-                        self.click_track(ui, id);
-                    }
-                    r.on_hover_text("Double-click to rename.  Ctrl + click: select more tracks (to merge them)");
+                let ready = self.busy.load(Relaxed) == 0 && self.jobs.lock().is_empty();
+                if ui.add_enabled(ready, egui::Button::new(crate::lang::tr("Save"))).clicked() {
+                    self.replace_after_save = true; self.save_clicked(false);
                 }
-                let t = &mut p.tracks[ti];
-                if mini_toggle(ui, "M", t.mute, Color32::from_rgb(235, 190, 70), "Mute") {
-                    t.mute = !t.mute;
-                    self.touch();
-                }
-                if mini_toggle(ui, "S", t.solo, Color32::from_rgb(110, 200, 250), "Solo") {
-                    t.solo = !t.solo;
-                    self.touch();
-                }
-                if mini_toggle(ui, "R", t.arm, Color32::from_rgb(235, 80, 80), "Arm for recording") {
-                    t.arm = !t.arm;
-                    if t.arm && graph_on() {
-                        // the track records what its record node in the routing graph receives
-                        p.tracks[ti].input = graph_input(id);
-                        crate::graph::bus().request_rec_node(id, &p.tracks[ti].name);
-                    } else if t.arm && t.input.dev.is_empty() {
-                        if let Some(inp) = self.default_input_for(p, ti) {
-                            p.tracks[ti].input = inp;
-                        }
+                if ui.add_enabled(ready, egui::Button::new(crate::lang::tr("Discard"))).clicked() {
+                    self.replace_after_save = false;
+                    if let Some(open) = self.pending_replace.take() {
+                        if open { self.open_clicked(); } else { self.new_project(cx); }
                     }
-                    self.touch();
                 }
+                if ui.button(crate::lang::tr("Cancel")).clicked() { self.pending_replace = None; self.replace_after_save = false; }
             });
-            // volume + pan (+ channel view)
-            ui.horizontal(|ui| {
-                // the two faders take what the icons and the little buttons leave, so nothing runs under the level meters
-                let minis = 1 + usize::from(p.tracks[ti].clips.iter().any(|c| c.src.stereo()));
-                let free = ui.available_width() - 2.0 * 12.0 - minis as f32 * 18.0 - (3 + minis) as f32 * ui.spacing().item_spacing.x;
-                ui.spacing_mut().slider_width = (free / 2.0).clamp(18.0, 60.0);
-                let mut t = p.tracks[ti].clone();
-                draw_icon(ui, SliderIcon::Volume);
-                let tip = format!("Volume {:+.1} dB", t.vol_db);
-                let ch1 = self.fader(ui, ("vol", id), &mut t.vol_db, -60.0..=12.0, 0.0, 1.0, &tip);
-                draw_icon(ui, SliderIcon::Pan);
-                let ptxt = if t.pan.abs() < 0.01 { "centre".to_string() } else if t.pan < 0.0 { format!("{:.0}% left", -t.pan * 100.0) } else { format!("{:.0}% right", t.pan * 100.0) };
-                let ch2 = self.fader(ui, ("pan", id), &mut t.pan, -1.0..=1.0, 0.0, 100.0, &format!("Pan (left / right balance): {ptxt}"));
-                if ch1 || ch2 {
-                    p.tracks[ti].vol_db = t.vol_db;
-                    p.tracks[ti].pan = t.pan;
-                    self.touch();
-                }
-                let inv = p.tracks[ti].invert;
-                if mini_toggle(ui, "Ø", inv, Color32::from_rgb(250, 140, 200), "Invert the waveform (polarity) of this track") {
-                    p.tracks[ti].invert = !inv;
-                    self.touch();
-                }
-                if p.tracks[ti].clips.iter().any(|c| c.src.stereo()) {
-                    let on = p.tracks[ti].h >= 2;
-                    if mini_toggle(ui, "LR", on, Color32::from_rgb(120, 170, 250), "Show the left and right channel as sub-tracks you can edit separately") {
-                        p.tracks[ti].h = if on { 1 } else { 2 };
-                        self.touch();
-                    }
-                }
-            });
-            if p.tracks[ti].h >= 2 {
-                self.channel_rows(ui, p, ti);
-            }
-            // input selection of armed tracks
-            if p.tracks[ti].arm && hr.height() >= 62.0 {
-                if graph_on() {
-                    ui.label(RichText::new("records from the Routing window").small().weak());
-                } else {
-                    self.input_row(ui, p, ti);
-                }
-            }
         });
-        // level meters
-        let lv = if p.tracks[ti].arm && self.play.is_none() || self.rec.is_some() && p.tracks[ti].arm {
-            self.in_level.get(&id).copied().unwrap_or([0.0; 2])
-        } else {
-            self.out_level.get(ti).copied().unwrap_or([0.0; 2])
-        };
-        let mh = hr.height() - 8.0;
-        meter_bar(&painter, Rect::from_min_size(pos2(hr.right() - 10.0, hr.top() + 4.0), vec2(3.0, mh)), lv[0], self.show_clip);
-        meter_bar(&painter, Rect::from_min_size(pos2(hr.right() - 6.0, hr.top() + 4.0), vec2(3.0, mh)), lv[1], self.show_clip);
-        painter.line_segment([pos2(hr.left(), hr.bottom()), pos2(hr.right(), hr.bottom())], Stroke::new(1.0, Color32::from_rgb(8, 10, 14)));
-    }
-
-    /// A small slider. Double-click types a value, right-click resets. `disp` scales the typed / shown number
-    /// (e.g. 100 for a pan in percent). Returns true when the value changed.
-    fn fader(&mut self, ui: &mut Ui, key: impl std::hash::Hash + std::fmt::Debug, v: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, disp: f32, tip: &str) -> bool {
-        let id = ui.scope_id().with(key);
-        let mut changed = false;
-        if self.val_edit.as_ref().is_some_and(|e| e.0 == id) {
-            let (_, text, focused) = self.val_edit.as_mut().unwrap();
-            let r = ui.add(egui::TextEdit::singleline(text).desired_width(ui.spacing().slider_width).font(FontId::proportional(10.5)));
-            if !*focused {
-                *focused = true;
-                r.request_focus();
-                let mut st = egui::TextEdit::load_state(ui.ctx(), r.id).unwrap_or_default();
-                st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()))));
-                st.store(ui.ctx(), r.id);
-            }
-            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-            if r.lost_focus() {
-                let (_, text, _) = self.val_edit.take().unwrap();
-                if !esc {
-                    let num: String = text.chars().filter(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | ',')).collect();
-                    if let Ok(x) = num.replace(',', ".").parse::<f32>() {
-                        *v = (x / disp).clamp(*range.start(), *range.end());
-                        changed = true;
-                    }
-                }
-            }
-            return changed;
-        }
-        let before = *v;
-        let r = ui.add(egui::Slider::new(v, range).show_value(false));
-        // a double-click first moves the slider with its single clicks: remember the value from before them
-        let pre_id = id.with("pre");
-        let now = ui.input(|i| i.time);
-        if r.hovered() && ui.input(|i| i.pointer.any_pressed()) {
-            let old = ui.data(|d| d.get_temp::<(f32, f64)>(pre_id));
-            if old.is_none_or(|(_, t)| now - t > 0.6) {
-                ui.data_mut(|d| d.insert_temp(pre_id, (before, now)));
-            }
-        }
-        // a slider only senses dragging, so clicks (double-click, right-click) need a widget of their own on top
-        let click = ui.interact(r.rect, id.with("click"), Sense::click());
-        if click.double_clicked() {
-            if let Some((pv, _)) = ui.data(|d| d.get_temp::<(f32, f64)>(pre_id)) {
-                *v = pv;
-            }
-            self.val_edit = Some((id, format!("{:.1}", *v * disp), false));
-        } else if r.changed() {
-            changed = true;
-        }
-        if click.secondary_clicked() {
-            *v = default;
-            changed = true;
-        }
-        click.on_hover_text(format!("{tip}\nDouble-click: type a value.  Right-click: reset."));
-        changed
-    }
-
-    /// Left / right sub-track controls of a stereo track, plus mono conversion and splitting.
-    fn channel_rows(&mut self, ui: &mut Ui, p: &mut Project, ti: usize) {
-        let id = p.tracks[ti].id;
-        let mut t = p.tracks[ti].clone();
-        let (mut changed, mut ck) = (false, false);
-        match t.chan {
-            Chan::Stereo => {
-                for k in 0..2 {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().slider_width = 46.0;
-                        let name = if k == 0 { "Left" } else { "Right" };
-                        ui.add_sized(vec2(11.0, 15.0), egui::Label::new(RichText::new(&name[..1]).strong().size(10.5).color(Color32::from_rgb(160, 185, 230))));
-                        if mini_toggle(ui, "M", t.ch_mute[k], Color32::from_rgb(235, 190, 70), &format!("Mute the {} channel", name.to_lowercase())) {
-                            t.ch_mute[k] = !t.ch_mute[k];
-                            changed = true;
-                            ck = true;
-                        }
-                        // level differences between the channels are the balance's job; a gain set here by an older version is shown so it can be cleared
-                        if t.ch_db[k].abs() > 0.05 {
-                            ui.label(RichText::new(format!("{:+.1} dB", t.ch_db[k])).small().weak());
-                            if crate::mapping::small_btn(ui, "0 dB").on_hover_text("Clear the gain of this channel (use the balance for level differences between the channels)").clicked() {
-                                t.ch_db[k] = 0.0;
-                                changed = true;
-                                ck = true;
-                            }
-                        }
-                    });
-                }
-            }
-            Chan::Left | Chan::Right | Chan::Mono => {
-                let txt = match t.chan {
-                    Chan::Left => "Plays the left channel only",
-                    Chan::Right => "Plays the right channel only",
-                    _ => "Left and right mixed to mono",
-                };
-                ui.label(RichText::new(txt).small().weak());
-            }
-        }
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 3.0;
-            let mono = t.chan == Chan::Mono;
-            if t.chan == Chan::Left || t.chan == Chan::Right {
-                if crate::mapping::small_btn(ui, "Back to stereo").on_hover_text("Play both channels again").clicked() {
-                    t.chan = Chan::Stereo;
-                    t.pan = 0.0;
-                    changed = true;
-                    ck = true;
-                }
-            } else {
-                if ui.selectable_label(mono, RichText::new("Mono").size(10.5)).on_hover_text("Mix left and right to one mono signal (not destructive)").clicked() {
-                    t.chan = if mono { Chan::Stereo } else { Chan::Mono };
-                    changed = true;
-                    ck = true;
-                }
-                if crate::mapping::small_btn(ui, "Split L/R").on_hover_text("Make two tracks: the left channel panned left and the right channel panned right").clicked() {
-                    self.split_req = Some(id);
-                }
-            }
-        });
-        if ck {
-            self.checkpoint(p);
-        }
-        if changed {
-            let dst = &mut p.tracks[ti];
-            dst.chan = t.chan;
-            dst.pan = t.pan;
-            dst.ch_db = t.ch_db;
-            dst.ch_mute = t.ch_mute;
-            self.touch();
-        }
-    }
-
-    /// Menu entries that connect a track to a recording input (and arm it).
-    fn input_menu(&mut self, ui: &mut Ui, p: &mut Project, ti: usize) {
-        if self.devs_v.is_empty() {
-            ui.label(RichText::new("scanning inputs...").small().weak());
-        }
-        let devs = self.devs_v.clone();
-        for d in devs {
-            ui.menu_button(capture::short_label(&d.label), |ui| {
-                ui.label(RichText::new(format!("{} ch, {} Hz", d.ch, d.sr)).small().weak());
-                let mut pick: Option<Mode> = None;
-                for c in 0..d.ch.min(32) {
-                    if crate::mapping::btn(ui, format!("Channel {}", c + 1)).clicked() {
-                        pick = Some(Mode::Chan(c));
-                    }
-                }
-                ui.separator();
-                for k in 0..(d.ch / 2).min(16) {
-                    if crate::mapping::btn(ui, format!("Stereo pair {}+{}", 2 * k + 1, 2 * k + 2)).clicked() {
-                        pick = Some(Mode::Pair(k));
-                    }
-                }
-                if crate::mapping::btn(ui, "Mono mix of all channels").clicked() {
-                    pick = Some(Mode::Mix);
-                }
-                if let Some(m) = pick {
-                    self.checkpoint(p);
-                    p.tracks[ti].input = Input { dev: d.id.clone(), mode: m };
-                    p.tracks[ti].arm = true;
-                    self.touch();
-                    ui.close();
-                }
-            });
-        }
-    }
-
-    fn default_input_for(&self, p: &Project, ti: usize) -> Option<Input> {
-        let mut q = p.clone();
-        q.tracks[ti].arm = false;
-        self.default_input(&q)
-    }
-
-    fn input_row(&mut self, ui: &mut Ui, p: &mut Project, ti: usize) {
-        let id = p.tracks[ti].id;
-        let cur_dev = p.tracks[ti].input.dev.clone();
-        let dev_ch = self.devs_v.iter().find(|d| d.id == cur_dev).map(|d| d.ch).unwrap_or(2);
-        let dev_label = self.devs_v.iter().find(|d| d.id == cur_dev).map(|d| capture::short_label(&d.label)).unwrap_or_else(|| if cur_dev.is_empty() { "no input".into() } else { "device missing".into() });
-        let status = self.capt.get(&cur_dev).map(|c| c.status.lock().clone());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 3.0;
-            let mut new_dev: Option<String> = None;
-            egui::ComboBox::from_id_salt(("daw_dev", id)).width(74.0).truncate().selected_text(dev_label).show_ui(ui, |ui| {
-                for d in &self.devs_v {
-                    if ui.selectable_label(d.id == cur_dev, format!("{}  ({} ch)", capture::short_label(&d.label), d.ch)).clicked() {
-                        new_dev = Some(d.id.clone());
-                    }
-                }
-            });
-            if let Some(d) = new_dev {
-                p.tracks[ti].input = Input { dev: d, mode: Mode::Chan(0) };
-                self.touch();
-            }
-            let mut mode = p.tracks[ti].input.mode;
-            egui::ComboBox::from_id_salt(("daw_ch", id)).width(64.0).selected_text(mode.label()).show_ui(ui, |ui| {
-                for c in 0..dev_ch.min(32) {
-                    ui.selectable_value(&mut mode, Mode::Chan(c), Mode::Chan(c).label());
-                }
-                for k in 0..(dev_ch / 2).min(16) {
-                    ui.selectable_value(&mut mode, Mode::Pair(k), format!("Stereo {}", Mode::Pair(k).label()));
-                }
-                ui.selectable_value(&mut mode, Mode::Mix, "Mono mix");
-            });
-            if mode != p.tracks[ti].input.mode {
-                p.tracks[ti].input.mode = mode;
-                self.touch();
-            }
-            if let Some(s) = status {
-                if s.contains("not found") || s.contains("unsupported") || s.contains("reconnect") {
-                    ui.label(RichText::new("!").color(Color32::from_rgb(255, 170, 70))).on_hover_text(s);
-                }
-            }
-        });
-    }
-
-    // ------------------------------------------------------------------ analysis panel
-
-    fn analysis_panel(&mut self, ui: &mut Ui, cx: &mut Ctx, p: &Project, rect: Rect) {
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 4.0, Color32::from_rgb(17, 21, 28));
-        painter.rect_stroke(rect, 4.0, Stroke::new(1.0, Color32::from_rgb(40, 48, 62)), egui::StrokeKind::Inside);
-        let inner = rect.shrink2(vec2(8.0, 5.0));
-        let (a, b) = self.analysis_range(p);
-        let what = if self.range.is_some() {
-            "selection"
-        } else if !self.sel.is_empty() {
-            "selected clips"
-        } else {
-            "whole project"
-        };
-        let src = match (self.an_src, self.analysis_track_name(p)) {
-            (AnSrc::Track, Some(n)) => format!("track {n}"),
-            _ => "master mix".to_string(),
-        };
-        // header line
-        let head = Rect::from_min_size(inner.min, vec2(inner.width(), 18.0));
-        ui.scope_builder(UiBuilder::new().max_rect(head).layout(Layout::left_to_right(Align::Center)), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(RichText::new(format!("Analysis of the {what}, {src}   {} - {}", clock(a as f32 / p.sr as f32), clock(b as f32 / p.sr as f32))).small().color(Color32::from_rgb(170, 182, 200)));
-            ui.selectable_value(&mut self.an_src, AnSrc::Master, "Master");
-            ui.selectable_value(&mut self.an_src, AnSrc::Track, "Track");
-            if crate::mapping::small_btn(ui, "Loop & play").on_hover_text("Play this stretch in a loop: all analysers (spectrum, scope, loudness ...) follow it").clicked() {
-                if self.range.is_none() && b > a {
-                    self.range = Some((a, b));
-                }
-                self.loop_on = true;
-                self.seek(a);
-                if self.play.is_none() {
-                    self.feed_once = true;
-                    self.play_start(cx);
-                }
-            }
-            if let Some(out) = self.an_out.clone() {
-                if crate::mapping::small_btn(ui, "Store spectrum as trace").on_hover_text("Add the averaged spectrum to the trace library (Response, Transfer and EQ windows can use it)").clicked() {
-                    let name = format!("Timeline {what} ({})", src);
-                    let avg: Vec<f32> = (0..out.f.len()).map(|i| 10.0 * (0.5 * (10f32.powf(out.db[0][i] / 10.0) + 10f32.powf(out.db[1][i] / 10.0))).max(1e-12).log10()).collect();
-                    cx.lib.add(Some(name), out.f.clone(), avg, Vec::new());
-                    cx.req.note = Some("Spectrum stored in the trace library".into());
-                }
-            }
-            if self.an_running {
-                ui.spinner();
-            }
-        });
-        let body = Rect::from_min_max(pos2(inner.left(), inner.top() + 22.0), inner.max);
-        let Some(out) = self.an_out.clone() else {
-            painter.text(body.center(), Align2::CENTER_CENTER, if b > a { "analysing..." } else { "nothing to analyse yet" }, FontId::proportional(12.0), Color32::from_rgb(110, 122, 140));
-            return;
-        };
-        // wide enough for "-10.4 / -14.2 dBFS" and "+0.00093 / +0.00001" in the monospace values
-        // a narrow panel (to the right of the tracks) stacks the three parts instead of putting them side by side
-        if body.width() < 600.0 {
-            // a narrow panel stacks the three parts, each at a size it can be read at; when the panel is too low for all of them
-            // the whole stack scrolls instead of squeezing the plots to nothing
-            let two_cols = body.width() >= 330.0;
-            let stats_h = if two_cols { 104.0 } else { 178.0 };
-            let plot_h = ((body.height() - stats_h - 12.0) * 0.5).clamp(110.0, 260.0);
-            let total = (stats_h + 2.0 * plot_h + 12.0).max(body.height());
-            ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
-                ui.shrink_clip_rect(body);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    let (full, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
-                    let s = Rect::from_min_size(full.min, vec2(full.width(), stats_h));
-                    let sp = Rect::from_min_size(pos2(full.left(), s.bottom() + 6.0), vec2(full.width(), plot_h));
-                    let sg = Rect::from_min_max(pos2(full.left(), sp.bottom() + 6.0), full.max);
-                    self.stats_grid(ui, &out, s, two_cols, false);
-                    self.spectrum_plot(ui, &out, sp);
-                    self.spectrogram_view(ui, &out, sg, (a, b), p.sr);
-                });
-            });
-            if out.truncated {
-                painter.text(pos2(rect.right() - 10.0, rect.top() + 6.0), Align2::RIGHT_TOP, "analysed: first 5 minutes", FontId::proportional(10.0), Color32::from_rgb(255, 190, 80));
-            }
-            return;
-        }
-        let (stats_r, spec_r, spg_r) = {
-            let stats_w = 250.0f32.min(body.width() * 0.34);
-            let rest = body.width() - stats_w - 12.0;
-            let spec_w = rest * 0.56;
-            let s = Rect::from_min_size(body.min, vec2(stats_w, body.height()));
-            let sp = Rect::from_min_size(pos2(s.right() + 6.0, body.top()), vec2(spec_w, body.height()));
-            (s, sp, Rect::from_min_max(pos2(sp.right() + 6.0, body.top()), body.max))
-        };
-        self.stats_grid(ui, &out, stats_r, false, true);
-        self.spectrum_plot(ui, &out, spec_r);
-        self.spectrogram_view(ui, &out, spg_r, (a, b), p.sr);
-        if out.truncated {
-            painter.text(pos2(rect.right() - 10.0, rect.top() + 6.0), Align2::RIGHT_TOP, "analysed: first 5 minutes", FontId::proportional(10.0), Color32::from_rgb(255, 190, 80));
-        }
-    }
-
-    fn analysis_track_name(&self, p: &Project) -> Option<String> {
-        let id = self.sel_track.or_else(|| self.sel.iter().next().and_then(|c| p.find_clip(*c)).map(|(ti, _)| p.tracks[ti].id))?;
-        p.track_index(id).map(|ti| p.tracks[ti].name.clone())
-    }
-
-    /// `two_cols`: two label / value pairs per row (a wide but low stack); `scroll`: the grid scrolls by itself when it does not fit.
-    fn stats_grid(&self, ui: &mut Ui, out: &AnalysisOut, r: Rect, two_cols: bool, scroll: bool) {
-        let s = &out.stats;
-        let f = |v: f32| if v <= -119.0 { "-inf".to_string() } else { format!("{v:.1}") };
-        let rows: Vec<(&str, String)> = vec![
-            ("Length", clock(s.secs)),
-            ("Peak L / R", format!("{} / {} dBFS", f(s.peak_db[0]), f(s.peak_db[1]))),
-            ("RMS L / R", format!("{} / {} dBFS", f(s.rms_db[0]), f(s.rms_db[1]))),
-            ("True peak", format!("{} dBTP", f(s.true_peak_db))),
-            ("Loudness", s.lufs.map_or("-".into(), |v| format!("{v:.1} LUFS"))),
-            ("Loudness range", s.lra.map_or("-".into(), |v| format!("{v:.1} LU"))),
-            ("Crest factor", format!("{:.1} dB", s.crest_db)),
-            ("L/R correlation", format!("{:+.2}", s.corr)),
-            ("DC offset", format!("{:+.5} / {:+.5}", s.dc[0], s.dc[1])),
-            ("Clipped samples", format!("{}", s.clipped)),
-            ("Silence", format!("{:.0} %", s.silence_pct)),
-        ];
-        // the rows fill the room there is: more air between them when the area is tall, larger text when there is plenty
-        let per_row = if two_cols { rows.len().div_ceil(2) } else { rows.len() } as f32;
-        let room = r.height() / per_row;
-        let gap = (room - 15.0).clamp(1.0, 9.0);
-        let big = room > 24.0 && r.width() > 230.0;
-        let show = |ui: &mut Ui, rows: Vec<(&str, String)>| {
-            let cell = |ui: &mut Ui, k: &str, v: String| {
-                let warn = (k == "Clipped samples" && s.clipped > 0) || (k == "True peak" && s.true_peak_db > -0.1);
-                let (kt, vt) = (RichText::new(k).weak(), RichText::new(v).monospace().color(if warn { Color32::from_rgb(255, 130, 110) } else { Color32::from_rgb(215, 224, 238) }));
-                if big {
-                    ui.label(kt.size(12.0));
-                    ui.add(egui::Label::new(vt.size(13.5)).truncate());
-                } else {
-                    ui.label(kt.small());
-                    // (in two columns the values are not cut: the grid takes the width it needs)
-                    ui.add(egui::Label::new(vt.small()).wrap_mode(if two_cols { egui::TextWrapMode::Extend } else { egui::TextWrapMode::Truncate }));
-                }
-            };
-            if two_cols {
-                let half = rows.len().div_ceil(2);
-                egui::Grid::new("daw_stats2").num_columns(4).spacing([10.0, gap]).show(ui, |ui| {
-                    for i in 0..half {
-                        cell(ui, rows[i].0, rows[i].1.clone());
-                        match rows.get(i + half) {
-                            Some((k, v)) => cell(ui, k, v.clone()),
-                            None => {
-                                ui.label("");
-                                ui.label("");
-                            }
-                        }
-                        ui.end_row();
-                    }
-                });
-            } else {
-                egui::Grid::new("daw_stats").num_columns(2).spacing([8.0, gap]).show(ui, |ui| {
-                    for (k, v) in rows {
-                        cell(ui, k, v);
-                        ui.end_row();
-                    }
-                });
-            }
-        };
-        ui.scope_builder(UiBuilder::new().max_rect(r), |ui| {
-            ui.shrink_clip_rect(r);
-            if scroll {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| show(ui, rows));
-            } else {
-                show(ui, rows);
-            }
-        });
-    }
-
-    fn spectrum_plot(&self, ui: &mut Ui, out: &AnalysisOut, r: Rect) {
-        if r.width() < 60.0 || r.height() < 40.0 {
-            return;
-        }
-        let painter = ui.painter_at(r);
-        let resp = ui.interact(r, ui.scope_id().with("daw_spec"), Sense::hover());
-        painter.rect_filled(r, 3.0, crate::views::BG);
-        let rect = r;
-        let plot_r = inset(rect);
-        let f1 = (out.sr as f32 * 0.5).min(20000.0);
-        let pl = Plot::new(plot_r, analysis::F_LO, f1, -100.0, 0.0, true);
-        pl.grid_x(&painter, &|f| hz_label(f));
-        pl.grid_y(&painter, &|v| format!("{v:.0}"));
-        pl.frame(&painter);
-        for (c, col) in [(0usize, Color32::from_rgb(70, 200, 255)), (1, Color32::from_rgb(255, 100, 160))] {
-            pl.line(&painter, out.f.iter().copied().zip(out.db[c].iter().copied()), Stroke::new(1.3, col.gamma_multiply(0.9)));
-        }
-        painter.text(rect.left_top() + vec2(48.0, 6.0), Align2::LEFT_TOP, "Average spectrum (dBFS)", FontId::proportional(9.5), Color32::from_rgb(130, 142, 160));
-        if let Some(h) = resp.hover_pos() {
-            if plot_r.contains(h) {
-                let f = pl.fx(h.x);
-                if let Some(i) = out.f.iter().position(|&x| x >= f) {
-                    painter.line_segment([pos2(h.x, plot_r.top()), pos2(h.x, plot_r.bottom())], Stroke::new(1.0, Color32::from_white_alpha(50)));
-                    pl.label(&painter, pos2(plot_r.right() - 4.0, plot_r.top() + 4.0), format!("{}Hz  L {:.1}  R {:.1}", hz_label(out.f[i]), out.db[0][i], out.db[1][i]), Color32::WHITE, Align2::RIGHT_TOP);
-                }
-            }
-        }
-    }
-
-    fn spectrogram_view(&mut self, ui: &mut Ui, out: &Arc<AnalysisOut>, r: Rect, range: (i64, i64), sr: u32) {
-        if r.width() < 60.0 || r.height() < 40.0 || out.spg.is_empty() {
-            return;
-        }
-        // texture from the cached analysis (rebuilt when a new result arrived)
-        let ptr = Arc::as_ptr(out) as usize;
-        if self.spg_tex.is_none() || self.spg_ptr != ptr {
-            let lut = crate::colormap::Cmap::Inferno.lut();
-            let (w, h) = (out.spg_w, out.spg_h);
-            let mut px = vec![Color32::BLACK; w * h];
-            for x in 0..w {
-                for y in 0..h {
-                    px[(h - 1 - y) * w + x] = lut[out.spg[x * h + y] as usize];
-                }
-            }
-            let img = egui::ColorImage::new([w, h], px);
-            match &mut self.spg_tex {
-                Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-                None => self.spg_tex = Some(ui.ctx().load_texture("daw_spectrogram", img, egui::TextureOptions::LINEAR)),
-            }
-            self.spg_ptr = ptr;
-        }
-        let painter = ui.painter_at(r);
-        let rect = r;
-        painter.rect_filled(rect, 3.0, Color32::BLACK);
-        let plot_r = Rect::from_min_max(rect.min + vec2(34.0, 4.0), rect.max - vec2(4.0, 16.0));
-        if let Some(t) = &self.spg_tex {
-            painter.image(t.id(), plot_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-        }
-        // frequency axis (log, same mapping as the rows)
-        let f1 = (out.sr as f32 * 0.5).min(20000.0);
-        for f in [50.0f32, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] {
-            if f >= f1 {
-                continue;
-            }
-            let t = (f / analysis::F_LO).ln() / (f1 / analysis::F_LO).ln();
-            let y = plot_r.bottom() - t * plot_r.height();
-            painter.line_segment([pos2(plot_r.left() - 3.0, y), pos2(plot_r.left(), y)], Stroke::new(1.0, Color32::from_gray(120)));
-            painter.text(pos2(plot_r.left() - 5.0, y), Align2::RIGHT_CENTER, hz_label(f), FontId::proportional(8.5), Color32::from_gray(140));
-        }
-        let (a, b) = range;
-        painter.text(pos2(plot_r.left(), plot_r.bottom() + 2.0), Align2::LEFT_TOP, clock(a as f32 / sr as f32), FontId::proportional(8.5), Color32::from_gray(140));
-        painter.text(pos2(plot_r.right(), plot_r.bottom() + 2.0), Align2::RIGHT_TOP, clock(b as f32 / sr as f32), FontId::proportional(8.5), Color32::from_gray(140));
-        painter.rect_stroke(plot_r, 0.0, Stroke::new(1.0, Color32::from_gray(50)), egui::StrokeKind::Inside);
-        // playhead inside the analysed stretch
-        let pos = self.pos();
-        if pos >= a && pos <= b && b > a {
-            let x = plot_r.left() + (pos - a) as f32 / (b - a) as f32 * plot_r.width();
-            painter.line_segment([pos2(x, plot_r.top()), pos2(x, plot_r.bottom())], Stroke::new(1.0, PLAYHEAD));
-        }
     }
 }

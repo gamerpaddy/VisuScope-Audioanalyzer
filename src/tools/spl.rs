@@ -279,12 +279,12 @@ impl Tool for Spl {
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Weighting").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Weighting")).small().weak());
             let w0 = self.weighting;
             for (i, n) in WEIGHT.iter().enumerate() {
-                ui.selectable_value(&mut self.weighting, i, *n);
+                ui.selectable_value(&mut self.weighting, i, crate::lang::tr(*n));
             }
-            ui.label(RichText::new("Time").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Time")).small().weak());
             let t0 = self.time;
             for (i, n) in TIME.iter().enumerate() {
                 ui.selectable_value(&mut self.time, i, n.0).on_hover_text(n.1);
@@ -293,10 +293,10 @@ impl Tool for Spl {
                 self.p = 0.0;
                 self.pmax = 0.0;
             }
-            ui.label(RichText::new("Input").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Input")).small().weak());
             ui.selectable_value(&mut self.ch, 0, "L");
             ui.selectable_value(&mut self.ch, 1, "R");
-            if crate::mapping::btn(ui, "Reset").on_hover_text("Restart Leq, Lmax, peak and the percentile levels").clicked() {
+            if crate::mapping::btn(ui, "Reset").on_hover_text(crate::lang::tr("Restart Leq, Lmax, peak and the percentile levels")).clicked() {
                 self.reset_stats();
             }
         });
@@ -319,15 +319,15 @@ impl Tool for Spl {
             readout(ui, "L90", &pc(90.0), Color32::from_rgb(190, 190, 200));
         });
         if !self.calibrated {
-            ui.label(RichText::new("Not calibrated: levels are dB relative to full scale. Open Calibration below.").small().color(Color32::from_rgb(230, 200, 110)));
+            ui.label(RichText::new(crate::lang::tr("Not calibrated: levels are dB relative to full scale. Open Calibration below.")).small().color(Color32::from_rgb(230, 200, 110)));
         }
         ui.label(RichText::new(format!("Leq over {}   all weightings: LAeq {}  LCeq {}  LZeq {}", super::fmt_time(self.cnt as f32 / self.sr), leq(self.sum[0]), leq(self.sum[1]), leq(self.sum[2]))).small().weak());
 
-        egui::CollapsingHeader::new("Calibration").default_open(!self.calibrated).show(ui, |ui| {
+        egui::CollapsingHeader::new(crate::lang::tr("Calibration")).default_open(!self.calibrated).show(ui, |ui| {
             heading(ui, "With an acoustic calibrator");
             ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut self.cal_ref).speed(0.1).range(40.0..=140.0).suffix(" dB SPL"));
-                if crate::mapping::btn(ui, "Calibrate now").on_hover_text("Put the calibrator on the microphone, then click: the current unweighted 1 s level is set to this value").clicked() {
+                ui.add(egui::DragValue::new(&mut self.cal_ref).speed(0.1).range(40.0..=140.0).suffix(crate::lang::tr(" dB SPL")));
+                if crate::mapping::btn(ui, "Calibrate now").on_hover_text(crate::lang::tr("Put the calibrator on the microphone, then click: the current unweighted 1 s level is set to this value")).clicked() {
                     if self.pz > 1e-16 {
                         let off = self.cal_ref - 10.0 * (self.pz as f32).log10();
                         self.fs_sine_spl = off + SINE_RMS_DB;
@@ -340,8 +340,8 @@ impl Tool for Spl {
             });
             heading(ui, "Or from the specification");
             ui.horizontal(|ui| {
-                ui.label("Full-scale sine =");
-                if ui.add(egui::DragValue::new(&mut self.fs_sine_spl).speed(0.1).range(-20.0..=200.0).suffix(" dB SPL")).changed() {
+                ui.label(crate::lang::tr("Full-scale sine ="));
+                if ui.add(egui::DragValue::new(&mut self.fs_sine_spl).speed(0.1).range(-20.0..=200.0).suffix(crate::lang::tr(" dB SPL"))).changed() {
                     self.calibrated = true;
                 }
                 if crate::mapping::small_btn(ui, "Uncalibrated").clicked() {
@@ -349,7 +349,7 @@ impl Tool for Spl {
                     self.calibrated = false;
                 }
             });
-            ui.label(RichText::new("The SPL of a sine at digital full scale. Microphone calibration files change only the spectrum views, not this meter.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("The SPL of a sine at digital full scale. Microphone calibration files change only the spectrum views, not this meter.")).small().weak());
         });
 
         if self.history.len() < 2 {

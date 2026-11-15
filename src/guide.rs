@@ -171,7 +171,7 @@ impl App {
         let (mut back, mut next, mut cancel, mut finish) = (false, false, false, false);
         match step {
             Step::Input => {
-                ui.label("Which input?");
+                ui.label(crate::lang::tr("Which input?"));
                 let cur = self.devices.get(w.in_dev).map(|d| d.label.clone()).unwrap_or_else(|| "no input device".into());
                 egui::ComboBox::from_id_salt("wz_in").width(ui.available_width() - 8.0).truncate().selected_text(cur).show_ui(ui, |ui| {
                     for (i, d) in self.devices.iter().enumerate() {
@@ -179,18 +179,18 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Left / A channel");
+                    ui.label(crate::lang::tr("Left / A channel"));
                     ui.add(egui::DragValue::new(&mut w.in_l).range(1..=32));
-                    ui.label("Right / B channel");
+                    ui.label(crate::lang::tr("Right / B channel"));
                     ui.add(egui::DragValue::new(&mut w.in_r).range(1..=32));
-                    if crate::mapping::small_btn(ui, "same for both").on_hover_text("One microphone: use its channel for left and right").clicked() {
+                    if crate::mapping::small_btn(ui, "same for both").on_hover_text(crate::lang::tr("One microphone: use its channel for left and right")).clicked() {
                         w.in_r = w.in_l;
                     }
                 });
-                ui.label(RichText::new("Channels are numbered from 1. A one-microphone measurement uses the same channel for both.").small().weak());
+                ui.label(RichText::new(crate::lang::tr("Channels are numbered from 1. A one-microphone measurement uses the same channel for both.")).small().weak());
             }
             Step::Output => {
-                ui.label("Which output? (it plays the sweep or the tone, and the monitor)");
+                ui.label(crate::lang::tr("Which output? (it plays the sweep or the tone, and the monitor)"));
                 let cur = self.gen_devs.get(w.out_dev).map(|d| d.label.clone()).unwrap_or_else(|| "default output".into());
                 egui::ComboBox::from_id_salt("wz_out").width(ui.available_width() - 8.0).truncate().selected_text(cur).show_ui(ui, |ui| {
                     for (i, d) in self.gen_devs.iter().enumerate() {
@@ -198,11 +198,11 @@ impl App {
                     }
                 });
                 if w.plan.runs.contains(&Run::Sweep) {
-                    ui.label(RichText::new("Connect this output to the device under test, and that device to the input (or choose a [Loopback] input).").small().color(Color32::from_rgb(255, 190, 100)));
+                    ui.label(RichText::new(crate::lang::tr("Connect this output to the device under test, and that device to the input (or choose a [Loopback] input).")).small().color(Color32::from_rgb(255, 190, 100)));
                 }
             }
             Step::Calibration => {
-                ui.label("A microphone calibration file corrects the spectrum views and measurements. Skip it if you have none or do not need one.");
+                ui.label(crate::lang::tr("A microphone calibration file corrects the spectrum views and measurements. Skip it if you have none or do not need one."));
                 for (slot, name) in ["Calibration file (0 degrees)", "Calibration file (90 degrees, optional)"].into_iter().enumerate() {
                     ui.horizontal(|ui| {
                         let shown = w.cal[slot].as_ref().map(|p| p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()).or_else(|| Some(self.mic_paths[slot].clone()).filter(|s| !s.is_empty()).map(|s| format!("{} (already loaded)", std::path::Path::new(&s).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(s))));
@@ -218,28 +218,28 @@ impl App {
             }
             Step::Params => {
                 if let Some((f0, f1, secs, level, avg)) = w.sweep.as_mut() {
-                    ui.label(RichText::new("Sweep").strong());
+                    ui.label(RichText::new(crate::lang::tr("Sweep")).strong());
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(f0).range(5.0..=2000.0).speed(1.0).suffix(" Hz"));
-                        ui.label("to");
-                        ui.add(egui::DragValue::new(f1).range(1000.0..=96000.0).speed(10.0).suffix(" Hz"));
+                        ui.add(egui::DragValue::new(f0).range(5.0..=2000.0).speed(1.0).suffix(crate::lang::tr(" Hz")));
+                        ui.label(crate::lang::tr("to"));
+                        ui.add(egui::DragValue::new(f1).range(1000.0..=96000.0).speed(10.0).suffix(crate::lang::tr(" Hz")));
                     });
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(secs).range(0.5..=12.0).speed(0.1).suffix(" s long"));
-                        ui.add(egui::DragValue::new(level).range(-60.0..=0.0).speed(0.2).suffix(" dBFS"));
-                        ui.add(egui::DragValue::new(avg).range(1..=64).suffix(" averages"));
+                        ui.add(egui::DragValue::new(secs).range(0.5..=12.0).speed(0.1).suffix(crate::lang::tr(" s long")));
+                        ui.add(egui::DragValue::new(level).range(-60.0..=0.0).speed(0.2).suffix(crate::lang::tr(" dBFS")));
+                        ui.add(egui::DragValue::new(avg).range(1..=64).suffix(crate::lang::tr(" averages")));
                     });
                 }
                 if let Some(m) = w.dist_mode.as_mut() {
-                    ui.label(RichText::new("Distortion measurement").strong());
+                    ui.label(RichText::new(crate::lang::tr("Distortion measurement")).strong());
                     egui::ComboBox::from_id_salt("wz_dist").selected_text(["THD vs frequency", "THD vs level", "IMD vs level", "Swept harmonics (from the sweep)"][(*m).min(3)]).show_ui(ui, |ui| {
                         for (i, n) in ["THD vs frequency", "THD vs level", "IMD vs level", "Swept harmonics (from the sweep)"].iter().enumerate() {
-                            ui.selectable_value(m, i, *n);
+                            ui.selectable_value(m, i, crate::lang::tr(*n));
                         }
                     });
                 }
                 if let Some((wave, noise, freq, level)) = w.tone.as_mut() {
-                    ui.label(RichText::new("Generator").strong());
+                    ui.label(RichText::new(crate::lang::tr("Generator")).strong());
                     ui.horizontal(|ui| {
                         let name = noise.map(|n| format!("{n:?} noise")).unwrap_or_else(|| wave.name().to_string());
                         egui::ComboBox::from_id_salt("wz_wave").width(130.0).selected_text(name).show_ui(ui, |ui| {
@@ -256,8 +256,8 @@ impl App {
                                 }
                             }
                         });
-                        ui.add_enabled(*wave != Wave::Noise, egui::DragValue::new(freq).range(1.0..=96000.0).speed(1.0).suffix(" Hz"));
-                        ui.add(egui::DragValue::new(level).range(-90.0..=0.0).speed(0.2).suffix(" dBFS"));
+                        ui.add_enabled(*wave != Wave::Noise, egui::DragValue::new(freq).range(1.0..=96000.0).speed(1.0).suffix(crate::lang::tr(" Hz")));
+                        ui.add(egui::DragValue::new(level).range(-90.0..=0.0).speed(0.2).suffix(crate::lang::tr(" dBFS")));
                     });
                 }
             }
@@ -268,27 +268,27 @@ impl App {
                 }
                 if let Some(pr) = w.plan.preset {
                     ui.separator();
-                    ui.checkbox(&mut w.use_preset, format!("Put this routing patch into the node editor: {}", pr.name())).on_hover_text("Switches the routing graph on and replaces the current patch (Ctrl+Z in the node editor brings the old one back)");
+                    ui.checkbox(&mut w.use_preset, format!("Put this routing patch into the node editor: {}", pr.name())).on_hover_text(crate::lang::tr("Switches the routing graph on and replaces the current patch (Ctrl+Z in the node editor brings the old one back)"));
                 }
                 if !w.plan.runs.is_empty() {
-                    ui.checkbox(&mut w.start, "Start the measurement when everything is set up");
+                    ui.checkbox(&mut w.start, crate::lang::tr("Start the measurement when everything is set up"));
                 }
             }
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.add_enabled(w.at > 0, egui::Button::new("Back")).clicked() {
+            if ui.add_enabled(w.at > 0, egui::Button::new(crate::lang::tr("Back"))).clicked() {
                 back = true;
             }
             if step == Step::Review {
-                if crate::mapping::btn(ui, RichText::new("Set up").strong()).clicked() {
+                if crate::mapping::btn(ui, RichText::new(crate::lang::tr("Set up")).strong()).clicked() {
                     finish = true;
                 }
             } else {
                 if step == Step::Calibration && w.cal.iter().all(|c| c.is_none()) && crate::mapping::btn(ui, "Skip").clicked() {
                     next = true;
                 }
-                if crate::mapping::btn(ui, RichText::new("Next").strong()).clicked() {
+                if crate::mapping::btn(ui, RichText::new(crate::lang::tr("Next")).strong()).clicked() {
                     next = true;
                 }
             }

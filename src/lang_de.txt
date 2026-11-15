@@ -1,0 +1,1030 @@
+# VisuScope: Deutsch. English<TAB>Deutsch, one pair per line; \n is a line break.
+Voltage calibration	Spannungskalibrierung
+Not calibrated - showing dBFS / full-scale units	Nicht kalibriert - Anzeige in dBFS / Vollaussteuerung
+Display unit	Anzeigeeinheit
+Know your converter's full scale? 0 dBFS equals:	Vollaussteuerung des Wandlers bekannt? 0 dBFS entspricht:
+Or apply a known sine / signal and calibrate:	Oder einen bekannten Sinus anlegen und kalibrieren:
+Tone (fundamental)	Ton (Grundton)
+Wideband (RMS)	Breitband (RMS)
+Tone mode uses the detected fundamental (sine). Wideband uses the time-domain RMS (any waveform).	Ton nutzt den erkannten Grundton (Sinus). Breitband nutzt den Effektivwert im Zeitbereich (jede Wellenform).
+readout Hz	Anzeige Hz
+Hold	Halten
+No tone detected (need a signal above -110 dBFS)	Kein Ton erkannt (Signal über -110 dBFS nötig)
+Fundamental	Grundton
+Noise floor	Rauschboden
+RMS / Peak	RMS / Spitze
+Fund (voltage)	Grundton (Spannung)
+RMS / Peak (V)	RMS / Spitze (V)
+Cursors	Cursor
+Peak level correction	Pegelkorrektur der Spitzen
+Read the true level of a peak between two bins (undoes the loss of the window). Shift+click puts a cursor on the nearest peak; a plain click puts it exactly where you click.	Liest den wahren Pegel einer Spitze zwischen zwei Bins (gleicht den Verlust des Fensters aus). Shift+Klick setzt einen Cursor auf die nächste Spitze; ein einfacher Klick genau auf die Stelle.
+Click = A, right-click = B (spectrum / spectrogram)	Klick = A, Rechtsklick = B (Spektrum / Spektrogramm)
+Snapshots	Schnappschüsse
+Assistant	Assistent
+Say what you want to measure or look at. I set up the input, windows, layout and settings, and can start the measurement.	Sag, was du messen oder ansehen willst. Ich richte Eingang, Fenster, Layout und Einstellungen ein und kann die Messung starten.
+e.g. frequency response and distortion with a sweep on input mic1	z. B. Frequenzgang und Verzerrung mit einem Sweep am Eingang mic1
+Plan	Planen
+Examples: press one to plan it (the sentence is filled in, change it as you like)	Beispiele: eins anklicken zum Planen (der Satz wird eingetragen, ändere ihn nach Belieben)
+Understands English, German, French and Spanish keywords and fixes small typos. It is not an AI: it looks for task words, numbers and device names.	Versteht englische, deutsche, französische und spanische Stichwörter und kleine Tippfehler. Es ist keine KI: es sucht nach Aufgabenwörtern, Zahlen und Gerätenamen.
+Walk me through	Schritt für Schritt
+Choose the input, the output, a calibration file and the parameters step by step, then everything is set up in that order	Eingang, Ausgang, Kalibrierdatei und Parameter Schritt für Schritt wählen, dann wird alles in dieser Reihenfolge eingerichtet
+Set up and start	Einrichten und starten
+Each generator is a node in the Routing window	Jeder Generator ist ein Knoten im Routing-Fenster
+Add another generator	Weiteren Generator hinzufügen
+Remove this generator	Diesen Generator entfernen
+Where this generator goes is set in the Routing window (connect its node to an output or an analyser).	Wohin dieser Generator geht, wird im Routing-Fenster festgelegt (seinen Knoten mit einem Ausgang oder dem Analysator verbinden).
+Output	Ausgang
+Plays to the chosen device. To measure it, pick its [Loopback] entry as the input. Keep levels low near speakers or a live mic.	Spielt auf dem gewählten Gerät. Zum Messen dessen [Loopback]-Eintrag als Eingang wählen. Pegel in der Nähe von Lautsprechern oder einem offenen Mikrofon niedrig halten.
+Left	Links
+mute	stumm
+Right	Rechts
+Link L/R	L/R koppeln
+peak for tones, RMS for noise / multitone	Spitze bei Tönen, RMS bei Rauschen / Multiton
+Frequency	Frequenz
+Duty	Tastgrad
+to	bis
+Sweep time	Sweep-Dauer
+Tones	Töne
+Log spacing	Log. Abstand
+Schroeder phases (low crest)	Schroeder-Phasen (kleiner Crest)
+Fixed twin-tone IMD test signal; level is the peak of the sum.	Festes Zweiton-IMD-Testsignal; der Pegel ist die Spitze der Summe.
+Correlated L/R (mono noise)	L/R korreliert (Mono-Rauschen)
+Add harmonics (tones / sweeps)	Oberwellen zufügen (Töne / Sweeps)
+R vs L phase	Phase R gegen L
+Invert R	R invertieren
+Shifts the right channel's tone phase (watch the goniometer and correlation).	Verschiebt die Phase des rechten Tons (Goniometer und Korrelation beobachten).
+Sample-clock jitter (tones, sweeps, multitone)	Jitter des Abtasttakts (Töne, Sweeps, Multiton)
+Random RMS	Zufällig RMS
+Sine amplitude	Sinus-Amplitude
+Sine rate	Sinus-Rate
+Quantise output	Ausgang quantisieren
+Word length	Wortbreite
+Dither amount	Dither-Menge
+Quantising a low-level tone shows how dither trades distortion for noise on the THD+N / ENOB readout.	Das Quantisieren eines leisen Tons zeigt an THD+N / ENOB, wie Dither Verzerrung gegen Rauschen tauscht.
+Not controlled. Drag a wire from the output dot of a node onto this dot: a generator, a timeline out node, a low-pass ...	Nicht gesteuert. Eine Leitung vom Ausgangspunkt eines Knotens auf diesen Punkt ziehen: ein Generator, ein Timeline-Ausgang, ein Tiefpass ...
+The second entry is chosen while the signal (full scale is 1) is above the threshold, the first while it is below	Der zweite Eintrag gilt, solange das Signal (Vollaussteuerung ist 1) über der Schwelle liegt, der erste darunter
+Threshold	Schwelle
+Hysteresis	Hysterese
+Total width: it switches on above threshold + half of it and off below threshold - half of it. 0 is a plain threshold.	Gesamtbreite: schaltet ein über Schwelle + Hälfte und aus unter Schwelle - Hälfte. 0 ist eine einfache Schwelle.
+Inverted (the first entry above the threshold)	Invertiert (der erste Eintrag über der Schwelle)
+Signal level (full scale is 1) -> value, outside the range it stops	Signalpegel (Vollaussteuerung ist 1) -> Wert, außerhalb des Bereichs bleibt er stehen
+Signal at the lowest	Signal am unteren Ende
+Signal at the highest	Signal am oberen Ende
+Value at the lowest	Wert am unteren Ende
+Value at the highest	Wert am oberen Ende
+Logarithmic	Logarithmisch
+To smooth the signal first, put a Control low-pass node between.	Um das Signal erst zu glätten, einen Steuer-Tiefpass-Knoten dazwischen setzen.
+Search nodes: eq, input, compressor ...	Knoten suchen: eq, input, compressor ...
+no match	kein Treffer
+Stop comparing and keep this version	Vergleich beenden und diese Version behalten
+Presets	Vorlagen
+Start from a ready-made patch (replaces the current one; Ctrl+Z brings it back)	Mit einem fertigen Patch beginnen (ersetzt den aktuellen; Strg+Z holt ihn zurück)
+Saved routings	Gespeicherte Routings
+none yet: type a name below and save	noch keine: unten einen Namen eingeben und speichern
+Load this routing (replaces the current one)	Dieses Routing laden (ersetzt das aktuelle)
+Delete this saved routing (click twice)	Dieses gespeicherte Routing löschen (zweimal klicken)
+name	Name
+Save the current routing under this name	Das aktuelle Routing unter diesem Namen speichern
+The routing graph is off. Turn it on in Options.	Der Routing-Graph ist aus. In den Optionen einschalten.
+Search all nodes (Space)	Alle Knoten durchsuchen (Leertaste)
+Show all nodes (F)	Alle Knoten zeigen (F)
+Move nodes apart that overlap	Überlappende Knoten auseinanderschieben
+Undo	Rückgängig
+Undo the last change of the patch (Ctrl+Z)	Letzte Änderung am Patch rückgängig (Strg+Z)
+Redo	Wiederholen
+Redo (Ctrl+Y or Ctrl+Shift+Z)	Wiederholen (Strg+Y oder Strg+Shift+Z)
+Probe	Abhören
+Listening probe (P): hover over a node, or over one of its input or output dots, to hear the signal there	Abhör-Sonde (P): mit der Maus über einen Knoten oder einen seiner Ein- oder Ausgangspunkte fahren, um das Signal dort zu hören
+Volume of the probe	Lautstärke der Sonde
+Same as the first output node	Wie der erste Ausgangsknoten
+Default output	Standardausgang
+Where the probe plays	Wo die Sonde spielt
+mute same device	gleiches Gerät stumm
+An output node that plays to the same device as the probe is silent while the probe listens (the other outputs go on)	Ein Ausgangsknoten, der auf demselben Gerät wie die Sonde spielt, ist stumm, solange die Sonde hört (die anderen Ausgänge laufen weiter)
+Zoom of the node window: mouse wheel, or pinch on a touchpad (click: back to 100 %)	Zoom des Knotenfensters: Mausrad oder Zwei-Finger-Geste (Klick: zurück auf 100 %)
+A node with two outputs, both the whole stereo signal: the first goes on to the same place, the second is free to connect anywhere	Ein Knoten mit zwei Ausgängen, beide mit dem ganzen Stereosignal: der erste geht weiter wie bisher, der zweite ist frei
+A split node in this line: the left channel goes on to the same place, the right output is free to connect anywhere	Ein Split-Knoten in dieser Leitung: der linke Kanal geht weiter wie bisher, der rechte Ausgang ist frei
+A merge node in this line: this line goes into its left input, connect a second line to the right input	Ein Merge-Knoten in dieser Leitung: diese Leitung geht in seinen linken Eingang, eine zweite an den rechten anschließen
+Bypass this node	Diesen Knoten überbrücken
+Remove the node	Knoten entfernen
+A node with two outputs that both carry the whole stereo signal	Ein Knoten mit zwei Ausgängen, die beide das ganze Stereosignal führen
+A split node on this output: its two outputs carry the left and the right channel, to route them one by one	Ein Split-Knoten an diesem Ausgang: seine zwei Ausgänge führen den linken und den rechten Kanal, um sie einzeln zu leiten
+feedback: this output is captured by the input that feeds it	Rückkopplung: dieser Ausgang wird von dem Eingang aufgenommen, der ihn speist
+set it in the Generator window (tabs)	im Generator-Fenster einstellen (Reiter)
+Master mix	Master-Mix
+Adds an armed track to the timeline that records what this node receives	Fügt der Timeline eine scharfe Spur hinzu, die aufnimmt, was dieser Knoten empfängt
+both lines carry the whole stereo signal	beide Leitungen führen das ganze Stereosignal
+feeds spectrum, scope, loudness ...	speist Spektrum, Oszilloskop, Lautheit ...
+Draw	Zeichnen
+Edit with the mouse in the graph: drag a dot (frequency and level), click empty space = new band, right-click a dot = remove it	Mit der Maus im Graphen bearbeiten: Punkt ziehen (Frequenz und Pegel), Klick ins Leere = neues Band, Rechtsklick auf Punkt = entfernen
++ band	+ Band
+Add a band (up to 12)	Band hinzufügen (bis 12)
+Q (width: higher is narrower)	Q (Breite: höher ist schmaler)
+Remove this band	Dieses Band entfernen
+Inputs	Eingänge
+Mute this input	Diesen Eingang stummschalten
+a series of harmonics of the signal, relative to its level	eine Reihe von Oberwellen des Signals, relativ zu seinem Pegel
+A room, a cabinet or a measured impulse response (also one saved from the Impulse window)	Ein Raum, eine Box oder eine gemessene Impulsantwort (auch eine aus dem Impuls-Fenster gespeicherte)
+Remove the impulse response	Impulsantwort entfernen
+Which input?	Welcher Eingang?
+Left / A channel	Links / Kanal A
+Right / B channel	Rechts / Kanal B
+One microphone: use its channel for left and right	Ein Mikrofon: seinen Kanal für links und rechts nehmen
+Channels are numbered from 1. A one-microphone measurement uses the same channel for both.	Kanäle zählen ab 1. Eine Messung mit einem Mikrofon nutzt denselben Kanal für beide.
+Which output? (it plays the sweep or the tone, and the monitor)	Welcher Ausgang? (er spielt den Sweep oder den Ton und den Monitor)
+Connect this output to the device under test, and that device to the input (or choose a [Loopback] input).	Diesen Ausgang mit dem Prüfling verbinden und den Prüfling mit dem Eingang (oder einen [Loopback]-Eingang wählen).
+A microphone calibration file corrects the spectrum views and measurements. Skip it if you have none or do not need one.	Eine Mikrofon-Kalibrierdatei korrigiert Spektrum und Messungen. Überspringen, wenn keine da ist oder keine gebraucht wird.
+ s long	 s lang
+ averages	 Mittelungen
+Distortion measurement	Verzerrungsmessung
+Switches the routing graph on and replaces the current patch (Ctrl+Z in the node editor brings the old one back)	Schaltet den Routing-Graphen ein und ersetzt den aktuellen Patch (Strg+Z im Knoten-Editor holt den alten zurück)
+Start the measurement when everything is set up	Messung starten, wenn alles eingerichtet ist
+Back	Zurück
+Set up	Einrichten
+Next	Weiter
+Cancel (Esc)	Abbrechen (Esc)
+Input mappings	Eingabe-Zuordnungen
+Last input:	Letzte Eingabe:
+Press Learn, then press the key or move the control. A key, a MIDI note or a button starts an action; a MIDI controller, a fader, knob or joystick axis drives a setting between the two values.	Lernen drücken, dann die Taste drücken oder den Regler bewegen. Eine Taste, eine MIDI-Note oder ein Knopf startet eine Aktion; ein MIDI-Controller, Fader, Drehregler oder eine Joystick-Achse stellt eine Einstellung zwischen den zwei Werten.
+Cancel	Abbrechen
+Learn	Lernen
+Clear	Leeren
+toggle	umschalten
+momentary (on while held)	Taster (an solange gehalten)
+inverted (off while held)	invertiert (aus solange gehalten)
+from	von
+reversed	umgekehrt
+(a key or button: lowest when released, highest when pressed)	(Taste oder Knopf: unten wenn losgelassen, oben wenn gedrückt)
+The keys the windows already use (space, R, S, M, K, Ctrl+1 to 9 ...) keep working: avoid binding them to something else.	Die Tasten, die die Fenster schon nutzen (Leertaste, R, S, M, K, Strg+1 bis 9 ...), gehen weiter: besser nicht anders belegen.
+Undo layout change	Layout-Änderung rückgängig
+Redo layout change	Layout-Änderung wiederholen
+Saved	Gespeichert
+layout name	Layout-Name
+Save current	Aktuelles speichern
+Pop out to own window	In eigenes Fenster auslagern
+Drag the new window to another monitor.\nClosing it docks it back.	Das neue Fenster auf einen anderen Monitor ziehen.\nSchließen dockt es wieder an.
+Input binding	Eingabe-Bindung
+Lowest / button off	Unten / Knopf aus
+Highest / button on	Oben / Knopf an
+Reversed	Umgekehrt
+Toggle: each press switches	Umschalter: jeder Druck schaltet
+Momentary: on while held	Taster: an solange gehalten
+Inverted: off while held, on when let go	Invertiert: aus solange gehalten, an beim Loslassen
+Remove binding	Bindung entfernen
+Freeze / resume the analysis	Analyse einfrieren / fortsetzen
+Reset average / max / min	Mittel / Max / Min zurücksetzen
+Save a screenshot	Bildschirmfoto speichern
+Monitor on / off	Monitor an / aus
+Generator on / off	Generator an / aus
+Monitor volume	Monitor-Lautstärke
+Generator level	Generator-Pegel
+Generator frequency	Generator-Frequenz
+Tile the windows	Fenster kacheln
+Open / close the assistant	Assistent öffnen / schließen
+Timeline: play / pause	Timeline: Wiedergabe / Pause
+Timeline: record / stop	Timeline: Aufnahme / Stopp
+Timeline: loop on / off	Timeline: Schleife an / aus
+Timeline: to the start	Timeline: zum Anfang
+Timeline: add a marker at the playhead	Timeline: Marker an der Abspielposition setzen
+Timeline: zoom in	Timeline: hineinzoomen
+Timeline: zoom out	Timeline: herauszoomen
+Timeline: show the whole project	Timeline: ganzes Projekt zeigen
+Timeline: split at the playhead	Timeline: an der Abspielposition teilen
+Timeline: undo	Timeline: rückgängig
+Timeline: redo	Timeline: wiederholen
+Timeline: master volume	Timeline: Master-Lautstärke
+Routing: listening probe on / off	Routing: Abhör-Sonde an / aus
+Routing: switch A / B	Routing: A / B umschalten
+Routing: undo	Routing: rückgängig
+Routing: redo	Routing: wiederholen
+Options	Optionen
+Windows	Fenster
+Snap windows to each other and to the edges	Fenster rasten aneinander und an den Rändern ein
+Ctrl while dragging moves a window freely. Alt while resizing leaves the neighbours alone.	Strg beim Ziehen bewegt ein Fenster frei. Alt beim Größenändern lässt die Nachbarn in Ruhe.
+Re-tile automatically when a window is opened or closed	Automatisch neu kacheln, wenn ein Fenster geöffnet oder geschlossen wird
+Ctrl+Alt+Z	Strg+Alt+Z
+Ctrl+Alt+Y	Strg+Alt+Y
+Light interface	Helle Oberfläche
+Light menus, panels and window frames. The plots stay dark, like the screen of a scope	Helle Menüs, Leisten und Fensterrahmen. Die Plots bleiben dunkel, wie der Schirm eines Oszilloskops
+Interface size	Größe der Oberfläche
+text and widgets	Text und Bedienelemente
+Apply scale	Größe anwenden
+Makes everything larger or smaller, for high-resolution screens (Ctrl + plus / Ctrl + minus do the same at once). The windows keep their arrangement.	Macht alles größer oder kleiner, für hochauflösende Bildschirme (Strg + Plus / Strg + Minus tun dasselbe sofort). Die Fenster behalten ihre Anordnung.
+Inputs, generators, the timeline and the output devices are nodes in the Routing window; the analysers read what you connect to the Analyzer node. The Presets menu there sets up a patch for a task.	Eingänge, Generatoren, die Timeline und die Ausgabegeräte sind Knoten im Routing-Fenster; die Analysatoren lesen, was am Analyzer-Knoten hängt. Das Menü Vorlagen dort baut einen Patch für eine Aufgabe.
+Safety buffer	Sicherheitspuffer
+extra delay	zusätzliche Verzögerung
+Holds back that much audio before it is played (output devices, monitor, timeline playback) and cushions the sources of the routing graph, so short stalls of the system do not become gaps or crackles. It adds the same amount of delay: raise it when the Profiler reports an output that ran dry.	Hält so viel Audio zurück, bevor es gespielt wird (Ausgabegeräte, Monitor, Timeline-Wiedergabe), und polstert die Quellen des Routing-Graphen, damit kurze Hänger des Systems keine Lücken oder Knackser werden. Es kommt dieselbe Verzögerung dazu: erhöhen, wenn der Profiler einen leergelaufenen Ausgang meldet.
+Performance	Leistung
+UI frame rate cap	Obergrenze Bildrate
+Readout update rate (Hz)	Aktualisierung der Zahlen (Hz)
+Hold the numeric readouts	Zahlenanzeigen halten
+Bind keys, MIDI notes and controllers, game controller and joystick buttons and axes to actions and sliders	Tasten, MIDI-Noten und -Controller, Knöpfe und Achsen von Gamepads und Joysticks an Aktionen und Regler binden
+Files	Dateien
+Import audio into the timeline at its start, not at the cursor	Audio am Anfang der Timeline importieren, nicht am Cursor
+Files added to the timeline (the Import button, drag and drop, the track menus) begin at the leftmost position, so several imports line up. Off: they are placed at the cursor.	Dateien, die in die Timeline kommen (Import-Knopf, Ziehen und Ablegen, Spurmenüs), beginnen ganz links, damit mehrere Importe übereinander liegen. Aus: sie landen am Cursor.
+Command palette	Befehlspalette
+Type a command: a window, a layout, play, record ...	Befehl tippen: ein Fenster, ein Layout, play, record ...
+nothing found	nichts gefunden
+Enter runs, Esc closes, Ctrl+K opens	Enter startet, Esc schließt, Strg+K öffnet
+Colour of the left trace	Farbe der linken Kurve
+Colour of the right trace	Farbe der rechten Kurve
+Blend	Mischen
+The traces add up instead of one covering the other: where they overlap the two colours mix into a third one	Die Kurven addieren sich, statt dass eine die andere verdeckt: wo sie sich überlappen, mischen sich die zwei Farben zu einer dritten
+Rising	Steigend
+Falling	Fallend
+level	Pegel
+Trigger level over the full range, also above or below the visible window	Triggerpegel über den ganzen Bereich, auch über oder unter dem sichtbaren Fenster
+% hyst	% Hyst.
+HF reject	HF-Sperre
+Low-pass filter on the trigger signal only. The displayed trace is not filtered.	Tiefpass nur auf dem Triggersignal. Die gezeigte Kurve wird nicht gefiltert.
+Settings	Einstellungen
+Device	Gerät
+[Loopback] entries capture what a playback device is playing.	[Loopback]-Einträge nehmen auf, was ein Wiedergabegerät spielt.
+Play the analysed input (L and R) on an output device	Den analysierten Eingang (L und R) auf einem Ausgabegerät spielen
+This loopback input captures the monitor output: choose another output (feedback).	Dieser Loopback-Eingang nimmt den Monitor-Ausgang auf: anderen Ausgang wählen (Rückkopplung).
+Which input channels of the device are analysed as L and R.	Welche Eingangskanäle des Geräts als L und R analysiert werden.
+Click a meter = L, right-click = R	Klick auf eine Anzeige = L, Rechtsklick = R
+Load file...	Datei laden...
+Calibration file of the microphone (frequency and dB pairs). A name containing 90 is stored as the 90° file.	Kalibrierdatei des Mikrofons (Paare aus Frequenz und dB). Ein Name mit 90 wird als 90°-Datei gespeichert.
+No file loaded. The spectrum then shows what the input hears, including the microphone's own response.	Keine Datei geladen. Das Spektrum zeigt dann, was der Eingang hört, samt dem eigenen Frequenzgang des Mikrofons.
+Correct the spectrum	Spektrum korrigieren
+Angle	Winkel
+0° (on axis)	0° (auf Achse)
+Apply to	Anwenden auf
+Corrects spectrum, spectrogram, 3D and snapshots. Measurements and the SPL meter use the raw signal.	Korrigiert Spektrum, Spektrogramm, 3D und Schnappschüsse. Messungen und der Schallpegelmesser nutzen das rohe Signal.
+FFT size	FFT-Größe
+Window	Fenster
+FFT rate	FFT-Rate
+Average	Mittelung
+Log frequency	Log. Frequenz
+Noise density (per Hz)	Rauschdichte (pro Hz)
+Shows the level of the noise in a bandwidth of 1 Hz instead of in one FFT bin: a noise then reads the same whatever the FFT size (at a larger size the bins are narrower and a noise reads lower in each). A tone reads lower than its level in this mode, by the same amount, and more so at a larger size.	Zeigt den Rauschpegel in 1 Hz Bandbreite statt in einem FFT-Bin: ein Rauschen liest sich dann bei jeder FFT-Größe gleich (bei größerer FFT sind die Bins schmaler und ein Rauschen liest sich in jedem tiefer). Ein Ton liest sich in diesem Modus um denselben Betrag tiefer als sein Pegel, bei größerer FFT noch mehr.
+Avg	Mittel
+Fill	Füllen
+Smoothing	Glättung
+Fractional-octave smoothing of the displayed spectrum (power average). Cursor readouts stay unsmoothed.	Glättung des gezeigten Spektrums in Oktav-Bruchteilen (Leistungsmittel). Cursor-Werte bleiben ungeglättet.
+Line width	Linienbreite
+Colormap	Farbskala
+Floor	Boden
+Ceiling	Decke
+Columns/s	Spalten/s
+Source	Quelle
+Difference: what is louder in the left than in the right channel is orange, the other way round blue. Put two signals on L and R to compare them (a before / after, two microphones)	Differenz: was links lauter ist als rechts, ist orange, umgekehrt blau. Zwei Signale auf L und R legen, um sie zu vergleichen (vorher / nachher, zwei Mikrofone)
+Difference mode has its own colours: colormap, floor and ceiling do not apply.	Der Differenz-Modus hat eigene Farben: Farbskala, Boden und Decke gelten nicht.
+Depth rows	Tiefenzeilen
+Freq detail	Frequenzdetail
+Rows/s	Zeilen/s
+Height	Höhe
+Wire overlay	Drahtgitter
+Harmonics	Oberwellen
+Manual f0	f0 von Hand
+Channel	Kanal
+Reset to the default	Auf Standard zurücksetzen
+Whole session: windows, tool settings, generators, routing	Ganze Sitzung: Fenster, Werkzeug-Einstellungen, Generatoren, Routing
+none yet: name the current setup below and save it	noch keine: unten den aktuellen Aufbau benennen und speichern
+Restore this snapshot (the current state is replaced)	Diesen Schnappschuss wiederherstellen (der aktuelle Zustand wird ersetzt)
+Delete this snapshot	Diesen Schnappschuss löschen
+snapshot name	Name des Schnappschusses
+notes: device under test, setup, what to compare ...	Notizen: Prüfling, Aufbau, was verglichen wird ...
+Show	Zeigen
+What this window shows	Was dieses Fenster zeigt
+Auto gain	Auto-Verstärkung
+Persist	Nachleuchten
+Brightness	Helligkeit
+Default brightness	Standard-Helligkeit
+Infinite	Unendlich
+Time-stretch / pitch-shift	Zeit dehnen / Tonhöhe ändern
+Tempo and pitch separately	Tempo und Tonhöhe getrennt
+Speed (both, like tape)	Geschwindigkeit (beides, wie Tonband)
+ semitones	 Halbtöne
+Pitch	Tonhöhe
+Apply	Anwenden
+Reset	Zurücksetzen
+Drag on the picture to mark a region.	Im Bild ziehen, um einen Bereich zu markieren.
+Level of new regions	Pegel neuer Bereiche
+Process the clip's audio (Ctrl+Z undoes it)	Audio des Clips bearbeiten (Strg+Z macht es rückgängig)
+Delete region	Bereich löschen
+Clear regions	Bereiche leeren
+Remove clicks	Knackser entfernen
+Finds short bursts far above the signal's own roughness and bridges them	Findet kurze Ausbrüche weit über der eigenen Rauigkeit des Signals und überbrückt sie
+Remove 50 Hz hum	50-Hz-Brummen entfernen
+Remove 60 Hz hum	60-Hz-Brummen entfernen
+Follow	Folgen
+Scroll the view with the playhead	Ansicht mit der Abspielposition mitlaufen lassen
+Clipping highlights	Clipping markieren
+Show samples above full scale in red on the waveforms and in the track meters (switch off to see the plain waveform)	Samples über Vollaussteuerung rot zeigen, in den Wellenformen und Spuranzeigen (ausschalten für die reine Wellenform)
+Punch in / out: a recording keeps only the selected time range (the audio it replaces stays on the track as an older take). Select the range first.	Punch in / out: eine Aufnahme behält nur den gewählten Zeitbereich (das ersetzte Audio bleibt als älterer Take auf der Spur). Erst den Bereich wählen.
+Snap	Einrasten
+Clips, the playhead and selections snap to the grid, to the edges of other clips and to the playhead (hold Alt to move freely, hold Shift while selecting to snap to the beat of the tracks that show it)	Clips, Abspielposition und Auswahl rasten am Raster, an den Kanten anderer Clips und an der Abspielposition ein (Alt halten für freies Bewegen, Shift beim Auswählen rastet auf den Takt der Spuren, die ihn zeigen)
+A new track with the selected time range: the clips of the selected track cut to it (the originals stay), or with no track selected the whole mix over that range	Eine neue Spur mit dem gewählten Zeitbereich: die Clips der gewählten Spur darauf zugeschnitten (die Originale bleiben), oder ohne gewählte Spur der ganze Mix über diesen Bereich
+Undo the last timeline edit (Ctrl+Z)	Letzte Timeline-Änderung rückgängig (Strg+Z)
+Redo (Ctrl+Y)	Wiederholen (Strg+Y)
+Zoom out (mouse wheel over the tracks)	Herauszoomen (Mausrad über den Spuren)
+Zoom in (mouse wheel over the tracks; Shift+wheel scrolls sideways)	Hineinzoomen (Mausrad über den Spuren; Shift+Rad schiebt seitwärts)
+Show the whole project	Ganzes Projekt zeigen
++ Track	+ Spur
+Draw a curve over the timeline with the mouse. It is not heard in the master mix: pick it in a Timeline out node of the Routing window, and let it control a setting of a node (right-click a value there)	Mit der Maus eine Kurve über die Timeline zeichnen. Sie ist im Master-Mix nicht zu hören: in einem Timeline-Ausgang-Knoten des Routing-Fensters wählen und eine Einstellung eines Knotens steuern lassen (dort Rechtsklick auf einen Wert)
+An armed track plus a Timeline record node to connect	Eine scharfe Spur plus ein Timeline-Aufnahme-Knoten zum Verbinden
+Record from an input (armed)	Von einem Eingang aufnehmen (scharf)
+scanning inputs...	suche Eingänge...
+Add audio files (WAV, FLAC, MP3 ...) as tracks. Files can also be dropped on the window.	Audiodateien (WAV, FLAC, MP3 ...) als Spuren hinzufügen. Dateien können auch auf das Fenster gezogen werden.
+Edit	Bearbeiten
+Render the selection (or everything) into one new track	Die Auswahl (oder alles) in eine neue Spur rechnen
+Bounce selected track	Gewählte Spur bouncen
+Project	Projekt
+New	Neu
+Wait for pending work and stop recording	Auf laufende Arbeit warten und Aufnahme stoppen
+Open...	Öffnen...
+Stop playback and recording; wait for pending work	Wiedergabe und Aufnahme stoppen; auf laufende Arbeit warten
+Save	Speichern
+Wait for pending timeline work	Auf laufende Timeline-Arbeit warten
+Save as...	Speichern unter...
+Tone, sweep, noise and kick: something to edit and analyse	Ton, Sweep, Rauschen und Kick: etwas zum Bearbeiten und Analysieren
+Analysis	Analyse
+The timeline plays into the Routing window:\nconnect its Timeline out node to an output or the analyser.	Die Timeline spielt ins Routing-Fenster:\nihren Timeline-Ausgang-Knoten mit einem Ausgang oder dem Analysator verbinden.
+Shift new recordings earlier by this much to make up for the interface latency	Neue Aufnahmen um so viel früher legen, um die Latenz des Interfaces auszugleichen
+recording latency compensation	Ausgleich der Aufnahme-Latenz
+Play through a sound device	Über ein Audiogerät abspielen
+volume	Lautstärke
+Show the timeline in the analysers	Timeline in den Analysatoren zeigen
+Off: playing leaves the live input in the spectrum, scope, loudness ... windows.\nOn: they follow the timeline while it plays (the live input pauses).\n'Loop & play' in the analysis panel always does this.	Aus: beim Abspielen bleibt der Live-Eingang in Spektrum, Oszilloskop, Lautheit ...\nAn: sie folgen der Timeline, solange sie spielt (der Live-Eingang pausiert).\n'Loop & play' im Analyse-Feld tut das immer.
+the master mix	der Master-Mix
+the selected track	die gewählte Spur
+Timeline shortcuts active	Timeline-Tasten aktiv
+Process	Bearbeiten
+Spectral editor...	Spektral-Editor...
+Mark regions on the spectrogram of the clip and attenuate or remove them	Bereiche im Spektrogramm des Clips markieren und abschwächen oder entfernen
+Time-stretch / pitch-shift...	Zeit dehnen / Tonhöhe ändern...
+Gain	Verstärkung
+Reset to 0 dB	Auf 0 dB zurücksetzen
+Crossfade length	Länge der Überblendung
+Where this clip overlaps another one on the track	Wo dieser Clip einen anderen auf der Spur überlappt
+Fades	Blenden
+Remove fades	Blenden entfernen
+Average every point with its neighbours	Jeden Punkt mit seinen Nachbarn mitteln
+Record input of this track	Eingang dieser Spur aufnehmen
+Paste	Einfügen
+Delete the selected time range	Gewählten Zeitbereich löschen
+New track from the selection	Neue Spur aus der Auswahl
+The selected time range on a new track: the clips of the selected track cut to it, or with no track selected the mix of everything	Der gewählte Zeitbereich auf einer neuen Spur: die Clips der gewählten Spur darauf zugeschnitten, oder ohne gewählte Spur der Mix von allem
+Add a region from the selection	Bereich aus der Auswahl anlegen
+Add an empty track	Leere Spur hinzufügen
+Unsaved timeline changes	Ungespeicherte Timeline-Änderungen
+Save changes to your project before replacing this timeline?	Änderungen im Projekt speichern, bevor diese Timeline ersetzt wird?
+Recovery autosave does not update your named project.	Die automatische Sicherung aktualisiert dein benanntes Projekt nicht.
+Discard	Verwerfen
+Track	Spur
+Play this stretch in a loop: all analysers (spectrum, scope, loudness ...) follow it	Diesen Abschnitt in Schleife spielen: alle Analysatoren (Spektrum, Oszilloskop, Lautheit ...) folgen ihm
+Add the averaged spectrum to the trace library (Response, Transfer and EQ windows can use it)	Das gemittelte Spektrum in die Kurvensammlung legen (die Fenster Frequenzgang, Übertragung und EQ können es nutzen)
+Edit volume automation	Lautstärke-Automation bearbeiten
+Draw level changes over time on this track's lane: double-click adds a point, drag moves it, right-click deletes it. The level is added to the fader.	Pegeländerungen über die Zeit auf der Spur zeichnen: Doppelklick setzt einen Punkt, Ziehen bewegt ihn, Rechtsklick löscht ihn. Der Pegel kommt zum Fader dazu.
+Show the takes under the track	Takes unter der Spur zeigen
+Use a take for the selected range:	Take für den gewählten Bereich nehmen:
+Select a time range to use a take there	Zeitbereich wählen, um dort einen Take zu nehmen
+Beatmarkers	Taktmarker
+Finds the beat of the music on this track and marks it on the waveform. Hold Shift while selecting to snap to the beat. Off by default.	Findet den Takt der Musik auf dieser Spur und markiert ihn in der Wellenform. Shift beim Auswählen rastet auf den Takt. Standardmäßig aus.
+Place a file on this track at the playhead	Eine Datei auf diese Spur an die Abspielposition legen
+Arms the track and adds a Timeline record node you can connect to anything	Schaltet die Spur scharf und fügt einen Timeline-Aufnahme-Knoten hinzu, der sich mit allem verbinden lässt
+Record input	Aufnahme-Eingang
+Two tracks, panned hard left and hard right	Zwei Spuren, hart links und hart rechts gepannt
+Input trim (gain / delay)	Eingangs-Trim (Verstärkung / Verzögerung)
+For recording from several interfaces at once:	Für Aufnahmen von mehreren Interfaces zugleich:
+Place earlier by	Früher legen um
+Use the delay for an interface whose audio arrives late (its latency),\nor a negative value to push a take later. Applied to the next recording.	Die Verzögerung für ein Interface nutzen, dessen Audio spät ankommt (seine Latenz),\noder einen negativen Wert, um einen Take später zu legen. Gilt für die nächste Aufnahme.
+Colour	Farbe
+Move up	Nach oben
+Move down	Nach unten
+Merge selected tracks into one	Gewählte Spuren zu einer verschmelzen
+Mix them as they sound into one track and remove the originals (undo brings them back)	Mischt sie so, wie sie klingen, in eine Spur und entfernt die Originale (Rückgängig holt sie zurück)
+Mix selected tracks to a new track	Gewählte Spuren auf eine neue Spur mischen
+Keep the originals	Die Originale bleiben
+Double-click to rename.  Ctrl + click: select more tracks (to merge them)	Doppelklick zum Umbenennen.  Strg + Klick: weitere Spuren wählen (zum Verschmelzen)
+records from the Routing window	nimmt aus dem Routing-Fenster auf
+Clear the gain of this channel (use the balance for level differences between the channels)	Verstärkung dieses Kanals löschen (für Pegelunterschiede der Kanäle die Balance nehmen)
+Play both channels again	Wieder beide Kanäle spielen
+Mix left and right to one mono signal (not destructive)	Links und rechts zu einem Mono-Signal mischen (nicht destruktiv)
+Make two tracks: the left channel panned left and the right channel panned right	Zwei Spuren machen: der linke Kanal links, der rechte rechts gepannt
+Mono mix	Mono-Mix
+Longer sweeps separate the harmonics better and lower the noise	Längere Sweeps trennen die Oberwellen besser und senken das Rauschen
+One sweep gives every harmonic: each distortion product arrives before the main impulse and is read at k times the fundamental. Shares the sweep of the Response window.	Ein Sweep liefert jede Oberwelle: jedes Verzerrungsprodukt kommt vor dem Hauptimpuls an und wird beim k-fachen des Grundtons gelesen. Nutzt den Sweep des Frequenzgang-Fensters.
+ points	 Punkte
+step 	Schritt 
+settle +	Einschwingen +
+Extra wait after each change, on top of refilling the measurement window	Zusätzliche Wartezeit nach jeder Änderung, zusätzlich zum Neufüllen des Messfensters
+Needs the generator output fed back into the input (cable or [Loopback] input). The generator is switched and restored automatically.	Braucht den Generator-Ausgang zurück am Eingang (Kabel oder [Loopback]-Eingang). Der Generator wird automatisch geschaltet und wiederhergestellt.
+Click: show the scale in dB or in percent	Klick: Skala in dB oder in Prozent zeigen
+Measurement	Messung
+Last sweep	Letzter Sweep
+Smooth	Glätten
+Correct	Korrigieren
+ filters	 Filter
+boost +	Anhebung +
+Boosting a room null wastes headroom and rarely works: keep this small	Eine Raum-Auslöschung anzuheben kostet Aussteuerung und hilft selten: klein halten
+cut -	Absenkung -
+ dB/oct	 dB/Okt
+Target slope around 1 kHz: negative rolls the highs off, as in a house curve	Zielneigung um 1 kHz: negativ senkt die Höhen ab, wie bei einer Hauskurve
+Export for	Export für
+Send to routing	An Routing senden
+Put these filters into an equaliser node of the routing graph (the selected one, the first one, or a new one in front of the output) and listen to the correction	Diese Filter in einen Equalizer-Knoten des Routing-Graphen legen (den gewählten, den ersten oder einen neuen vor dem Ausgang) und die Korrektur anhören
+Low frequencies need long FIRs: 8192 taps or more at 48 kHz for filters below 100 Hz. Correct only what the room does at one position of the microphone: cuts of peaks work, boosts of nulls do not.	Tiefe Frequenzen brauchen lange FIR: 8192 Taps oder mehr bei 48 kHz für Filter unter 100 Hz. Nur korrigieren, was der Raum an einer Mikrofonposition tut: Spitzen absenken klappt, Auslöschungen anheben nicht.
+starting output...	starte Ausgabe...
+deconvolving...	entfalte...
+Set-up	Aufbau
+Routing graph: generator and output node on the DATS output, input node on its input, wired to the analyzer. Nothing is deleted; other output nodes on the DATS output are muted.	Routing-Graph: Generator und Ausgangsknoten am DATS-Ausgang, Eingangsknoten an seinem Eingang, mit dem Analysator verbunden. Nichts wird gelöscht; andere Ausgangsknoten am DATS-Ausgang werden stumm.
+The Dayton DATS V3: R input = reference, L input = test terminals; calibrated with its built-in 1 kΩ resistor	Das Dayton DATS V3: R-Eingang = Referenz, L-Eingang = Messklemmen; kalibriert mit seinem eingebauten 1-kΩ-Widerstand
+Two channels	Zwei Kanäle
+R input at the generator side of the resistor (the reference), L input across the device. The sound card cancels; no volts need to be known.	R-Eingang auf der Generatorseite des Widerstands (die Referenz), L-Eingang über dem Prüfling. Die Soundkarte hebt sich auf; Spannungen müssen nicht bekannt sein.
+One channel, calibrated	Ein Kanal, kalibriert
+Only L across the device. The voltages of the output and of the input have to be known, or calibrated with a known resistor.	Nur L über dem Prüfling. Die Spannungen von Ausgang und Eingang müssen bekannt sein oder mit einem bekannten Widerstand kalibriert werden.
+Series resistor	Vorwiderstand
+Output impedance	Ausgangsimpedanz
+Adds to the series resistor (a line output is often 50 to 100 Ω, a headphone output a few ohm)	Kommt zum Vorwiderstand dazu (ein Line-Ausgang hat oft 50 bis 100 Ω, ein Kopfhörerausgang wenige Ohm)
+Output: 0 dBFS is	Ausgang: 0 dBFS sind
+The voltage at the generator output (no load) for a full scale sine, from a multimeter	Die Spannung am Generator-Ausgang (ohne Last) bei einem Sinus mit Vollaussteuerung, vom Multimeter
+Input: 0 dBFS is	Eingang: 0 dBFS sind
+The voltage at the input that reads full scale	Die Spannung am Eingang, die Vollaussteuerung ergibt
+Known R	Bekanntes R
+Calibrate	Kalibrieren
+Connect a resistor of this value in place of the device, press Measure, then Calibrate: the level is set so that it reads this value	Einen Widerstand mit diesem Wert statt des Prüflings anschließen, Messen drücken, dann Kalibrieren: der Pegel wird so gesetzt, dass dieser Wert angezeigt wird
+Calibration	Kalibrierung
+Once is enough: it is saved. Without it the values of a DATS V3 that was measured are used (series resistance 94.2 Ω, gain 0.9989). R input = generator side of the series resistor, L input = test terminals.	Einmal genügt: sie wird gespeichert. Ohne sie gelten die Werte eines vermessenen DATS V3 (Vorwiderstand 94,2 Ω, Verstärkung 0,9989). R-Eingang = Generatorseite des Vorwiderstands, L-Eingang = Messklemmen.
+Sweep settings: Frequency response window (-30 to -20 dBFS for a speaker).	Sweep-Einstellungen: Frequenzgang-Fenster (-30 bis -20 dBFS für einen Lautsprecher).
+The phase of the impedance under the magnitude (0 for a resistor, positive for a coil, negative for a capacitor)	Die Phase der Impedanz unter dem Betrag (0 bei einem Widerstand, positiv bei einer Spule, negativ bei einem Kondensator)
+Auto scale	Auto-Skala
+Export the impedance, phase, resistance and reactance	Impedanz, Phase, Widerstand und Blindwiderstand exportieren
+Report	Bericht
+Save an HTML report with the plots and the parameters, and open it	Einen HTML-Bericht mit den Plots und den Parametern speichern und öffnen
+Driver	Treiber
+name of the driver	Name des Treibers
+Conditions	Bedingungen
+free air, 20 °C, -25 dBFS ...	Freiluft, 20 °C, -25 dBFS ...
+Both go into the report and the copied parameters	Beides kommt in den Bericht und in die kopierten Parameter
+Driver (Thiele-Small)	Treiber (Thiele-Small)
+Free air: the driver hanging on its leads, from below a quarter of Fs up to 20 kHz.	Freiluft: der Treiber hängt an seinen Kabeln, von unter einem Viertel Fs bis 20 kHz.
+Measure	Messwerte
+Runs the sweep and takes Re, Fs, Qms, Qes, Qts and Le from it	Fährt den Sweep und nimmt daraus Re, Fs, Qms, Qes, Qts und Le
+Use previous	Vorherige nehmen
+The impedance below as the free-air measurement	Die Impedanz unten als Freiluft-Messung
+V(as) and M(ms)	V(as) und M(ms)
+One more piece of information is needed: choose how	Eine weitere Angabe wird gebraucht: wähle wie
+Piston diameter	Kolbendurchmesser
+The effective diameter of the cone: from the middle of the surround on one side to the middle on the other	Der wirksame Durchmesser der Membran: von der Mitte der Sicke auf einer Seite zur Mitte auf der anderen
+Box volume	Gehäusevolumen
+A sealed box, well filled with damping, about the volume of the driver's Vas	Ein geschlossenes Gehäuse, gut bedämpft, etwa so groß wie das Vas des Treibers
+Added mass	Zusatzmasse
+Modelling clay stuck evenly around the dust cap; weigh it. About the mass of the cone or less.	Knetmasse gleichmäßig um die Staubkappe geklebt; wiegen. Etwa die Masse der Membran oder weniger.
+Sensitivity	Empfindlichkeit
+From the data sheet	Aus dem Datenblatt
+The cone, the coil and half of the surround without the air load: from the data sheet	Membran, Spule und halbe Sicke ohne Luftlast: aus dem Datenblatt
+Use as V(as)	Als V(as) nehmen
+The parameters as text	Die Parameter als Text
+Press Measure. Store keeps a curve to overlay.	Messen drücken. Speichern behält eine Kurve zum Überlagern.
+no data above the noise (or band above Nyquist)	keine Daten über dem Rauschen (oder Band über Nyquist)
+impulse response too short for a waterfall	Impulsantwort zu kurz für einen Wasserfall
+STI needs all octave bands from 125 Hz to 8 kHz below Nyquist, and a usable decay.	STI braucht alle Oktavbänder von 125 Hz bis 8 kHz unter Nyquist und ein brauchbares Abklingen.
+Indirect STI from the impulse response (modulation transfer, male weighting). No background noise, masking or level weighting: it describes the room only.	Indirekter STI aus der Impulsantwort (Modulationsübertragung, männliche Gewichtung). Ohne Störgeräusch, Verdeckung oder Pegelgewichtung: er beschreibt nur den Raum.
+impulse response too short for a modal analysis	Impulsantwort zu kurz für eine Modenanalyse
+No measurement yet. Run one in the Response window (the sweep also gives the impulse response).	Noch keine Messung. Eine im Frequenzgang-Fenster fahren (der Sweep liefert auch die Impulsantwort).
+view ms	Ansicht ms
+range 	Bereich 
+Room modes	Raummoden
+Axial modes of a rectangular room (c = 343 m/s)	Axiale Moden eines rechteckigen Raums (c = 343 m/s)
+Export the impulse response	Impulsantwort exportieren
+impulse response too short	Impulsantwort zu kurz
+Low signal-to-noise: T30 / EDT may be unreliable. Raise the level or average more runs.	Geringer Störabstand: T30 / EDT können unzuverlässig sein. Pegel erhöhen oder mehr Durchläufe mitteln.
+every 	alle 
+for 	für 
+none	keine
+Restart the integrated measurement and peaks	Integrierte Messung und Spitzen neu starten
+Keep measuring when closed	Weitermessen, wenn geschlossen
+waiting for audio...	warte auf Audio...
+Octave	Oktave
+Octave analyser	Oktav-Analysator
+1/1 to 1/24 octave band levels with A/C weighting and a target curve	Pegel in 1/1- bis 1/24-Oktavbändern mit A/C-Bewertung und Zielkurve
+Response	Frequenzgang
+Frequency response	Frequenzgang
+Sweep measurement: magnitude, phase, group delay, coherence	Sweep-Messung: Betrag, Phase, Gruppenlaufzeit, Kohärenz
+Impulse	Impuls
+Impulse response & RT60	Impulsantwort & RT60
+Impulse response, decay curve, RT60 / EDT, clarity	Impulsantwort, Abklingkurve, RT60 / EDT, Klarheit
+Peaks	Spitzen
+Peaks & tuner	Spitzen & Stimmgerät
+Strongest spectral peaks with note names, plus a tuner	Stärkste Spektralspitzen mit Notennamen, dazu ein Stimmgerät
+Loudness	Lautheit
+Loudness (EBU R128)	Lautheit (EBU R128)
+LUFS momentary / short-term / integrated, LRA, true peak, PPM and VU	LUFS momentan / kurzzeitig / integriert, LRA, True Peak, PPM und VU
+Stats	Statistik
+Signal statistics	Signalstatistik
+Sample histogram, clipping, bit-depth use and long-term trends	Histogramm der Samples, Clipping, Nutzung der Bittiefe und Langzeit-Trends
+Logger & alarms	Logger & Alarme
+Log measurements to CSV and raise alarms on thresholds	Messwerte als CSV mitschreiben und bei Schwellen Alarm geben
+Reference	Referenz
+Reference & limit masks	Referenz & Grenzmasken
+Pass/fail masks, reference curves and an A/B difference trace	Gut/Schlecht-Masken, Referenzkurven und eine A/B-Differenzkurve
+Transfer	Übertragung
+Live transfer function	Live-Übertragungsfunktion
+Magnitude, phase and coherence between a reference and a measured channel while music or noise plays	Betrag, Phase und Kohärenz zwischen einem Referenz- und einem Messkanal, während Musik oder Rauschen spielt
+Sound level meter	Schallpegelmesser
+dB SPL with A/C/Z and Fast/Slow/Impulse weighting, Leq, Lmax, peak, L10/L50/L90	dB SPL mit A/C/Z- und Fast/Slow/Impuls-Bewertung, Leq, Lmax, Spitze, L10/L50/L90
+Distortion	Verzerrung
+Distortion sweeps	Verzerrungs-Sweeps
+THD vs frequency and level, IMD vs level and swept harmonic analysis	THD über Frequenz und Pegel, IMD über Pegel und Oberwellen-Analyse aus dem Sweep
+Sequence	Sequenz
+Test sequence	Testsequenz
+Scripted tests: drive the generator, measure, sweep and check against limits (pass/fail)	Geskriptete Tests: Generator steuern, messen, sweepen und gegen Grenzen prüfen (gut/schlecht)
+Report & export	Bericht & Export
+Create an HTML / PDF measurement report and export responses (FRD, REW text, impulse WAV)	Einen HTML- / PDF-Messbericht erstellen und Frequenzgänge exportieren (FRD, REW-Text, Impuls-WAV)
+EQ design	EQ-Entwurf
+Fit parametric filters to a measurement, preview, export Equalizer APO / biquads / FIR	Parametrische Filter an eine Messung anpassen, Vorschau, Export als Equalizer APO / Biquads / FIR
+Timeline (multitrack)	Timeline (Mehrspur)
+Multitrack recorder and editor: record several sources and channels at once, load, edit and analyse tracks	Mehrspur-Rekorder und -Editor: mehrere Quellen und Kanäle zugleich aufnehmen, Spuren laden, bearbeiten und analysieren
+Routing (node editor)	Routing (Knoten-Editor)
+Connect every input and output like a patch bay: split signals to the analysers, the timeline or output devices, with effects in between	Jeden Ein- und Ausgang wie an einem Steckfeld verbinden: Signale auf Analysatoren, Timeline oder Ausgabegeräte verteilen, mit Effekten dazwischen
+Profiler (latency & interrupts)	Profiler (Latenz & Interrupts)
+System latency, kernel DPC / interrupt time and audio callback timing; shows what caused a crackle	Systemlatenz, Kernel-DPC- / Interrupt-Zeit und Timing der Audio-Callbacks; zeigt, was einen Knackser verursacht hat
+Null test	Nulltest
+Null test (difference of two signals)	Nulltest (Differenz zweier Signale)
+Line up two signals (input channels or files), subtract them and see and hear what is left	Zwei Signale (Eingangskanäle oder Dateien) ausrichten, voneinander abziehen und sehen und hören, was bleibt
+Traces	Kurven
+Traces (stored curves)	Kurven (gespeichert)
+The stored frequency response curves of the measurement windows: show, hide, colour, name, compare against one, average, save and load	Die gespeicherten Frequenzgang-Kurven der Messfenster: zeigen, verbergen, färben, benennen, gegen eine vergleichen, mitteln, speichern und laden
+Impedance	Impedanz
+Impedance measurement	Impedanzmessung
+Impedance and phase of a speaker, headphone or any device through a known series resistor, with calibration, stored measurements and overlays	Impedanz und Phase eines Lautsprechers, Kopfhörers oder beliebigen Geräts über einen bekannten Vorwiderstand, mit Kalibrierung, gespeicherten Messungen und Überlagerungen
+Speaker	Lautsprecher
+Speaker design	Lautsprecher-Entwurf
+Box simulation from the Thiele-Small parameters, crossover design from stored traces, near-field / far-field merge and polar / directivity plots	Gehäusesimulation aus den Thiele-Small-Parametern, Frequenzweiche aus gespeicherten Kurven, Nahfeld / Fernfeld zusammenfügen und Polar- / Richtwirkungs-Plots
+Device tests	Gerätetests
+Crosstalk and channel matching, wow and flutter, multitone distortion	Übersprechen und Kanalgleichheit, Gleichlaufschwankungen, Multiton-Verzerrung
+Analyse	Analysieren
+Test & design	Test & Entwurf
+Record & report	Aufnahme & Bericht
+press Capture	Erfassen drücken
+Length of a capture	Länge einer Erfassung
+Delay of B	Verzögerung von B
+Samples B is delayed by to line up with A (negative: moved earlier). Fractions are interpolated	Samples, um die B verzögert wird, um mit A übereinzuliegen (negativ: früher). Bruchteile werden interpoliert
+Level	Pegel
+Turn B upside down before subtracting (when the signals have opposite polarity)	B vor dem Abziehen umpolen (wenn die Signale entgegengesetzte Polarität haben)
+Align	Ausrichten
+Find the delay, polarity and level difference automatically	Verzögerung, Polarität und Pegelunterschied automatisch finden
+Align automatically after every capture or file	Nach jeder Erfassung oder Datei automatisch ausrichten
+Listen	Hören
+Volume	Lautstärke
+boost 	Anhebung 
+Amplify the difference to hear small errors (limited at full scale)	Die Differenz verstärken, um kleine Fehler zu hören (bei Vollaussteuerung begrenzt)
+plays on the first Output node	spielt auf dem ersten Ausgangsknoten
+Choose two signals: input channels (Capture takes the last seconds) or files.\nThey are lined up and subtracted: the quieter the difference, the more alike the signals are.\nExamples: a device against its own recording, a plug-in on and off, two converters, a lossy file against its original.	Zwei Signale wählen: Eingangskanäle (Erfassen nimmt die letzten Sekunden) oder Dateien.\nSie werden ausgerichtet und abgezogen: je leiser die Differenz, desto ähnlicher die Signale.\nBeispiele: ein Gerät gegen seine eigene Aufnahme, ein Plug-in an und aus, zwei Wandler, eine verlustbehaftete Datei gegen ihr Original.
+Keep peak markers (clear by switching off)	Spitzenmarker behalten (Löschen durch Ausschalten)
+Target	Ziel
+Target curve: flat for pink noise, tilted for others	Zielkurve: flach für rosa Rauschen, geneigt für anderes
+Deviation	Abweichung
+Show level minus target	Pegel minus Ziel zeigen
+tilt dB/oct	Neigung dB/Okt
+at 1 kHz	bei 1 kHz
+Set the target level to the mean band level	Zielpegel auf den mittleren Bandpegel setzen
+averaged	gemittelt
+Use the averaged spectrum (steadier) instead of the live one	Das gemittelte Spektrum (ruhiger) statt des Live-Spektrums nehmen
+prominence 	Prominenz 
+Mark on spectrum	Im Spektrum markieren
+no stable pitch	keine stabile Tonhöhe
+Measuring ...	Messe ...
+No hiccups in the last minute	Keine Hänger in der letzten Minute
+Copy the numbers and the hiccup list to the clipboard	Zahlen und Hänger-Liste in die Zwischenablage kopieren
+Windows performance counters are not available: only timing measured by the program is shown.	Windows-Leistungszähler sind nicht verfügbar: nur das vom Programm gemessene Timing wird gezeigt.
+Hiccups	Hänger
+Nothing that could be heard so far. When the sound crackles, the cause shows up here.	Bisher nichts Hörbares. Wenn der Ton knackt, zeigt sich die Ursache hier.
+What helps against crackling	Was gegen Knacksen hilft
+Store the averaged spectrum as a reference curve	Das gemittelte Spektrum als Referenzkurve speichern
+no snapshots yet	noch keine Schnappschüsse
+Import CSV...	CSV importieren...
+2 columns: frequency, level (a reference curve)\n3 columns: frequency, lower limit, upper limit (a mask)	2 Spalten: Frequenz, Pegel (eine Referenzkurve)\n3 Spalten: Frequenz, untere Grenze, obere Grenze (eine Maske)
+No references yet. Capture the live spectrum, take one from a snapshot or import a CSV.	Noch keine Referenzen. Das Live-Spektrum erfassen, eine aus einem Schnappschuss nehmen oder eine CSV importieren.
+mask	Maske
+Use as pass/fail limit mask	Als Gut/Schlecht-Grenzmaske nutzen
+shift 	Versatz 
+live (avg)	live (Mittel)
+Shift the selected mask / reference so it meets the live level at 1 kHz	Die gewählte Maske / Referenz so verschieben, dass sie bei 1 kHz den Live-Pegel trifft
+title	Titel
+notes: device under test, setup, operator ...	Notizen: Prüfling, Aufbau, Prüfer ...
+Sections without data are left out. The report shows the current state of each window.	Abschnitte ohne Daten werden ausgelassen. Der Bericht zeigt den aktuellen Stand jedes Fensters.
+Create report	Bericht erstellen
+open in browser	im Browser öffnen
+Reports are saved in Documents\\VisuScope	Berichte liegen in Dokumente\\VisuScope
+Export the last sweep	Letzten Sweep exportieren
+Response .frd	Frequenzgang .frd
+frequency, magnitude dB, phase degrees (space separated)	Frequenz, Betrag dB, Phase Grad (durch Leerzeichen getrennt)
+Response .txt	Frequenzgang .txt
+same data as comma separated text with a REW style header	dieselben Daten als kommagetrennter Text mit Kopf im REW-Stil
+Impulse .wav	Impuls .wav
+impulse response as a 32-bit float mono WAV	Impulsantwort als 32-Bit-Float-Mono-WAV
+run a sweep in the Response window first	erst einen Sweep im Frequenzgang-Fenster fahren
+Spectrum snapshots, traces and Response / Impulse CSV exports are in their own windows.	Spektrum-Schnappschüsse, Kurven und CSV-Exporte von Frequenzgang / Impuls sind in ihren eigenen Fenstern.
+level check...	Pegelprüfung...
+Check level first	Erst Pegel prüfen
+Play a short sweep (half a second) at the same level first. The measurement only starts when that neither clipped nor came back too quiet; otherwise it says what is wrong	Erst einen kurzen Sweep (eine halbe Sekunde) mit demselben Pegel spielen. Die Messung startet nur, wenn der weder übersteuert noch zu leise zurückkommt; sonst steht da, was nicht stimmt
+Sweep settings	Sweep-Einstellungen
+Range	Bereich
+Full	Voll
+From 5 Hz to the top of the sample rate (the graph rate with the routing graph: 96 kHz at 192 kHz). Outside the sweep nothing is measured: the curve falls off there.	Von 5 Hz bis zum oberen Ende der Abtastrate (mit dem Routing-Graphen dessen Rate: 96 kHz bei 192 kHz). Außerhalb des Sweeps wird nichts gemessen: die Kurve fällt dort ab.
+Length	Länge
+A longer sweep lowers the noise and gives the low frequencies more time. The limit is the memory of the analysis: at 192 kHz about 40 s	Ein längerer Sweep senkt das Rauschen und gibt den tiefen Frequenzen mehr Zeit. Die Grenze ist der Speicher der Analyse: bei 192 kHz etwa 40 s
+Tail	Nachlauf
+Recording time after the sweep ends: must cover latency and the decay of the room	Aufnahmezeit nach dem Ende des Sweeps: muss Latenz und Nachhall des Raums abdecken
+Averages	Mittelungen
+More runs lower the noise; 2 or more also give the coherence	Mehr Durchläufe senken das Rauschen; ab 2 gibt es auch die Kohärenz
+Response window	Antwortfenster
+Short = gated (ignores late reflections), long = more resolution	Kurz = gegatet (ignoriert späte Reflexionen), lang = mehr Auflösung
+IR length	IR-Länge
+Assume a perfect sweep: the result includes the sound card	Einen perfekten Sweep annehmen: das Ergebnis enthält die Soundkarte
+R input	R-Eingang
+L is the device under test, R carries the reference (loopback of the output): the sound card cancels	L ist der Prüfling, R führt die Referenz (Loopback des Ausgangs): die Soundkarte hebt sich auf
+Input channel	Eingangskanal
+Below	Darunter
+Normalise	Normieren
+Shift the magnitude so the 1 kHz value reads 0 dB	Den Betrag so verschieben, dass der Wert bei 1 kHz 0 dB zeigt
+Show the level in dBFS (the gain plus the level of the sweep: a loopback of a -12 dBFS sweep reads -12) instead of the gain in dB (a loopback reads 0)	Den Pegel in dBFS zeigen (Verstärkung plus Pegel des Sweeps: ein Loopback eines Sweeps mit -12 dBFS zeigt -12) statt der Verstärkung in dB (ein Loopback zeigt 0)
+Keep the current magnitude trace as a comparison	Die aktuelle Betragskurve als Vergleich behalten
+The last sweeps are kept here without storing them (until the program closes).	Die letzten Sweeps bleiben hier, ohne sie zu speichern (bis das Programm schließt).
+compare	vergleichen
+Show it as the grey held curve	Als graue gehaltene Kurve zeigen
+to traces	zu den Kurven
+Store it as a named trace	Als benannte Kurve speichern
+Export magnitude, phase, delay and coherence	Betrag, Phase, Laufzeit und Kohärenz exportieren
+Cut the measured impulse response after this time and work the curves out again, without a new sweep: reflections that arrive later are left out (quasi-anechoic). The Response window of the sweep settings does the same while measuring, down to 20 ms; this gate goes down to 0.5 ms and can be changed afterwards. With the R input as reference the gate works on the impulse response of the L input alone	Die gemessene Impulsantwort nach dieser Zeit abschneiden und die Kurven neu rechnen, ohne neuen Sweep: später eintreffende Reflexionen fallen weg (quasi-reflexionsfrei). Das Antwortfenster der Sweep-Einstellungen tut dasselbe beim Messen, bis hinunter zu 20 ms; dieses Gate geht bis 0,5 ms und lässt sich nachträglich ändern. Mit dem R-Eingang als Referenz arbeitet das Gate nur auf der Impulsantwort des L-Eingangs
+Spatial average	Räumliches Mittel
+Measure at several microphone positions and add each one: the average of the positions is stored as one trace, a better base for an equaliser than one position. (Average in the Traces window does the same, by power, for traces that are stored already.)	An mehreren Mikrofonpositionen messen und jede hinzufügen: das Mittel der Positionen wird als eine Kurve gespeichert, eine bessere Grundlage für einen Equalizer als eine Position. (Mitteln im Kurven-Fenster tut dasselbe, nach Leistung, für schon gespeicherte Kurven.)
+Add position	Position hinzufügen
+power	Leistung
+Average of the powers: the phase is ignored	Mittel der Leistungen: die Phase wird ignoriert
+vector	Vektor
+Average with the phase: what does not arrive in phase at all positions cancels	Mittel mit Phase: was nicht an allen Positionen gleichphasig ankommt, löscht sich aus
+Store average	Mittel speichern
+Press Measure. The generator plays a log sweep while the input records it.\nUse a cable or a [Loopback] input; set Reference to "R input" to cancel the sound card.	Messen drücken. Der Generator spielt einen Log-Sweep, während der Eingang ihn aufnimmt.\nEin Kabel oder einen [Loopback]-Eingang nehmen; Referenz auf "R-Eingang" stellen, damit sich die Soundkarte aufhebt.
+Load...	Laden...
+Save...	Speichern...
+Save as .vss to keep the script; as .txt to save the result report	Als .vss speichern, um das Skript zu behalten; als .txt für den Ergebnisbericht
+Commands	Befehle
+Take from Impedance	Aus Impedanz übernehmen
+Use the Thiele-Small parameters the Impedance window worked out (Fs, Qts, Qes, and Vas and the cone area when it has them). Measure the driver there first; this tab only simulates	Die Thiele-Small-Parameter nehmen, die das Impedanz-Fenster ermittelt hat (Fs, Qts, Qes, und Vas und die Membranfläche, wenn vorhanden). Den Treiber erst dort messen; dieser Reiter simuliert nur
+Sealed	Geschlossen
+Vented	Bassreflex
+box 	Gehäuse 
+tuned to 	abgestimmt auf 
+port dia 	Rohr-Ø 
+Leakage losses of the box: 7 is a usual value	Leckverluste des Gehäuses: 7 ist ein üblicher Wert
+power 	Leistung 
+excursion	Auslenkung
+impedance	Impedanz
+The impedance the driver will show in this box (without the inductance of the voice coil): compare it with a measurement of the finished box in the Impedance window. A vented box shows two peaks with the tuning in the dip between them	Die Impedanz, die der Treiber in diesem Gehäuse zeigen wird (ohne die Induktivität der Schwingspule): mit einer Messung des fertigen Gehäuses im Impedanz-Fenster vergleichen. Ein Bassreflexgehäuse zeigt zwei Spitzen mit der Abstimmung im Tal dazwischen
+Suggest	Vorschlag
+Sealed: the volume for Qtc 0.71. Vented: a flat alignment (volume 15 Qts^2.87 Vas, tuning 0.42 Fs / Qts^0.9)	Geschlossen: das Volumen für Qtc 0,71. Bassreflex: eine flache Abstimmung (Volumen 15 Qts^2,87 Vas, Abstimmung 0,42 Fs / Qts^0,9)
+over Xmax	über Xmax
+Store as trace	Als Kurve speichern
+Keep the simulated response as a trace, to compare with a measurement of the finished box	Den simulierten Frequenzgang als Kurve behalten, zum Vergleich mit einer Messung des fertigen Gehäuses
+Delay of this way (to line up the acoustic centres)	Verzögerung dieses Wegs (um die akustischen Zentren auszurichten)
+invert	invertieren
+Reverse null	Umpol-Test
+Also show the sum with the second active way inverted: a deep, even notch at the crossover means the ways are in phase there	Auch die Summe mit dem zweiten aktiven Weg invertiert zeigen: eine tiefe, gleichmäßige Kerbe an der Trennfrequenz heißt, die Wege sind dort in Phase
+Store sum as trace	Summe als Kurve speichern
+Put the filters, gains and delays of the ways into the routing graph: one row of nodes per way, fed from what feeds the first output. Connect the end of each row to the output channel of its driver. Butterworth 12 and Linkwitz-Riley 24 / 48 are built from Filter nodes; the 6, 18 dB and Linkwitz-Riley 12 types have no node	Filter, Verstärkungen und Verzögerungen der Wege in den Routing-Graphen legen: eine Reihe Knoten pro Weg, gespeist von dem, was den ersten Ausgang speist. Das Ende jeder Reihe mit dem Ausgangskanal seines Treibers verbinden. Butterworth 12 und Linkwitz-Riley 24 / 48 werden aus Filter-Knoten gebaut; für 6, 18 dB und Linkwitz-Riley 12 gibt es keinen Knoten
+a trace has no phase: the sum is only right where one way plays alone	eine Kurve hat keine Phase: die Summe stimmt nur dort, wo ein Weg allein spielt
+Near field	Nahfeld
+far field	Fernfeld
+join at 	verbinden bei 
+Above the lowest frequency the gate of the far field allows, below where the cone stops acting as a piston	Über der tiefsten Frequenz, die das Gate des Fernfelds erlaubt, unter der, ab der die Membran nicht mehr als Kolben arbeitet
+over 	über 
+ oct	 Okt
+baffle 	Schallwand 
+Width of the baffle: takes the baffle step (6 dB less at low frequencies) out of the near field. 0 = no correction	Breite der Schallwand: nimmt den Baffle Step (6 dB weniger bei tiefen Frequenzen) aus dem Nahfeld. 0 = keine Korrektur
+Match level	Pegel angleichen
+Shift the near field to the level of the far field around the join	Das Nahfeld um die Verbindungsstelle auf den Pegel des Fernfelds schieben
+Store merged trace	Zusammengefügte Kurve speichern
+Turn the speaker to this angle and press: runs the sweep of the Frequency response window (its settings, a short response window keeps the room out), stores the result as a trace named after the angle and goes on to the next angle	Den Lautsprecher auf diesen Winkel drehen und drücken: fährt den Sweep des Frequenzgang-Fensters (dessen Einstellungen; ein kurzes Antwortfenster hält den Raum heraus), speichert das Ergebnis als Kurve mit dem Winkel als Namen und geht zum nächsten Winkel
+polar at 	Polar bei 
+measuring...	messe...
+Tick the stored traces that belong to the set and give each its angle (0 = on axis).	Die gespeicherten Kurven ankreuzen, die zum Satz gehören, und jeder ihren Winkel geben (0 = auf Achse).
+At least two angles are needed.	Mindestens zwei Winkel sind nötig.
+Weighting	Bewertung
+Time	Zeit
+Input	Eingang
+Restart Leq, Lmax, peak and the percentile levels	Leq, Lmax, Spitze und Perzentilpegel neu starten
+Not calibrated: levels are dB relative to full scale. Open Calibration below.	Nicht kalibriert: Pegel sind dB relativ zur Vollaussteuerung. Unten Kalibrierung öffnen.
+Put the calibrator on the microphone, then click: the current unweighted 1 s level is set to this value	Den Kalibrator auf das Mikrofon setzen, dann klicken: der aktuelle unbewertete 1-s-Pegel wird auf diesen Wert gesetzt
+Full-scale sine =	Sinus bei Vollaussteuerung =
+The SPL of a sine at digital full scale. Microphone calibration files change only the spectrum views, not this meter.	Der Schalldruckpegel eines Sinus bei digitaler Vollaussteuerung. Mikrofon-Kalibrierdateien ändern nur die Spektrum-Ansichten, nicht diesen Messer.
+Fade (10 s)	Ausblenden (10 s)
+Histogram forgets old samples	Histogramm vergisst alte Samples
+Store	Speichern
+Keep the current curve (unsmoothed) as a named trace to overlay and compare	Die aktuelle Kurve (ungeglättet) als benannte Kurve behalten, zum Überlagern und Vergleichen
+Colour-blind safe colours	Farben für Farbenblinde
+Give the traces colours that stay apart with red-green and blue-yellow colour blindness (all traces are recoloured)	Gibt den Kurven Farben, die bei Rot-Grün- und Blau-Gelb-Schwäche unterscheidbar bleiben (alle Kurven werden neu gefärbt)
+ref	Ref
+Show every curve relative to this one (A - B)	Jede Kurve relativ zu dieser zeigen (A - B)
+Delete this trace (Ctrl+Z brings it back)	Diese Kurve löschen (Strg+Z holt sie zurück)
+Take the last change of the traces back (Ctrl+Z)	Letzte Änderung der Kurven zurücknehmen (Strg+Z)
+Average visible	Sichtbare mitteln
+New trace: power average of the visible traces	Neue Kurve: Leistungsmittel der sichtbaren Kurven
+Traces file, or any text table of frequency and dB (REW export, microphone calibration ...)	Kurven-Datei oder eine beliebige Texttabelle aus Frequenz und dB (REW-Export, Mikrofon-Kalibrierung ...)
+L carries the reference (system input), R the measured signal	L führt die Referenz (Eingang des Systems), R das gemessene Signal
+R carries the reference (system input), L the measured signal	R führt die Referenz (Eingang des Systems), L das gemessene Signal
+Auto delay	Auto-Verzögerung
+Find the latency between the channels and remove it, so music or noise works as a stimulus	Die Latenz zwischen den Kanälen finden und entfernen, damit Musik oder Rauschen als Anregung taugt
+Restart the averaging	Mittelung neu starten
+Freeze	Einfrieren
+Blank	Ausblenden
+Hide the trace where the coherence is low (no usable signal or too much noise)	Die Kurve verbergen, wo die Kohärenz niedrig ist (kein brauchbares Signal oder zu viel Rauschen)
+Needs a signal on both channels: the system input on the reference channel, its output on the other.\nPlay music or noise through the system; the averaged result appears here (uses the Average setting in the sidebar).	Braucht ein Signal auf beiden Kanälen: den Eingang des Systems auf dem Referenzkanal, seinen Ausgang auf dem anderen.\nMusik oder Rauschen durch das System spielen; das gemittelte Ergebnis erscheint hier (nutzt die Einstellung Mittelung).
+pan	schieben
+Restart the average, maximum and minimum traces	Mittel-, Max- und Min-Kurven neu starten
+tilt	Neigung
+rot	Drehung
+Show / hide this window	Dieses Fenster zeigen / verbergen
+Fill the area without gaps; visual windows get the most space	Die Fläche lückenlos füllen; Anzeige-Fenster bekommen den meisten Platz
+Windows snap to each other and dock against the edges.\nCtrl while dragging: free. Alt while resizing: do not move neighbours.	Fenster rasten aneinander und docken an die Ränder.\nStrg beim Ziehen: frei. Alt beim Größenändern: Nachbarn nicht bewegen.
+Default windows, tiled	Standardfenster, gekachelt
+Freeze the analysis	Analyse einfrieren
+Frame rate, window behaviour, folders ...	Bildrate, Fensterverhalten, Ordner ...
+Describe what you want to measure and it sets up the input, windows and settings (and can start the measurement)	Beschreibe, was du messen willst, und Eingang, Fenster und Einstellungen werden eingerichtet (die Messung kann auch gestartet werden)
+no audio from device (silent loopback or stalled stream) - showing silence	kein Audio vom Gerät (stummer Loopback oder hängender Stream) - zeige Stille
+From the input device to the output device: buffers, the engine block, the output cushion, the safety buffer and what the nodes add (shifter, phase ...)	Vom Eingabegerät zum Ausgabegerät: Puffer, Engine-Block, Ausgangspolster, Sicherheitspuffer und was die Knoten dazutun (Shifter, Phase ...)
+Spectrum	Spektrum
+Waterfall	Wasserfall
+Spectrogram	Spektrogramm
+Stereo field	Stereofeld
+Oscilloscope	Oszilloskop
+Measurements	Messwerte
+Signal generator	Signalgenerator
+Cursors & snapshots	Cursor & Schnappschüsse
+Close	Schließen
+Maximise	Maximieren
+Spectro	Spektro
+Scope	Oszi
+Crossover	Frequenzweiche
+Near / far merge	Nah / Fern
+Box	Gehäuse
+Crosstalk & matching	Übersprechen & Gleichheit
+Wow & flutter	Gleichlauf
+Multitone distortion	Multiton-Verzerrung
+Group delay	Gruppenlaufzeit
+Coherence	Kohärenz
+None	Keine
+Minimum phase	Minimalphase
+Excess phase	Überschussphase
+Excess delay	Überschusslaufzeit
+off	aus
+Tools	Werkzeuge
+Reset layout	Layout zurücksetzen
+Tile	Kacheln
+Clear hold	Halten löschen
+Copy report	Bericht kopieren
+Language	Sprache
+Language of the interface. Text that is built from numbers stays English for now.	Sprache der Oberfläche. Texte, die aus Zahlen gebaut werden, bleiben vorerst englisch.
+Response time	Ansprechzeit
+How long a new sound needs to reach its level in the Live and in the Avg trace, and how long a sound that stopped stays visible in the Avg trace (60 dB down). It comes from the length of the FFT window and from the averaging, not from the audio path (that is about 20 ms). A smaller FFT size or less averaging makes the display faster, at the price of coarser frequency steps or a noisier curve.	Wie lange ein neuer Klang braucht, bis er in der Live- und in der Mittel-Kurve seinen Pegel erreicht, und wie lange ein verstummter Klang in der Mittel-Kurve sichtbar bleibt (60 dB tiefer). Das kommt von der Länge des FFT-Fensters und von der Mittelung, nicht vom Audioweg (der braucht etwa 20 ms). Eine kleinere FFT-Größe oder weniger Mittelung macht die Anzeige schneller, zum Preis gröberer Frequenzschritte oder einer unruhigeren Kurve.
+Both	Beide
+Cal L	Kal. L
+Cal R	Kal. R
+Cal both	Kal. beide
+Capture	Erfassen
+Export CSV	CSV exportieren
+Disconnect	Trennen
+copy	kopieren
+New empty routing	Neues leeres Routing
+Input -> analyzer (starter)	Eingang -> Analysator (Start)
++ Node	+ Knoten
+Fit	Einpassen
+Tidy	Aufräumen
+Insert a node here...	Hier einen Knoten einfügen...
+Split here into two stereo lines	Hier in zwei Stereoleitungen teilen
+Split here into left and right channels	Hier in linken und rechten Kanal teilen
+Merge here with another line	Hier mit einer anderen Leitung zusammenführen
+Add node...  (Space)	Knoten hinzufügen...  (Leertaste)
+Fit all nodes	Alle Knoten einpassen
+Duplicate	Duplizieren
+Remove	Entfernen
++ New track for this node	+ Neue Spur für diesen Knoten
+Load IR...	IR laden...
+same for both	für beide gleich
+Skip	Überspringen
+Delete this layout	Dieses Layout löschen
+Revert scale	Größe zurücknehmen
+Keys, MIDI and controllers...	Tasten, MIDI und Controller...
+Forget	Vergessen
+Serial port (COM)	Serieller Port (COM)
+Text commands for a controller on a serial port: an Arduino that turns a table, switches relays ... Each command is a line of text you define. \\n, \\r, \\t and \\xNN stand for control characters. Send one with its button here, from the command palette (Ctrl+K), by a key or MIDI binding (Keys, MIDI and controllers), or in a test sequence with the line: serial <text>. The turntable of the Speaker window uses the same port. The program only sends. Most boards restart when the port is opened, so the first command waits for the time set here.	Textbefehle für einen Controller an einem seriellen Port: ein Arduino, der einen Drehteller dreht, Relais schaltet ... Jeder Befehl ist eine Textzeile, die du festlegst. \\n, \\r, \\t und \\xNN stehen für Steuerzeichen. Senden mit dem Knopf hier, aus der Befehlspalette (Strg+K), über eine Tasten- oder MIDI-Bindung (Tasten, MIDI und Controller) oder in einer Testsequenz mit der Zeile: serial <Text>. Der Drehteller des Lautsprecher-Fensters nutzt denselben Port. Das Programm sendet nur. Die meisten Boards starten neu, wenn der Port geöffnet wird; darum wartet der erste Befehl die hier eingestellte Zeit.
+What is added to the end of every command	Was an das Ende jedes Befehls angehängt wird
+Wait after opening the port, before the first command (a board that restarts needs about two seconds)	Wartezeit nach dem Öffnen des Ports, vor dem ersten Befehl (ein Board, das neu startet, braucht etwa zwei Sekunden)
+text to send	zu sendender Text
+Send	Senden
++ command	+ Befehl
+Arm	Scharf
+Restart	Neustart
+Reset avg/max/min	Mittel/Max/Min zurücksetzen
+really delete	wirklich löschen
+Selection to new track	Auswahl auf neue Spur
+Empty track	Leere Spur
+Draw track (a control signal)	Zeichenspur (ein Steuersignal)
+Track that records from the Routing window	Spur, die aus dem Routing-Fenster aufnimmt
+Mono mix of all channels	Mono-Mix aller Kanäle
+Import...	Importieren...
+Every track as its own WAV...	Jede Spur als eigene WAV...
+Selected clip to WAV...	Gewählten Clip als WAV...
+Bounce mix to a new track	Mix auf eine neue Spur bouncen
+Add demo tracks	Demo-Spuren hinzufügen
+Rescan input devices	Eingabegeräte neu suchen
+Delete this automation point	Diesen Automationspunkt löschen
+Select the clip's time range	Zeitbereich des Clips wählen
+Clear the drawing	Zeichnung löschen
+Smooth the drawing	Zeichnung glätten
+Split everything here (S)	Alles hier teilen (S)
+Select all (Ctrl+A)	Alles wählen (Strg+A)
+Add a marker here	Hier einen Marker setzen
+Select and loop this region	Diesen Bereich wählen und in Schleife spielen
+Select this region	Diesen Bereich wählen
+Move the playhead here	Abspielposition hierher
+Delete	Löschen
+Loop & play	Schleife & Wiedergabe
+Store spectrum as trace	Spektrum als Kurve speichern
+Clear the automation	Automation löschen
+Delete the older takes	Ältere Takes löschen
+Rename	Umbenennen
+Import audio file to this track...	Audiodatei auf diese Spur importieren...
+Record from the Routing window	Aus dem Routing-Fenster aufnehmen
+Disarm	Entschärfen
+Split into left and right tracks	In linke und rechte Spur teilen
+Back to stereo	Zurück zu Stereo
+Duplicate track	Spur duplizieren
+Delete track	Spur löschen
+Split L/R	L/R teilen
+Set up nodes	Knoten einrichten
+Copy	Kopieren
+Show folder	Ordner zeigen
+Log to CSV	Als CSV mitschreiben
+Alarms	Alarme
+Events	Ereignisse
+Momentary LUFS	LUFS momentan
+Short-term LUFS	LUFS kurzzeitig
+Integrated LUFS	LUFS integriert
+Range LU	Bereich LU
+null depth (residual vs A)	Nulltiefe (Rest gegen A)
+residual peak	Rest-Spitze
+correlation	Korrelation
+compared	verglichen
+Tuner	Stimmgerät
+Capture live	Live erfassen
+save	speichern
+swap	tauschen
+Align live to ref at 1 kHz	Live bei 1 kHz an Ref angleichen
+Difference (A - B)	Differenz (A - B)
+Folder	Ordner
+Example	Beispiel
+Put the filters, gains and delays of the ways into the routing graph: one row of nodes per way, fed from what feeds the first output. Connect the end of each row to the output channel of its driver. A Linkwitz-Riley filter becomes two Filter nodes in a row	Filter, Verstärkungen und Verzögerungen der Wege in den Routing-Graphen legen: eine Reihe Knoten pro Weg, gespeist von dem, was den ersten Ausgang speist. Das Ende jeder Reihe mit dem Ausgangskanal seines Treibers verbinden. Ein Linkwitz-Riley-Filter wird zu zwei Filter-Knoten hintereinander
+Calibrate now	Jetzt kalibrieren
+Uncalibrated	Unkalibriert
+With an acoustic calibrator	Mit einem akustischen Kalibrator
+Or from the specification	Oder aus den technischen Daten
+Sample distribution	Verteilung der Samples
+Trend (10 min)	Trend (10 min)
+Peak	Spitze
+Clip events	Clip-Ereignisse
+absolute	absolut
+Reset max/min	Max/Min zurücksetzen
+Tile all windows	Alle Fenster kacheln
+Left ch	Kanal links
+Right ch	Kanal rechts
+Trim	Trim
+Delay	Verzögerung
+1 type	1 Typ
+1 freq	1 Freq.
+1 gain	1 Pegel
+2 type	2 Typ
+2 freq	2 Freq.
+2 gain	2 Pegel
+3 type	3 Typ
+3 freq	3 Freq.
+3 gain	3 Pegel
+4 type	4 Typ
+4 freq	4 Freq.
+4 gain	4 Pegel
+Type	Typ
+Freq	Freq.
+Slope	Flanke
+Ratio	Verhältnis
+Attack	Anstieg
+Release	Abfall
+Knee	Knie
+Makeup	Aufholen
+Feedback	Rückkopplung
+Mix	Mix
+Tone	Klang
+Even	Gerade
+Odd	Ungerade
+Richness	Fülle
+Polarity	Polarität
+Shift	Verschiebung
+Direction	Richtung
+Quality	Qualität
+Reduce	Absenken
+Strength	Stärke
+Noise	Rauschen
+Depth	Tiefe
+Shape	Form
+Width	Breite
+Balance	Balance
+Mode	Modus
+In 1	Ein 1
+In 2	Ein 2
+In 3	Ein 3
+In 4	Ein 4
+In 5	Ein 5
+In 6	Ein 6
+In 7	Ein 7
+In 8	Ein 8
+Mute 1	Stumm 1
+Mute 2	Stumm 2
+Mute 3	Stumm 3
+Mute 4	Stumm 4
+Mute 5	Stumm 5
+Mute 6	Stumm 6
+Mute 7	Stumm 7
+Mute 8	Stumm 8
+Mute	Stumm
+Input device	Eingabegerät
+Timeline out	Timeline-Ausgang
+Effect	Effekt
+Equalizer	Equalizer
+Compressor	Kompressor
+Limiter	Limiter
+Noise gate	Noise Gate
+Distortion / harmonics	Verzerrung / Oberwellen
+Bit crusher	Bitcrusher
+Jitter / wow & flutter	Jitter / Gleichlauf
+Control low-pass	Steuer-Tiefpass
+Control	Steuerung
+Stereo width	Stereobreite
+Channel utility	Kanal-Werkzeug
+Phase shift / invert	Phase schieben / invertieren
+Frequency shifter	Frequenzschieber
+Convolution (IR / reverb)	Faltung (IR / Hall)
+Noise reduction	Rauschminderung
+Mixer	Mischer
+Split left / right	Links / rechts teilen
+Split to two stereo lines	In zwei Stereoleitungen teilen
+Merge left / right	Links / rechts zusammenführen
+Analyzer	Analysator
+Sink	Ziel
+Output device	Ausgabegerät
+Timeline track (record)	Timeline-Spur (Aufnahme)
+Bell	Glocke
+Low shelf	Tiefen-Shelf
+High shelf	Höhen-Shelf
+High-pass	Hochpass
+Low-pass	Tiefpass
+Notch	Kerbe
+Off	Aus
+Soft (tube-like)	Weich (röhrenartig)
+Hard clip	Hartes Clipping
+Asymmetric (even)	Asymmetrisch (gerade)
+Fold-back	Faltend
+Harmonic series	Oberwellenreihe
+normal	normal
+inverted	invertiert
+12 dB/oct	12 dB/Okt
+24 dB/oct	24 dB/Okt
+48 dB/oct	48 dB/Okt
+6 dB/oct	6 dB/Okt
+18 dB/oct	18 dB/Okt
+all frequencies	alle Frequenzen
+all-pass at frequency	Allpass bei Frequenz
+drawn curve	gezeichnete Kurve
+Down	Abwärts
+Up	Aufwärts
+Low delay	Kurze Verzögerung
+Deep (to ~20 Hz)	Tief (bis ~20 Hz)
+on	an
+follow	folgen
+learn	lernen
+frozen	eingefroren
+Random	Zufall
+Sine	Sinus
+Linked	Gekoppelt
+Independent	Unabhängig
+Triangle	Dreieck
+Square	Rechteck
+Opposite (180 deg)	Gegenphasig (180°)
+Quadrature (90 deg)	Quadratur (90°)
+Stereo (through)	Stereo (durch)
+Left to both	Links auf beide
+Right to both	Rechts auf beide
+Mono sum	Mono-Summe
+Swap L/R	L/R tauschen
+Invert left	Links invertieren
+Invert right	Rechts invertieren
+Invert both	Beide invertieren
+muted	stumm
+Resume	Fortsetzen
+Turntable	Drehteller
+Measure all	Alle messen
+Stop	Stopp
+Response time	Ansprechzeit
+Serial	Seriell

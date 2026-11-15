@@ -16,6 +16,23 @@ pub const PALETTE: [Color32; 8] = [
     Color32::from_rgb(160, 220, 80),
 ];
 
+/// Okabe-Ito colours: told apart with every common kind of colour blindness.
+pub const PALETTE_SAFE: [Color32; 8] = [
+    Color32::from_rgb(230, 159, 0),
+    Color32::from_rgb(86, 180, 233),
+    Color32::from_rgb(0, 158, 115),
+    Color32::from_rgb(240, 228, 66),
+    Color32::from_rgb(0, 114, 178),
+    Color32::from_rgb(213, 94, 0),
+    Color32::from_rgb(204, 121, 167),
+    Color32::from_rgb(255, 255, 255),
+];
+pub static SAFE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn palette(k: usize) -> Color32 {
+    if SAFE.load(std::sync::atomic::Ordering::Relaxed) { PALETTE_SAFE[k % 8] } else { PALETTE[k % PALETTE.len()] }
+}
+
 #[derive(Clone)]
 pub struct Meas {
     pub name: String,
@@ -110,7 +127,7 @@ impl Library {
         self.checkpoint();
         self.counter += 1;
         let id = self.counter;
-        self.items.push(Meas { name: name.unwrap_or_else(|| format!("Trace {id}")), color: PALETTE[(id - 1) % PALETTE.len()], visible: true, f, mag, phase });
+        self.items.push(Meas { name: name.unwrap_or_else(|| format!("Trace {id}")), color: palette(id - 1), visible: true, f, mag, phase });
         self.dirty = true;
     }
 
@@ -266,7 +283,7 @@ impl Library {
         let n = self.items.len();
         let title = if n > 0 { format!("Traces ({n})") } else { "Traces".to_string() };
         ui.horizontal(|ui| {
-            if ui.add_enabled(store.is_some(), egui::Button::new("Store")).on_hover_text("Keep the current curve (unsmoothed) as a named trace to overlay and compare").clicked() {
+            if ui.add_enabled(store.is_some(), egui::Button::new(crate::lang::tr("Store"))).on_hover_text(crate::lang::tr("Keep the current curve (unsmoothed) as a named trace to overlay and compare")).clicked() {
                 if let Some((f, m, p)) = store {
                     self.add(None, f, m, p);
                 }
@@ -286,6 +303,15 @@ impl Library {
     /// measurement windows and in the Traces window.
     pub fn manage(&mut self, ui: &mut Ui) {
         self.undo_key(ui);
+        let mut safe = SAFE.load(std::sync::atomic::Ordering::Relaxed);
+        if ui.checkbox(&mut safe, crate::lang::tr("Colour-blind safe colours")).on_hover_text(crate::lang::tr("Give the traces colours that stay apart with red-green and blue-yellow colour blindness (all traces are recoloured)")).changed() {
+            SAFE.store(safe, std::sync::atomic::Ordering::Relaxed);
+            self.checkpoint();
+            for (k, m) in self.items.iter_mut().enumerate() {
+                m.color = palette(k);
+            }
+            self.dirty = true;
+        }
         let n = self.items.len();
         let mut del = None;
         let mut dirty = false;
@@ -294,10 +320,10 @@ impl Library {
                 dirty |= ui.checkbox(&mut m.visible, "").changed();
                 dirty |= ui.color_edit_button_srgba(&mut m.color).changed();
                 dirty |= ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(120.0).text_color(m.color)).changed();
-                if ui.selectable_label(self.rel == Some(i), "ref").on_hover_text("Show every curve relative to this one (A - B)").clicked() {
+                if ui.selectable_label(self.rel == Some(i), crate::lang::tr("ref")).on_hover_text(crate::lang::tr("Show every curve relative to this one (A - B)")).clicked() {
                     self.rel = if self.rel == Some(i) { None } else { Some(i) };
                 }
-                if crate::mapping::small_btn(ui, "x").on_hover_text("Delete this trace (Ctrl+Z brings it back)").clicked() {
+                if crate::mapping::small_btn(ui, "x").on_hover_text(crate::lang::tr("Delete this trace (Ctrl+Z brings it back)")).clicked() {
                     del = Some(i);
                 }
             });
@@ -314,16 +340,16 @@ impl Library {
         }
         self.dirty |= dirty;
         ui.horizontal(|ui| {
-            if ui.add_enabled(self.can_undo(), egui::Button::new("Undo")).on_hover_text("Take the last change of the traces back (Ctrl+Z)").clicked() {
+            if ui.add_enabled(self.can_undo(), egui::Button::new(crate::lang::tr("Undo"))).on_hover_text(crate::lang::tr("Take the last change of the traces back (Ctrl+Z)")).clicked() {
                 self.undo();
             }
-            if ui.add_enabled(self.items.iter().filter(|m| m.visible).count() >= 2, egui::Button::new("Average visible")).on_hover_text("New trace: power average of the visible traces").clicked() {
+            if ui.add_enabled(self.items.iter().filter(|m| m.visible).count() >= 2, egui::Button::new(crate::lang::tr("Average visible"))).on_hover_text(crate::lang::tr("New trace: power average of the visible traces")).clicked() {
                 self.average_visible();
             }
-            if ui.add_enabled(self.save_dlg.is_none() && n > 0, egui::Button::new("Save...")).clicked() {
+            if ui.add_enabled(self.save_dlg.is_none() && n > 0, egui::Button::new(crate::lang::tr("Save..."))).clicked() {
                 self.save_dlg = Some(dialogs::save("Save traces", "Traces", &["txt"], "traces.txt".into()));
             }
-            if ui.add_enabled(self.load_dlg.is_none(), egui::Button::new("Load...")).on_hover_text("Traces file, or any text table of frequency and dB (REW export, microphone calibration ...)").clicked() {
+            if ui.add_enabled(self.load_dlg.is_none(), egui::Button::new(crate::lang::tr("Load..."))).on_hover_text(crate::lang::tr("Traces file, or any text table of frequency and dB (REW export, microphone calibration ...)")).clicked() {
                 self.load_dlg = Some(dialogs::open("Load traces", "Traces", &["txt", "cal", "csv", "frd"]));
             }
         });

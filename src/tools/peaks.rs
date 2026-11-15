@@ -94,17 +94,17 @@ impl Tool for Peaks {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.ch, 0, RichText::new("L").color(CH_COLORS[0]));
             ui.selectable_value(&mut self.ch, 1, RichText::new("R").color(CH_COLORS[1]));
-            ui.checkbox(&mut self.use_avg, "averaged").on_hover_text("Use the averaged spectrum (steadier) instead of the live one");
-            ui.add(egui::DragValue::new(&mut self.n).range(1..=32).prefix("max "));
-            ui.add(egui::DragValue::new(&mut self.thr).range(-200.0..=0.0).speed(0.5).prefix("min ").suffix(" dB"));
-            ui.add(egui::DragValue::new(&mut self.prom).range(1.0..=60.0).speed(0.2).prefix("prominence ").suffix(" dB"));
-            ui.add(egui::DragValue::new(&mut self.a4).range(400.0..=480.0).speed(0.1).prefix("A4 ").suffix(" Hz"));
+            ui.checkbox(&mut self.use_avg, crate::lang::tr("averaged")).on_hover_text(crate::lang::tr("Use the averaged spectrum (steadier) instead of the live one"));
+            ui.add(egui::DragValue::new(&mut self.n).range(1..=32).prefix(crate::lang::tr("max ")));
+            ui.add(egui::DragValue::new(&mut self.thr).range(-200.0..=0.0).speed(0.5).prefix(crate::lang::tr("min ")).suffix(crate::lang::tr(" dB")));
+            ui.add(egui::DragValue::new(&mut self.prom).range(1.0..=60.0).speed(0.2).prefix(crate::lang::tr("prominence ")).suffix(crate::lang::tr(" dB")));
+            ui.add(egui::DragValue::new(&mut self.a4).range(400.0..=480.0).speed(0.1).prefix("A4 ").suffix(crate::lang::tr(" Hz")));
         });
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.show, "Mark on spectrum");
-            egui::ComboBox::from_id_salt("pk_label").width(130.0).selected_text(LABELS[self.label]).show_ui(ui, |ui| {
+            ui.checkbox(&mut self.show, crate::lang::tr("Mark on spectrum"));
+            egui::ComboBox::from_id_salt("pk_label").width(130.0).selected_text(crate::lang::tr(LABELS[self.label])).show_ui(ui, |ui| {
                 for (i, l) in LABELS.iter().enumerate() {
-                    ui.selectable_value(&mut self.label, i, *l);
+                    ui.selectable_value(&mut self.label, i, crate::lang::tr(*l));
                 }
             });
         });
@@ -133,7 +133,7 @@ impl Tool for Peaks {
                 p.add(Shape::convex_polygon(vec![Pos2::new(x - 5.0, rect.top()), Pos2::new(x + 5.0, rect.top()), Pos2::new(x, rect.bottom() - 6.0)], col, Stroke::NONE));
             }
             None => {
-                ui.label(RichText::new("no stable pitch").weak());
+                ui.label(RichText::new(crate::lang::tr("no stable pitch")).weak());
             }
         }
         ui.separator();

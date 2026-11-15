@@ -218,7 +218,7 @@ fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<
     let mut sc: cpal::StreamConfig = cfg.clone().into();
     let default_buf = sc.buffer_size.clone();
     if let cpal::SupportedBufferSize::Range { min, max } = cfg.buffer_size() {
-        sc.buffer_size = cpal::BufferSize::Fixed(2048u32.clamp(*min, *max));
+        sc.buffer_size = cpal::BufferSize::Fixed(std::env::var("VISUSCOPE_INPUT_BUFFER_FRAMES").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(2048).clamp(*min, *max));
     }
     let mut sc_default = sc.clone();
     sc_default.buffer_size = default_buf;
@@ -247,12 +247,16 @@ fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<
         SampleFormat::U64 => make::<u64>(&dev, sc, sh.clone(), gid, dead.clone()),
         _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
     };
-    // Larger buffer first (fewer xruns); fall back to the driver default if refused.
+    // Larger buffer first (fewer xruns; VISUSCOPE_INPUT_BUFFER_FRAMES overrides); fall back to the driver default if refused.
     let stream = build_with(sc).or_else(|_| build_with(sc_default)).map_err(|e| format!("{e} (format {fmt:?}, {sr} Hz)"))?;
     sh.xruns.store(0, Relaxed);
     stream.play().map_err(|e| format!("{e}"))?;
     Ok((crate::asio::Held::Cpal(stream), format!("{sr} Hz, {ch} ch, {fmt:?}"), (sr, ch, fmt)))
 }
+
+/// Age of the newest input block at its callback (microseconds) and its length in frames.
+pub static CAP_LAT_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static CAP_FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn make<T>(dev: &cpal::Device, cfg: cpal::StreamConfig, sh: Arc<Shared>, gid: u32, dead: Arc<AtomicBool>) -> Result<cpal::Stream, cpal::Error>
 where
@@ -265,7 +269,13 @@ where
     let mut f = input_body::<T>(sh, gid, dead.clone(), ch, in_sr);
     dev.build_input_stream(
         cfg,
-        move |data: &[T], _: &_| f(data),
+        move |data: &[T], info: &cpal::InputCallbackInfo| {
+            // how old the block is when it arrives (the delay of the driver and of the system's capture buffer)
+            let ts = info.timestamp();
+            CAP_LAT_US.store(ts.callback.duration_since(ts.capture).as_micros() as u32, Relaxed);
+            CAP_FRAMES.store((data.len() / ch.max(1)) as u32, Relaxed);
+            f(data)
+        },
         move |e| match e.kind() {
             cpal::ErrorKind::Xrun => {
                 sh_err.xruns.fetch_add(1, Relaxed);

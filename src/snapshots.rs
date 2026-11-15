@@ -86,12 +86,12 @@ pub fn delete(name: &str) {
 impl App {
     /// The "Snapshots" menu of the top bar.
     pub fn snapshots_menu(&mut self, ui: &mut Ui) {
-        crate::windows::sticky_menu(ui, "Snapshots", |ui| {
+        crate::windows::sticky_menu(ui, crate::lang::tr("Snapshots"), |ui| {
             ui.set_min_width(260.0);
-            ui.label(RichText::new("Whole session: windows, tool settings, generators, routing").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Whole session: windows, tool settings, generators, routing")).small().weak());
             let names = list();
             if names.is_empty() {
-                ui.label(RichText::new("none yet: name the current setup below and save it").small().weak());
+                ui.label(RichText::new(crate::lang::tr("none yet: name the current setup below and save it")).small().weak());
             }
             let mut restore: Option<String> = None;
             let mut remove: Option<String> = None;
@@ -99,14 +99,14 @@ impl App {
             egui::ScrollArea::vertical().max_height(220.0).auto_shrink([true, true]).show(ui, |ui| {
             for n in &names {
                 ui.horizontal(|ui| {
-                    if crate::mapping::btn(ui, n).on_hover_text("Restore this snapshot (the current state is replaced)").clicked() {
+                    if crate::mapping::btn(ui, n).on_hover_text(crate::lang::tr("Restore this snapshot (the current state is replaced)")).clicked() {
                         restore = Some(n.clone());
                     }
                     if self.snap_del.as_deref() == Some(n.as_str()) {
                         if crate::mapping::small_btn(ui, "really delete").clicked() {
                             remove = Some(n.clone());
                         }
-                    } else if crate::mapping::small_btn(ui, "x").on_hover_text("Delete this snapshot").clicked() {
+                    } else if crate::mapping::small_btn(ui, "x").on_hover_text(crate::lang::tr("Delete this snapshot")).clicked() {
                         self.snap_del = Some(n.clone());
                     }
                 });
@@ -129,10 +129,10 @@ impl App {
                 }
             }
             ui.separator();
-            ui.add(egui::TextEdit::singleline(&mut self.snap_name).hint_text("snapshot name").desired_width(f32::INFINITY));
-            ui.add(egui::TextEdit::multiline(&mut self.snap_note).hint_text("notes: device under test, setup, what to compare ...").desired_rows(3).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::singleline(&mut self.snap_name).hint_text(crate::lang::tr("snapshot name")).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::multiline(&mut self.snap_note).hint_text(crate::lang::tr("notes: device under test, setup, what to compare ...")).desired_rows(3).desired_width(f32::INFINITY));
             ui.horizontal(|ui| {
-                if ui.add_enabled(!clean_name(&self.snap_name).is_empty(), egui::Button::new("Save snapshot")).clicked() {
+                if ui.add_enabled(!clean_name(&self.snap_name).is_empty(), egui::Button::new(if names.iter().any(|n| n.eq_ignore_ascii_case(&clean_name(&self.snap_name))) { "Update existing snapshot" } else { "Save new snapshot" })).clicked() {
                     let snap = Snap { note: self.snap_note.clone(), settings: self.settings_string(), graph: crate::graph::bus().graph_text.lock().clone() };
                     self.snap_msg = match save(&self.snap_name, &snap) {
                         Ok(()) => format!("Saved \"{}\"", clean_name(&self.snap_name)),

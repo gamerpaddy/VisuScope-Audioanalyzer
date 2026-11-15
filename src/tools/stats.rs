@@ -156,7 +156,7 @@ impl Tool for Stats {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.ch, 0, RichText::new("L").color(CH_COLORS[0]));
             ui.selectable_value(&mut self.ch, 1, RichText::new("R").color(CH_COLORS[1]));
-            ui.checkbox(&mut self.fade, "Fade (10 s)").on_hover_text("Histogram forgets old samples");
+            ui.checkbox(&mut self.fade, crate::lang::tr("Fade (10 s)")).on_hover_text(crate::lang::tr("Histogram forgets old samples"));
             if crate::mapping::btn(ui, "Reset").clicked() {
                 self.reset();
             }
@@ -214,7 +214,7 @@ impl Tool for Stats {
         }
         ui.horizontal(|ui| {
             heading(ui, "Trend (10 min)");
-            egui::ComboBox::from_id_salt("st_trend").width(110.0).selected_text(TRENDS[self.trend].0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("st_trend").width(110.0).selected_text(crate::lang::tr(TRENDS[self.trend].0)).show_ui(ui, |ui| {
                 for (i, t) in TRENDS.iter().enumerate() {
                     ui.selectable_value(&mut self.trend, i, t.0);
                 }

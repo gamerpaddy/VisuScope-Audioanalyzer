@@ -77,7 +77,7 @@ const P_EQ: &[ParamDef] = &[
     c("3 type", 0, EQ_TYPES), l("3 freq", 20.0, 20000.0, 2500.0, " Hz"), s("3 gain", -60.0, 24.0, 0.0, " dB"), l("3 Q", 0.1, 10.0, 1.0, ""),
     c("4 type", 2, EQ_TYPES), l("4 freq", 20.0, 20000.0, 8000.0, " Hz"), s("4 gain", -60.0, 24.0, 0.0, " dB"), l("4 Q", 0.1, 10.0, 0.7, ""),
 ];
-const P_FILTER: &[ParamDef] = &[c("Type", 0, &["High-pass", "Low-pass"]), l("Freq", 20.0, 20000.0, 80.0, " Hz"), c("Slope", 1, &["12 dB/oct", "24 dB/oct", "48 dB/oct"])];
+const P_FILTER: &[ParamDef] = &[c("Type", 0, &["High-pass", "Low-pass"]), l("Freq", 20.0, 20000.0, 80.0, " Hz"), c("Slope", 1, &["12 dB/oct", "24 dB/oct", "48 dB/oct", "6 dB/oct", "18 dB/oct"])];
 const P_COMP: &[ParamDef] = &[
     s("Threshold", -60.0, 0.0, -18.0, " dB"),
     s("Ratio", 1.0, 20.0, 4.0, ":1"),

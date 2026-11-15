@@ -314,23 +314,29 @@ impl Daw {
     // ------------------------------------------------------------------ project files and export
 
     pub(super) fn save_project(&mut self, path: PathBuf, auto: bool) {
+        if self.busy.load(Relaxed) != 0 || !self.jobs.lock().is_empty() {
+            self.note = "Wait for pending timeline work before saving".into();
+            return;
+        }
         let p = self.proj.lock().clone();
-        self.saved_rev = self.rev;
+        let revision = self.rev;
         self.last_autosave = Instant::now();
         self.spawn_job("daw-save", move |jobs| {
             if let Some(d) = path.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
             let r = file::save(&p, &path).map(|_| path);
-            jobs.lock().push(Job::Saved(r, auto));
+            jobs.lock().push(Job::Saved(r, auto, revision));
         });
     }
 
     pub(super) fn open_project(&mut self, path: PathBuf, restore: bool) {
-        self.spawn_job("daw-load", move |jobs| {
-            let r = file::load(&path);
-            jobs.lock().push(Job::Loaded(r, restore, path));
-        });
+        if self.busy.load(Relaxed) != 0 || !self.jobs.lock().is_empty() || self.rec.is_some() || self.play.is_some() {
+            self.note = "Stop playback/recording and wait for pending work before opening a project".into();
+            return;
+        }
+        let r = file::load(&path);
+        self.jobs.lock().push(Job::Loaded(r, restore, path));
     }
 
     pub(super) fn save_clicked(&mut self, save_as: bool) {
@@ -364,10 +370,12 @@ impl Daw {
         self.range = None;
         self.cursor = 0;
         self.path = None;
+        let _ = std::fs::remove_file(autosave_path().with_extension("origin"));
         self.an_out = None;
         self.an_done = None;
         self.rev += 1;
-        self.saved_rev = self.rev;
+        self.saved_rev = self.rev.wrapping_sub(1);
+        self.named_rev = self.rev;
     }
 
     pub(super) fn ask_export(&mut self, kind: Export) {

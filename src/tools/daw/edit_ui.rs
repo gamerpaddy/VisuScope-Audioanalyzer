@@ -172,24 +172,24 @@ impl Daw {
         let Some(mut d) = self.stretch.take() else { return };
         let mut open = true;
         let mut apply = false;
-        egui::Window::new("Time-stretch / pitch-shift").order(egui::Order::Foreground).default_pos(pos2(80.0, 120.0)).open(&mut open).collapsible(false).resizable(false).default_width(330.0).show(ui.ctx(), |ui| {
+        egui::Window::new(crate::lang::tr("Time-stretch / pitch-shift")).order(egui::Order::Foreground).default_pos(pos2(80.0, 120.0)).open(&mut open).collapsible(false).resizable(false).default_width(330.0).show(ui.ctx(), |ui| {
             ui.label(RichText::new(format!("{} clip(s) selected. The audio of the clips is processed (Ctrl+Z undoes it).", self.sel.len())).small().weak());
             ui.horizontal(|ui| {
-                ui.radio_value(&mut d.mode, 0, "Tempo and pitch separately");
-                ui.radio_value(&mut d.mode, 1, "Speed (both, like tape)");
+                ui.radio_value(&mut d.mode, 0, crate::lang::tr("Tempo and pitch separately"));
+                ui.radio_value(&mut d.mode, 1, crate::lang::tr("Speed (both, like tape)"));
             });
             let r = ui.add(egui::Slider::new(&mut d.tempo_pct, 25.0..=400.0).logarithmic(true).suffix(" %").text(if d.mode == 0 { "Tempo" } else { "Speed" }));
             crate::slider::reset(ui, &r, &mut d.tempo_pct, 100.0);
             if d.mode == 0 {
-                ui.add(egui::Slider::new(&mut d.semis, -24.0..=24.0).suffix(" semitones").text("Pitch"));
+                ui.add(egui::Slider::new(&mut d.semis, -24.0..=24.0).suffix(crate::lang::tr(" semitones")).text(crate::lang::tr("Pitch")));
             } else {
                 ui.label(RichText::new(format!("The pitch changes by {:+.2} semitones", 12.0 * (d.tempo_pct as f64 / 100.0).log2())).small().weak());
             }
             ui.horizontal(|ui| {
-                if ui.add_enabled(!self.sel.is_empty(), egui::Button::new("Apply")).clicked() {
+                if ui.add_enabled(!self.sel.is_empty(), egui::Button::new(crate::lang::tr("Apply"))).clicked() {
                     apply = true;
                 }
-                if ui.button("Reset").clicked() {
+                if ui.button(crate::lang::tr("Reset")).clicked() {
                     d.tempo_pct = 100.0;
                     d.semis = 0.0;
                 }
@@ -251,32 +251,32 @@ impl Daw {
         let nyq = p.sr as f32 * 0.5;
         egui::Window::new(format!("Spectral editor: {}", clip.name)).id(egui::Id::new("daw_spec_win")).order(egui::Order::Foreground).open(&mut open).default_size([920.0, 520.0]).resizable(true).show(ui.ctx(), |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Drag on the picture to mark a region.").small().weak());
-                ui.add(egui::Slider::new(&mut s.gain_db, -80.0..=12.0).text("Level of new regions").custom_formatter(|v, _| if v <= -79.9 { "removed".to_string() } else { format!("{v:+.0} dB") }));
+                ui.label(RichText::new(crate::lang::tr("Drag on the picture to mark a region.")).small().weak());
+                ui.add(egui::Slider::new(&mut s.gain_db, -80.0..=12.0).text(crate::lang::tr("Level of new regions")).custom_formatter(|v, _| if v <= -79.9 { "removed".to_string() } else { format!("{v:+.0} dB") }));
             });
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!s.regions.is_empty(), egui::Button::new(format!("Apply {} region(s)", s.regions.len()))).on_hover_text("Process the clip's audio (Ctrl+Z undoes it)").clicked() {
+                if ui.add_enabled(!s.regions.is_empty(), egui::Button::new(format!("Apply {} region(s)", s.regions.len()))).on_hover_text(crate::lang::tr("Process the clip's audio (Ctrl+Z undoes it)")).clicked() {
                     run = Some(EditKind::Regions(s.regions.clone()));
                 }
-                if ui.add_enabled(s.sel.is_some(), egui::Button::new("Delete region")).clicked() {
+                if ui.add_enabled(s.sel.is_some(), egui::Button::new(crate::lang::tr("Delete region"))).clicked() {
                     if let Some(i) = s.sel.take() {
                         if i < s.regions.len() {
                             s.regions.remove(i);
                         }
                     }
                 }
-                if ui.add_enabled(!s.regions.is_empty(), egui::Button::new("Clear regions")).clicked() {
+                if ui.add_enabled(!s.regions.is_empty(), egui::Button::new(crate::lang::tr("Clear regions"))).clicked() {
                     s.regions.clear();
                     s.sel = None;
                 }
                 ui.separator();
-                if ui.button("Remove clicks").on_hover_text("Finds short bursts far above the signal's own roughness and bridges them").clicked() {
+                if ui.button(crate::lang::tr("Remove clicks")).on_hover_text(crate::lang::tr("Finds short bursts far above the signal's own roughness and bridges them")).clicked() {
                     run = Some(EditKind::Declick(12.0));
                 }
-                if ui.button("Remove 50 Hz hum").clicked() {
+                if ui.button(crate::lang::tr("Remove 50 Hz hum")).clicked() {
                     run = Some(EditKind::Dehum(50.0));
                 }
-                if ui.button("Remove 60 Hz hum").clicked() {
+                if ui.button(crate::lang::tr("Remove 60 Hz hum")).clicked() {
                     run = Some(EditKind::Dehum(60.0));
                 }
             });

@@ -227,7 +227,7 @@ impl Distortion {
 
     fn finish(&mut self, cx: &mut Ctx, aborted: bool) {
         if let Some(s) = self.saved.take() {
-            cx.req.gen_cmd = Some(GenCmd { wave: Some(s.wave), freq: Some(s.freq), level_db: Some(s.level), on: Some(s.on) });
+            cx.req.gen_cmd = Some(GenCmd { wave: Some(s.wave), freq: Some(s.freq), level_db: Some(s.level), on: Some(s.on), mute: None });
         }
         self.phase = Phase::Idle;
         if aborted {
@@ -237,9 +237,9 @@ impl Distortion {
 
     fn gen_for(&self, x: f32) -> GenCmd {
         match self.mode {
-            0 => GenCmd { wave: Some(Wave::Sine), freq: Some(x), level_db: Some(self.level_db), on: Some(true) },
-            1 => GenCmd { wave: Some(Wave::Sine), freq: Some(self.freq), level_db: Some(x), on: Some(true) },
-            _ => GenCmd { wave: Some(if self.smpte { Wave::Smpte } else { Wave::Ccif }), freq: None, level_db: Some(x), on: Some(true) },
+            0 => GenCmd { wave: Some(Wave::Sine), freq: Some(x), level_db: Some(self.level_db), on: Some(true), mute: None },
+            1 => GenCmd { wave: Some(Wave::Sine), freq: Some(self.freq), level_db: Some(x), on: Some(true), mute: None },
+            _ => GenCmd { wave: Some(if self.smpte { Wave::Smpte } else { Wave::Ccif }), freq: None, level_db: Some(x), on: Some(true), mute: None },
         }
     }
 
@@ -325,7 +325,7 @@ impl Distortion {
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(!self.running(), |ui| {
                 for (i, n) in MODES.iter().enumerate() {
-                    ui.selectable_value(&mut self.mode, i, *n);
+                    ui.selectable_value(&mut self.mode, i, crate::lang::tr(*n));
                 }
             });
         });
@@ -347,37 +347,37 @@ impl Distortion {
                     ui.add(egui::ProgressBar::new(sw.progress()).desired_width(120.0).show_percentage());
                 }
                 ui.add_enabled_ui(!sb, |ui| {
-                    ui.add(egui::DragValue::new(&mut sw.p.amp_db).range(-60.0..=0.0).speed(0.2).suffix(" dBFS"));
-                    ui.add(egui::DragValue::new(&mut sw.p.secs).range(1.0..=12.0).speed(0.1).suffix(" s")).on_hover_text("Longer sweeps separate the harmonics better and lower the noise");
+                    ui.add(egui::DragValue::new(&mut sw.p.amp_db).range(-60.0..=0.0).speed(0.2).suffix(crate::lang::tr(" dBFS")));
+                    ui.add(egui::DragValue::new(&mut sw.p.secs).range(1.0..=12.0).speed(0.1).suffix(" s")).on_hover_text(crate::lang::tr("Longer sweeps separate the harmonics better and lower the noise"));
                 });
                 if let State::Failed(e) = &sw.state {
                     ui.colored_label(Color32::from_rgb(255, 130, 100), e);
                 }
             });
-            ui.label(RichText::new("One sweep gives every harmonic: each distortion product arrives before the main impulse and is read at k times the fundamental. Shares the sweep of the Response window.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("One sweep gives every harmonic: each distortion product arrives before the main impulse and is read at k times the fundamental. Shares the sweep of the Response window.")).small().weak());
             return;
         }
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(!busy, |ui| {
                 if self.mode == 0 {
-                    ui.add(egui::DragValue::new(&mut self.f_lo).range(10.0..=2000.0).speed(1.0).suffix(" Hz"));
-                    ui.label("to");
-                    ui.add(egui::DragValue::new(&mut self.f_hi).range(1000.0..=96000.0).speed(10.0).suffix(" Hz"));
-                    ui.add(egui::DragValue::new(&mut self.points).range(4..=80).suffix(" points"));
-                    ui.add(egui::DragValue::new(&mut self.level_db).range(-60.0..=0.0).speed(0.2).suffix(" dBFS"));
+                    ui.add(egui::DragValue::new(&mut self.f_lo).range(10.0..=2000.0).speed(1.0).suffix(crate::lang::tr(" Hz")));
+                    ui.label(crate::lang::tr("to"));
+                    ui.add(egui::DragValue::new(&mut self.f_hi).range(1000.0..=96000.0).speed(10.0).suffix(crate::lang::tr(" Hz")));
+                    ui.add(egui::DragValue::new(&mut self.points).range(4..=80).suffix(crate::lang::tr(" points")));
+                    ui.add(egui::DragValue::new(&mut self.level_db).range(-60.0..=0.0).speed(0.2).suffix(crate::lang::tr(" dBFS")));
                 } else {
                     if self.mode == 1 {
-                        ui.add(egui::DragValue::new(&mut self.freq).range(10.0..=20000.0).speed(5.0).suffix(" Hz"));
+                        ui.add(egui::DragValue::new(&mut self.freq).range(10.0..=20000.0).speed(5.0).suffix(crate::lang::tr(" Hz")));
                     } else {
-                        ui.selectable_value(&mut self.smpte, true, "SMPTE");
-                        ui.selectable_value(&mut self.smpte, false, "CCIF");
+                        ui.selectable_value(&mut self.smpte, true, crate::lang::tr("SMPTE"));
+                        ui.selectable_value(&mut self.smpte, false, crate::lang::tr("CCIF"));
                     }
-                    ui.add(egui::DragValue::new(&mut self.l_lo).range(-100.0..=-1.0).speed(0.5).suffix(" dBFS"));
-                    ui.label("to");
-                    ui.add(egui::DragValue::new(&mut self.l_hi).range(-90.0..=0.0).speed(0.5).suffix(" dBFS"));
-                    ui.add(egui::DragValue::new(&mut self.l_step).range(0.5..=12.0).speed(0.1).prefix("step ").suffix(" dB"));
+                    ui.add(egui::DragValue::new(&mut self.l_lo).range(-100.0..=-1.0).speed(0.5).suffix(crate::lang::tr(" dBFS")));
+                    ui.label(crate::lang::tr("to"));
+                    ui.add(egui::DragValue::new(&mut self.l_hi).range(-90.0..=0.0).speed(0.5).suffix(crate::lang::tr(" dBFS")));
+                    ui.add(egui::DragValue::new(&mut self.l_step).range(0.5..=12.0).speed(0.1).prefix(crate::lang::tr("step ")).suffix(crate::lang::tr(" dB")));
                 }
-                ui.add(egui::DragValue::new(&mut self.settle).range(0.0..=5.0).speed(0.05).prefix("settle +").suffix(" s")).on_hover_text("Extra wait after each change, on top of refilling the measurement window");
+                ui.add(egui::DragValue::new(&mut self.settle).range(0.0..=5.0).speed(0.05).prefix(crate::lang::tr("settle +")).suffix(" s")).on_hover_text(crate::lang::tr("Extra wait after each change, on top of refilling the measurement window"));
             });
         });
         ui.horizontal(|ui| {
@@ -396,7 +396,7 @@ impl Distortion {
             }
         });
         if !busy && self.pts.is_empty() {
-            ui.label(RichText::new("Needs the generator output fed back into the input (cable or [Loopback] input). The generator is switched and restored automatically.").small().weak());
+            ui.label(RichText::new(crate::lang::tr("Needs the generator output fed back into the input (cable or [Loopback] input). The generator is switched and restored automatically.")).small().weak());
         }
     }
 }
@@ -453,20 +453,20 @@ impl Tool for Distortion {
         ui.horizontal_wrapped(|ui| {
             if swept {
                 // (every curve can be hidden)
-                ui.checkbox(&mut self.sw_show[0], RichText::new("THD").color(C_THD));
+                ui.checkbox(&mut self.sw_show[0], RichText::new(crate::lang::tr("THD")).color(C_THD));
                 for k in 0..HARM_K - 1 {
                     ui.checkbox(&mut self.sw_show[k + 1], RichText::new(format!("H{}", k + 2)).color(HARM_COLS[k]));
                 }
             }
             if !swept {
-                ui.checkbox(&mut self.show[0], RichText::new("THD+N").color(C_THDN));
-                ui.checkbox(&mut self.show[1], RichText::new("THD").color(C_THD));
+                ui.checkbox(&mut self.show[0], RichText::new(crate::lang::tr("THD+N")).color(C_THDN));
+                ui.checkbox(&mut self.show[1], RichText::new(crate::lang::tr("THD")).color(C_THD));
                 ui.checkbox(&mut self.show[2], RichText::new("H2").color(C_H2));
                 ui.checkbox(&mut self.show[3], RichText::new("H3").color(C_H3));
             }
-            ui.add(egui::DragValue::new(&mut self.y_lo).range(-200.0..=self.y_hi - 10.0).speed(0.5).prefix("min "));
-            ui.add(egui::DragValue::new(&mut self.y_hi).range(self.y_lo + 10.0..=40.0).speed(0.5).prefix("max "));
-            if ui.add_enabled(self.save.is_none(), egui::Button::new("CSV")).clicked() {
+            ui.add(egui::DragValue::new(&mut self.y_lo).range(-200.0..=self.y_hi - 10.0).speed(0.5).prefix(crate::lang::tr("min ")));
+            ui.add(egui::DragValue::new(&mut self.y_hi).range(self.y_lo + 10.0..=40.0).speed(0.5).prefix(crate::lang::tr("max ")));
+            if ui.add_enabled(self.save.is_none(), egui::Button::new(crate::lang::tr("CSV"))).clicked() {
                 self.save = Some(dialogs::save("Export distortion sweep", "CSV", &["csv"], "distortion.csv".into()));
             }
         });
@@ -570,7 +570,7 @@ impl Tool for Distortion {
                 painter.rect_filled(r, 3.0, Color32::from_white_alpha(24));
             }
             painter.text(Pos2::new(rect.left() + 3.0, pr.top()), Align2::LEFT_TOP, if self.pct_scale { "%" } else { "dB" }, FontId::proportional(9.5), if hit.hovered() { Color32::WHITE } else { crate::views::TXT });
-            if hit.on_hover_text("Click: show the scale in dB or in percent").clicked() {
+            if hit.on_hover_text(crate::lang::tr("Click: show the scale in dB or in percent")).clicked() {
                 self.pct_scale = !self.pct_scale;
             }
         }

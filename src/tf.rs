@@ -29,6 +29,7 @@ pub struct TfEngine {
     cnt: u32,
     last_total: u64,
     reset: u32,
+    ref_r: bool,
     /// delay of the measured channel behind the reference, samples (fractional)
     delay: f32,
     est_t: Instant,
@@ -55,6 +56,7 @@ impl TfEngine {
             cnt: 0,
             last_total: 0,
             reset: 0,
+            ref_r: true,
             delay: 0.0,
             est_t: Instant::now(),
             est_every: Duration::from_millis(400),
@@ -95,7 +97,8 @@ impl TfEngine {
         if self.n != n || self.win != p.window || self.sr != sr {
             self.rebuild(planner, n, p.window, sr);
         }
-        if self.reset != tp.reset {
+        if self.reset != tp.reset || self.ref_r != tp.ref_r {
+            self.ref_r = tp.ref_r;
             self.reset = tp.reset;
             self.clear_avg();
             if tp.auto_delay {

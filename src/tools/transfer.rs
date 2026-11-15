@@ -123,44 +123,44 @@ impl Tool for LiveTf {
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Reference").small().weak());
-            ui.selectable_value(&mut self.p.ref_r, false, "L").on_hover_text("L carries the reference (system input), R the measured signal");
-            ui.selectable_value(&mut self.p.ref_r, true, "R").on_hover_text("R carries the reference (system input), L the measured signal");
+            ui.label(RichText::new(crate::lang::tr("Reference")).small().weak());
+            ui.selectable_value(&mut self.p.ref_r, false, "L").on_hover_text(crate::lang::tr("L carries the reference (system input), R the measured signal"));
+            ui.selectable_value(&mut self.p.ref_r, true, "R").on_hover_text(crate::lang::tr("R carries the reference (system input), L the measured signal"));
             ui.separator();
-            ui.checkbox(&mut self.p.auto_delay, "Auto delay").on_hover_text("Find the latency between the channels and remove it, so music or noise works as a stimulus");
+            ui.checkbox(&mut self.p.auto_delay, crate::lang::tr("Auto delay")).on_hover_text(crate::lang::tr("Find the latency between the channels and remove it, so music or noise works as a stimulus"));
             if self.p.auto_delay {
                 ui.label(RichText::new(format!("{:.2} ms", self.delay_ms)).monospace());
             } else {
-                ui.add(egui::DragValue::new(&mut self.p.delay_ms).speed(0.01).range(-500.0..=500.0).suffix(" ms"));
+                ui.add(egui::DragValue::new(&mut self.p.delay_ms).speed(0.01).range(-500.0..=500.0).suffix(crate::lang::tr(" ms")));
             }
-            if crate::mapping::btn(ui, "Reset").on_hover_text("Restart the averaging").clicked() {
+            if crate::mapping::btn(ui, "Reset").on_hover_text(crate::lang::tr("Restart the averaging")).clicked() {
                 self.p.reset = self.p.reset.wrapping_add(1);
             }
-            ui.checkbox(&mut self.hold, "Freeze");
+            ui.checkbox(&mut self.hold, crate::lang::tr("Freeze"));
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Smooth").small().weak());
-            egui::ComboBox::from_id_salt("tf_sm").width(78.0).selected_text(SMOOTH[self.smooth].1).show_ui(ui, |ui| {
+            ui.label(RichText::new(crate::lang::tr("Smooth")).small().weak());
+            egui::ComboBox::from_id_salt("tf_sm").width(78.0).selected_text(crate::lang::tr(SMOOTH[self.smooth].1)).show_ui(ui, |ui| {
                 for (i, s) in SMOOTH.iter().enumerate() {
                     ui.selectable_value(&mut self.smooth, i, s.1);
                 }
             });
-            ui.label(RichText::new("Below").small().weak());
-            egui::ComboBox::from_id_salt("tf_lo").width(92.0).selected_text(LOWER[self.lower]).show_ui(ui, |ui| {
+            ui.label(RichText::new(crate::lang::tr("Below")).small().weak());
+            egui::ComboBox::from_id_salt("tf_lo").width(92.0).selected_text(crate::lang::tr(LOWER[self.lower])).show_ui(ui, |ui| {
                 for (i, s) in LOWER.iter().enumerate() {
-                    ui.selectable_value(&mut self.lower, i, *s);
+                    ui.selectable_value(&mut self.lower, i, crate::lang::tr(*s));
                 }
             });
-            ui.checkbox(&mut self.blank, "Blank").on_hover_text("Hide the trace where the coherence is low (no usable signal or too much noise)");
+            ui.checkbox(&mut self.blank, crate::lang::tr("Blank")).on_hover_text(crate::lang::tr("Hide the trace where the coherence is low (no usable signal or too much noise)"));
             ui.add_enabled(self.blank, egui::DragValue::new(&mut self.coh_thr).speed(0.01).range(0.05..=0.99).fixed_decimals(2));
-            ui.add(egui::DragValue::new(&mut self.y_lo).range(-200.0..=self.y_hi - 5.0).speed(0.5).prefix("min "));
-            ui.add(egui::DragValue::new(&mut self.y_hi).range(self.y_lo + 5.0..=100.0).speed(0.5).prefix("max "));
+            ui.add(egui::DragValue::new(&mut self.y_lo).range(-200.0..=self.y_hi - 5.0).speed(0.5).prefix(crate::lang::tr("min ")));
+            ui.add(egui::DragValue::new(&mut self.y_hi).range(self.y_lo + 5.0..=100.0).speed(0.5).prefix(crate::lang::tr("max ")));
         });
 
         cx.lib.ui(ui, self.curve.as_ref().map(|c| (c.f.clone(), c.raw.clone(), c.phase_at.clone())));
         let Some(c) = &self.curve else {
             ui.add_space(8.0);
-            ui.label(RichText::new("Needs a signal on both channels: the system input on the reference channel, its output on the other.\nPlay music or noise through the system; the averaged result appears here (uses the Average setting in the sidebar).").weak());
+            ui.label(RichText::new(crate::lang::tr("Needs a signal on both channels: the system input on the reference channel, its output on the other.\nPlay music or noise through the system; the averaged result appears here (uses the Average setting in the sidebar).")).weak());
             return;
         };
         let has_lower = self.lower < 2;

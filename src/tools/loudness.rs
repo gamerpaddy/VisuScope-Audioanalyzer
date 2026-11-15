@@ -200,30 +200,29 @@ impl Engine {
     /// Gated integrated loudness (absolute -70 LUFS, relative -10 LU).
     pub fn integrated(&self) -> Option<f32> {
         let abs = 10f64.powf((-70.0 + 0.691) / 10.0);
-        let v: Vec<f64> = self.blocks.iter().map(|&b| b as f64).filter(|&b| b > abs).collect();
-        if v.is_empty() {
-            return None;
-        }
-        let rel = v.iter().sum::<f64>() / v.len() as f64 * 10f64.powf(-1.0);
-        let g: Vec<f64> = v.into_iter().filter(|&b| b > rel).collect();
-        (!g.is_empty()).then(|| lufs(g.iter().sum::<f64>() / g.len() as f64))
+        let (sum, count) = self.blocks.iter().map(|&b| b as f64).filter(|&b| b > abs)
+            .fold((0.0, 0usize), |(s, n), v| (s + v, n + 1));
+        if count == 0 { return None; }
+        let rel = sum / count as f64 * 0.1;
+        let (sum, count) = self.blocks.iter().map(|&b| b as f64).filter(|&b| b > abs && b > rel)
+            .fold((0.0, 0usize), |(s, n), v| (s + v, n + 1));
+        (count != 0).then(|| lufs(sum / count as f64))
     }
 
-    /// Loudness range (EBU Tech 3342): 10th to 95th percentile of the gated short-term values.
+    /// Loudness range from gated energy percentiles; logarithms are needed only for the two selected values.
     pub fn lra(&self) -> Option<f32> {
         let abs = 10f64.powf((-70.0 + 0.691) / 10.0);
-        let v: Vec<f64> = self.st_hist.iter().map(|&b| b as f64).filter(|&b| b > abs).collect();
-        if v.len() < 5 {
-            return None;
-        }
-        let rel = v.iter().sum::<f64>() / v.len() as f64 * 10f64.powf(-2.0);
-        let mut g: Vec<f32> = v.into_iter().filter(|&b| b > rel).map(|b| lufs(b)).collect();
-        if g.len() < 5 {
-            return None;
-        }
-        g.sort_by(|a, b| a.total_cmp(b));
-        let at = |p: f32| g[((g.len() - 1) as f32 * p).round() as usize];
-        Some(at(0.95) - at(0.10))
+        let (sum, count) = self.st_hist.iter().map(|&b| b as f64).filter(|&b| b > abs)
+            .fold((0.0, 0usize), |(s, n), v| (s + v, n + 1));
+        if count < 5 { return None; }
+        let rel = sum / count as f64 * 0.01;
+        let mut g: Vec<f32> = self.st_hist.iter().copied().filter(|&b| b as f64 > abs && b as f64 > rel).collect();
+        if g.len() < 5 { return None; }
+        let lo = ((g.len() - 1) as f32 * 0.10).round() as usize;
+        let hi = ((g.len() - 1) as f32 * 0.95).round() as usize;
+        let low = *g.select_nth_unstable_by(lo, f32::total_cmp).1;
+        let high = *g.select_nth_unstable_by(hi, f32::total_cmp).1;
+        Some(lufs(high as f64) - lufs(low as f64))
     }
 
     pub fn reset(&mut self) {
@@ -295,7 +294,7 @@ impl Tool for Loudness {
     fn ui(&mut self, ui: &mut Ui, _cx: &mut Ctx) {
         let target = self.target();
         ui.horizontal_wrapped(|ui| {
-            if crate::mapping::btn(ui, "Reset").on_hover_text("Restart the integrated measurement and peaks").clicked() {
+            if crate::mapping::btn(ui, "Reset").on_hover_text(crate::lang::tr("Restart the integrated measurement and peaks")).clicked() {
                 if let Some(e) = &mut self.eng {
                     e.reset();
                 }
@@ -307,12 +306,12 @@ impl Tool for Loudness {
                 }
             });
             if self.target_i == TARGETS.len() - 1 {
-                ui.add(egui::DragValue::new(&mut self.custom).range(-60.0..=0.0).speed(0.1).suffix(" LUFS"));
+                ui.add(egui::DragValue::new(&mut self.custom).range(-60.0..=0.0).speed(0.1).suffix(crate::lang::tr(" LUFS")));
             }
-            ui.checkbox(&mut self.keep, "Keep measuring when closed");
+            ui.checkbox(&mut self.keep, crate::lang::tr("Keep measuring when closed"));
         });
         let Some(e) = &self.eng else {
-            ui.label(RichText::new("waiting for audio...").weak());
+            ui.label(RichText::new(crate::lang::tr("waiting for audio...")).weak());
             return;
         };
         let (int, lra) = self.summary;
@@ -360,7 +359,7 @@ impl Tool for Loudness {
             });
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("VU").monospace());
+            ui.label(RichText::new(crate::lang::tr("VU")).monospace());
             let (r, p) = bar(ui, w - 30.0, 9.0);
             let db = 10.0 * e.vu.max(1e-12).log10() - self.vu_ref;
             let x = r.left() + ((db + 20.0) / 23.0).clamp(0.0, 1.0) * r.width();
@@ -368,7 +367,7 @@ impl Tool for Loudness {
             let z = r.left() + 20.0 / 23.0 * r.width();
             p.line_segment([Pos2::new(z, r.top()), Pos2::new(z, r.bottom())], Stroke::new(1.0, Color32::WHITE));
             ui.label(RichText::new(format!("{db:+.1}")).small().monospace());
-            ui.add(egui::DragValue::new(&mut self.vu_ref).range(-30.0..=0.0).speed(0.1).prefix("0 VU = ").suffix(" dBFS"));
+            ui.add(egui::DragValue::new(&mut self.vu_ref).range(-30.0..=0.0).speed(0.1).prefix(crate::lang::tr("0 VU = ")).suffix(crate::lang::tr(" dBFS")));
         });
         ui.add_space(4.0);
         // history
@@ -444,4 +443,39 @@ mod tests {
         let i = e.integrated().unwrap();
         assert!((i + 20.0).abs() < 0.2, "integrated {i}");
     }
+}
+
+#[cfg(test)] mod performance_tests {
+ use super::*;
+ #[test] #[ignore]
+ fn benchmark_long_session_readouts() {
+ let mut e = Engine::new(48000);
+ e.blocks = (0..100000).map(|i| 0.0001 + (i % 1000) as f32 / 10000.0).collect();
+ e.st_hist = e.blocks.clone();
+ let t = std::time::Instant::now();
+ for _ in 0..100 { std::hint::black_box(e.integrated()); std::hint::black_box(e.lra()); }
+ println!("100 loudness readouts: {:.3} ms", t.elapsed().as_secs_f64()*1000.0);
+ }
+}
+
+#[cfg(test)] mod optimized_readout_tests {
+ use super::*;
+ #[test] fn optimized_readouts_match_reference() {
+ for n in [0, 4, 30, 1000, 10000] {
+ let mut e = Engine::new(48000);
+ let mut seed = 7u32;
+ e.blocks = (0..n).map(|_| { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); 10f32.powf(-10.0 + (seed % 10000) as f32 / 1000.0) }).collect();
+ e.st_hist = e.blocks.clone();
+ let abs = 10f64.powf((-70.0 + 0.691)/10.0);
+ let v: Vec<f64> = e.blocks.iter().map(|&b| b as f64).filter(|&b| b > abs).collect();
+ let rel = v.iter().sum::<f64>() / v.len().max(1) as f64;
+ let g: Vec<f64> = v.iter().copied().filter(|&b| b > rel * 0.1).collect();
+ let expected = (!g.is_empty()).then(|| lufs(g.iter().sum::<f64>() / g.len() as f64));
+ assert_eq!(e.integrated(), expected);
+ let mut g: Vec<f32> = v.iter().copied().filter(|&b| b > rel * 0.01).map(lufs).collect();
+ g.sort_by(f32::total_cmp);
+ let expected = (v.len() >= 5 && g.len() >= 5).then(|| g[((g.len()-1) as f32 * 0.95).round() as usize] - g[((g.len()-1) as f32 * 0.10).round() as usize]);
+ assert_eq!(e.lra(), expected);
+ }
+ }
 }

@@ -3,6 +3,18 @@
 use super::*;
 
 impl Tool for Daw {
+    fn shutdown(&mut self, cx: &mut Ctx) {
+        self.stop_record(cx);
+        self.play_stop(cx);
+        while self.busy.load(Relaxed) != 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.poll(cx);
+        if let Err(e) = file::save(&self.proj.lock(), &autosave_path()) {
+            crate::log::log(&format!("Timeline shutdown save failed: {e}"));
+        }
+    }
+
     fn update(&mut self, cx: &mut Ctx, visible: bool) {
         self.visible = visible;
         if self.startup == 0 {
@@ -15,6 +27,16 @@ impl Tool for Daw {
             }
         }
         self.poll(cx);
+        if self.replace_ready {
+            self.replace_ready = false; self.replace_after_save = false;
+            if let Some(open) = self.pending_replace.take() {
+                if open { self.open_clicked(); } else { self.new_project(cx); }
+            }
+        }
+        if self.rec.is_some() && self.capt.values().any(|c| c.interrupted()) {
+            self.stop_record(cx);
+            self.note = "Recording stopped: memory limit reached or input format changed; captured audio is being saved".into();
+        }
         // commands from the input mappings
         for c in std::mem::take(&mut self.cmds) {
             let mut it = c.splitn(2, '\t');
@@ -50,7 +72,7 @@ impl Tool for Daw {
         self.sync_play(cx);
         self.manage_monitor(cx);
         self.update_meters();
-        if self.rev != self.saved_rev && self.last_edit.elapsed() > Duration::from_secs(4) && self.busy.load(Relaxed) == 0 && self.rec.is_none() {
+        if self.rev != self.saved_rev && self.last_autosave.elapsed() > Duration::from_secs(4) && self.last_edit.elapsed() > Duration::from_secs(4) && self.busy.load(Relaxed) == 0 && self.rec.is_none() {
             self.save_project(autosave_path(), true);
         }
         if self.play.is_some() || self.rec.is_some() {

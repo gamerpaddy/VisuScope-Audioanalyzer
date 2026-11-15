@@ -142,7 +142,7 @@ impl App {
                 a.zy = 1.0 / 0.6;
             }
             ui.add_space(4.0);
-            ui.label(RichText::new("pan").small().weak());
+            ui.label(RichText::new(crate::lang::tr("pan")).small().weak());
             if icon_btn(ui, Ico::Left, "Pan left", false) {
                 a.px = -0.2;
             }
@@ -158,7 +158,7 @@ impl App {
             if idx == 0 {
                 // the spectrum: clear the average, maximum and minimum traces without opening the settings
                 ui.add_space(4.0);
-                let rb = crate::mapping::btn(ui, "Reset max/min").on_hover_text("Restart the average, maximum and minimum traces");
+                let rb = crate::mapping::btn(ui, "Reset max/min").on_hover_text(crate::lang::tr("Restart the average, maximum and minimum traces"));
                 crate::mapping::button_menu(&rb, &crate::mapping::Target::toggle("reset_minmax", "Reset average / max / min", false));
                 if rb.clicked() {
                     self.p.reset_gen = self.p.reset_gen.wrapping_add(1);
@@ -166,14 +166,14 @@ impl App {
             }
             if tilt {
                 ui.add_space(4.0);
-                ui.label(RichText::new("tilt").small().weak());
+                ui.label(RichText::new(crate::lang::tr("tilt")).small().weak());
                 if icon_btn(ui, Ico::TiltUp, "Tilt up", false) {
                     a.tilt = 5.0;
                 }
                 if icon_btn(ui, Ico::TiltDown, "Tilt down", false) {
                     a.tilt = -5.0;
                 }
-                ui.label(RichText::new("rot").small().weak());
+                ui.label(RichText::new(crate::lang::tr("rot")).small().weak());
                 if icon_btn(ui, Ico::RotL, "Rotate left", false) {
                     a.rot = -8.0;
                 }
@@ -453,6 +453,16 @@ impl App {
             let xf = |f: f32| x_of_u(freq_to_u(f, log, srv));
             let ov = crate::tools::SpecOverlay { p: &clip, plot, x_of_f: &xf, y_of_db: &y_of_db };
             self.tool_overlays(&ov);
+            // the cursor shared with the plots of the tool windows
+            match ui.ctx().pointer_hover_pos().filter(|h| plot.contains(*h)) {
+                Some(h) => crate::tools::plot::set_cursor(u_to_freq(flo_u + (h.x - plot.left()) / plot.width() * (fhi_u - flo_u), log, srv)),
+                None => {
+                    if let Some(f) = crate::tools::plot::cursor() {
+                        let x = xf(f);
+                        clip.line_segment([Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 214, 10, 110)));
+                    }
+                }
+            }
         }
 
         // cursors
@@ -486,7 +496,12 @@ impl App {
             let f = self.u_to_f(u);
             let l = self.level_at(f, 0).map(|v| format!("{:.1}", v + offs[0])).unwrap_or("-".into());
             let r = self.level_at(f, 1).map(|v| format!("{:.1}", v + offs[1])).unwrap_or("-".into());
-            self.draw_cursor_label(&painter, plot.right_top() + vec2(-4.0, 4.0), format!("{}   L {l}  R {r} {}", fmt_hz(f), self.spec_unit_name()), Color32::WHITE, Align2::RIGHT_TOP);
+            let txt = format!("{}   L {l}  R {r} {}", fmt_hz(f), self.spec_unit_name());
+            // Ctrl+C copies the read-out under the pointer (the right mouse button sets cursor B here)
+            if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) && !ui.ctx().egui_wants_keyboard_input() {
+                ui.ctx().copy_text(txt.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            self.draw_cursor_label(&painter, plot.right_top() + vec2(-4.0, 4.0), txt, Color32::WHITE, Align2::RIGHT_TOP);
         }
     }
 

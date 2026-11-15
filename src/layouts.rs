@@ -400,12 +400,12 @@ impl App {
     }
 
     pub fn layouts_menu(&mut self, ui: &mut Ui) {
-        crate::windows::sticky_menu(ui, "Layouts", |ui| {
-            if ui.add_enabled(self.lay_can_undo(), egui::Button::new("Undo layout change").shortcut_text("Ctrl+Alt+Z")).clicked() {
+        crate::windows::sticky_menu(ui, crate::lang::tr("Layouts"), |ui| {
+            if ui.add_enabled(self.lay_can_undo(), egui::Button::new(crate::lang::tr("Undo layout change")).shortcut_text("Ctrl+Alt+Z")).clicked() {
                 self.layout_undo();
                 ui.close();
             }
-            if ui.add_enabled(self.lay_can_redo(), egui::Button::new("Redo layout change").shortcut_text("Ctrl+Alt+Y")).clicked() {
+            if ui.add_enabled(self.lay_can_redo(), egui::Button::new(crate::lang::tr("Redo layout change")).shortcut_text("Ctrl+Alt+Y")).clicked() {
                 self.layout_redo();
                 ui.close();
             }
@@ -421,7 +421,7 @@ impl App {
             }
             if !self.presets.is_empty() {
                 ui.separator();
-                ui.label(egui::RichText::new("Saved").small().weak());
+                ui.label(egui::RichText::new(crate::lang::tr("Saved")).small().weak());
             }
             let mut delete = None;
             ui.horizontal_wrapped(|ui| {
@@ -448,15 +448,15 @@ impl App {
             }
             ui.separator();
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.preset_name).hint_text("layout name").desired_width(110.0));
-                if ui.add_enabled(!self.preset_name.trim().is_empty(), egui::Button::new("Save current")).clicked() {
+                ui.add(egui::TextEdit::singleline(&mut self.preset_name).hint_text(crate::lang::tr("layout name")).desired_width(110.0));
+                if ui.add_enabled(!self.preset_name.trim().is_empty(), egui::Button::new(crate::lang::tr("Save current"))).clicked() {
                     self.save_current_preset();
                     ui.close();
                 }
             });
             ui.separator();
-            ui.menu_button("Pop out to own window", |ui| {
-                ui.label(egui::RichText::new("Drag the new window to another monitor.\nClosing it docks it back.").small().weak());
+            ui.menu_button(crate::lang::tr("Pop out to own window"), |ui| {
+                ui.label(egui::RichText::new(crate::lang::tr("Drag the new window to another monitor.\nClosing it docks it back.")).small().weak());
                 for i in 0..WIN_COUNT {
                     let mut p = self.popped[i] && self.wins[i].open;
                     let label = if i < BUILTIN { win_short(i).to_string() } else { format!("{} (tool)", win_short(i)) };

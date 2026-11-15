@@ -9,6 +9,9 @@ use std::f32::consts::PI;
 pub const RHO: f32 = 1.18;
 pub const C_AIR: f32 = 345.0;
 
+/// The parameters the impedance window worked out last (and the piston area in m2), for the box simulation of the Speaker window.
+pub static LAST: parking_lot::Mutex<Option<(FreeAir, Option<Mech>, f32)>> = parking_lot::Mutex::new(None);
+
 /// What the free-air measurement of the impedance gives.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeAir {

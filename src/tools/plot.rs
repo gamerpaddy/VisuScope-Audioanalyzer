@@ -4,6 +4,26 @@ use crate::app::fmt_hz_short;
 use crate::views::{nice_step, BG, GRID, GRID_MAJOR, TXT};
 use eframe::egui::{self, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, Ui};
 
+/// The frequency under the pointer in any frequency plot (bits of an f32) and when it was set (ms): every other frequency plot
+/// draws a line there, so one cursor reads all windows at the same frequency.
+static CURSOR_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CURSOR_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+pub fn set_cursor(f: f32) {
+    CURSOR_HZ.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    CURSOR_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The shared cursor, while a plot is pointed at.
+pub fn cursor() -> Option<f32> {
+    let f = f32::from_bits(CURSOR_HZ.load(std::sync::atomic::Ordering::Relaxed));
+    (f > 0.0 && now_ms().saturating_sub(CURSOR_MS.load(std::sync::atomic::Ordering::Relaxed)) < 250).then_some(f)
+}
+
 pub struct Plot {
     pub r: Rect,
     pub x0: f32,
@@ -109,6 +129,22 @@ impl Plot {
 
     pub fn frame(&self, p: &Painter) {
         p.rect_stroke(self.r, 0.0, Stroke::new(1.0, GRID_MAJOR), egui::StrokeKind::Inside);
+        // the shared frequency cursor: set by the plot under the pointer, drawn by the others
+        if self.xlog && self.x1 > 30.0 {
+            match p.ctx().pointer_hover_pos().filter(|h| self.r.contains(*h)) {
+                Some(h) => {
+                    set_cursor(self.fx(h.x));
+                    p.ctx().request_repaint();
+                }
+                None => {
+                    if let Some(f) = cursor().filter(|f| *f >= self.x0 && *f <= self.x1) {
+                        let x = self.tx(f);
+                        p.line_segment([Pos2::new(x, self.r.top()), Pos2::new(x, self.r.bottom())], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 214, 10, 110)));
+                        p.text(Pos2::new(x + 3.0, self.r.top() + 2.0), Align2::LEFT_TOP, fmt_hz_short(f), FontId::proportional(9.0), Color32::from_rgb(255, 214, 10));
+                    }
+                }
+            }
+        }
     }
 
     /// Polyline clipped to the plot; NaN / infinite points break the line.
@@ -131,6 +167,10 @@ impl Plot {
     }
 
     pub fn label(&self, p: &Painter, pos: Pos2, text: String, col: Color32, align: Align2) {
+        // a right-click in the plot copies the read-out
+        if p.ctx().input(|i| i.pointer.secondary_clicked()) && p.ctx().pointer_hover_pos().is_some_and(|h| self.r.contains(h)) {
+            p.ctx().copy_text(text.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
         let g = p.layout_no_wrap(text, FontId::proportional(11.0), col);
         let r = align.anchor_size(pos, g.size());
         p.rect_filled(r.expand(2.0), 2.0, Color32::from_black_alpha(175));
@@ -150,7 +190,7 @@ pub fn lerp_col(a: Color32, b: Color32, t: f32) -> Color32 {
 
 /// Compact section heading used inside tool windows.
 pub fn heading(ui: &mut Ui, text: &str) {
-    ui.label(egui::RichText::new(text).strong().color(Color32::from_rgb(190, 200, 215)));
+    ui.label(egui::RichText::new(crate::lang::tr_s(text)).strong().color(Color32::from_rgb(190, 200, 215)));
 }
 
 /// Big number with a small caption underneath.
@@ -162,6 +202,6 @@ pub fn readout_sized(ui: &mut Ui, caption: &str, value: &str, col: Color32, size
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.add(egui::Label::new(egui::RichText::new(value).size(size).strong().color(col).monospace()).wrap_mode(egui::TextWrapMode::Extend));
-        ui.add(egui::Label::new(egui::RichText::new(caption).small().weak()).wrap_mode(egui::TextWrapMode::Extend));
+        ui.add(egui::Label::new(egui::RichText::new(crate::lang::tr_s(caption)).small().weak()).wrap_mode(egui::TextWrapMode::Extend));
     });
 }
