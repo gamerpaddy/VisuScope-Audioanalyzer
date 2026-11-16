@@ -83,7 +83,8 @@ pub fn window_f64(w: Window, n: usize) -> Vec<f64> {
     (0..n)
         .map(|i| {
             let x = tau * i as f64 / nf;
-            let v = match w {
+            
+            match w {
                 Window::Rect => 1.0,
                 Window::Hann => 0.5 - 0.5 * x.cos(),
                 Window::Hamming => 0.54 - 0.46 * x.cos(),
@@ -112,8 +113,7 @@ pub fn window_f64(w: Window, n: usize) -> Vec<f64> {
                     (-0.5 * t * t).exp()
                 }
                 Window::Bartlett => 1.0 - (2.0 * i as f64 / nf - 1.0).abs(),
-            };
-            v
+            }
         })
         .collect()
 }
@@ -175,10 +175,10 @@ fn fast_log2(x: f32) -> f32 {
     let bits = x.to_bits();
     let e = ((bits >> 23) & 255) as f32 - 127.0;
     let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000);
-    let p = -1.741_793_9 + (2.821_202_6 + (-1.469_956_8 + (0.447_179_55 - 0.056_570_851 * m) * m) * m) * m;
+    let p = -1.741_793_9 + (2.821_202_6 + (-1.469_956_8 + (0.447_179_55 - 0.056_570_85 * m) * m) * m) * m;
     e + p
 }
-const DB_PER_LOG2: f32 = 3.010_299_9;
+const DB_PER_LOG2: f32 = 3.010_3;
 
 struct State {
     n: usize,
@@ -326,7 +326,17 @@ impl State {
 pub fn spawn(sh: Arc<Shared>) {
     std::thread::Builder::new()
         .name("dsp".into())
-        .spawn(move || run(sh))
+        .spawn(move || {
+            // a panic in one frame must not leave the display frozen for good: start over with fresh state
+            while !sh.quit.load(Relaxed) {
+                let sh2 = sh.clone();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || run(sh2))).is_ok() {
+                    return;
+                }
+                crate::log::log("dsp: panic in the analysis thread, restarting it");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        })
         .expect("spawn dsp thread");
 }
 
@@ -345,6 +355,8 @@ fn run(sh: Arc<Shared>) {
     let mut fps_frames = 0u32;
     let mut fps = 0.0f32;
     let mut ms_smooth = 0.0f32;
+    let mut pub_seq = 0u64;
+    let mut pub_t = Instant::now();
 
     loop {
         if sh.quit.load(Relaxed) {
@@ -379,10 +391,7 @@ fn run(sh: Arc<Shared>) {
             st.reset_traces();
         }
 
-        {
-            let ring = sh.ring.lock();
-            ring.copy_last(&mut st.l, &mut st.r);
-        }
+        copy_last_chunked(&sh.ring, &mut st.l, &mut st.r);
         let n = st.n;
         let half = n / 2;
         let srf = sr as f32;
@@ -479,10 +488,7 @@ fn run(sh: Arc<Shared>) {
         if st.meas_t.elapsed() >= Duration::from_millis(120) {
             st.meas_t = Instant::now();
             let mut eng = st.meng.take().unwrap();
-            {
-                let ring = sh.ring.lock();
-                ring.copy_last(&mut eng.l, &mut eng.r);
-            }
+            copy_last_chunked(&sh.ring, &mut eng.l, &mut eng.r);
             let res = eng.run(srf, p.bw_lo, hi, p.harmonics.clamp(2, MAXH), manual);
             st.meng = Some(eng);
             for ch in 0..2 {
@@ -553,9 +559,16 @@ fn run(sh: Arc<Shared>) {
             fps_t = Instant::now();
         }
         ms_smooth += 0.1 * (t0.elapsed().as_secs_f32() * 1000.0 - ms_smooth);
+        // A big spectrum is several MB: do not copy it for a UI that has not collected the last one yet (but never keep
+        // the display waiting longer than 30 ms either).
+        if pub_seq > sh.an_pulled.load(Relaxed) && pub_t.elapsed() < Duration::from_millis(30) {
+            continue;
+        }
         {
             let mut a = sh.analysis.lock();
-            a.seq += 1;
+            pub_seq += 1;
+            pub_t = Instant::now();
+            a.seq = pub_seq;
             a.epoch = st.epoch;
             a.sr = srf;
             a.n = n;
@@ -660,7 +673,7 @@ fn measure(
 
     let mut total = 0.0f64;
     for k in k_lo..=k_hi {
-        total += plin[k] as f64;
+        total += plin[k];
     }
     let mut kp = argmax(k_lo, k_hi);
     if let Some(f) = manual {
@@ -671,7 +684,7 @@ fn measure(
     let (fa, fb) = range(kp);
     let (mut pf, mut ksum) = (0.0f64, 0.0f64);
     for k in fa..=fb {
-        let v = plin[k] as f64;
+        let v = plin[k];
         pf += v;
         ksum += v * k as f64;
     }
@@ -699,7 +712,7 @@ fn measure(
             continue;
         }
         used.push((ra, rb));
-        let s: f64 = plin[ra..=rb].iter().map(|&v| v as f64).sum();
+        let s: f64 = plin[ra..=rb].iter().copied().sum();
         used_sum += s;
         ph_tot += s;
         hp[h - 1] = s;
@@ -736,7 +749,7 @@ fn measure(
             spur = spur.max(plin[k]);
         }
     }
-    m.sfdr_db = db10(plin[kp] as f64 / (spur as f64 + 1e-30));
+    m.sfdr_db = db10(plin[kp] / (spur + 1e-30));
     m.noise_floor_dbfs = db10(noise_sum / noise_bins as f64 * amp_c);
     m
 }

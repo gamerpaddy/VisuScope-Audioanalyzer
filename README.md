@@ -75,7 +75,18 @@ Needs Rust 1.85 or newer.
 cargo build --release
 ```
 
-The executable is `target/release/visuscope.exe`. Only tested on Windows.
+The executable is `target/release/visuscope.exe`. VisuScope is a Windows program: WASAPI, ASIO, MIDI and the serial port use Windows APIs, and CI builds and tests on Windows only. Other systems are not supported.
+
+### Test sequences from the command line
+
+`visuscope.exe` is a window program, so a plain `cmd` or batch line does not wait for it. Start it with `start /wait` (or `Start-Process -Wait -PassThru` in PowerShell) to get the exit code:
+
+```
+start /wait visuscope.exe --run test.vss --report result.txt
+echo %ERRORLEVEL%
+```
+
+0 = pass, 1 = fail, 2 = error (script unreadable, or no audio input became ready within 30 s). Started from a console, the verdict is also printed there.
 
 Settings and logs are stored in `%APPDATA%\visuscope`. Recordings and CSV logs go to `Documents\VisuScope`.
 

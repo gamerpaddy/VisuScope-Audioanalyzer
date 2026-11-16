@@ -193,7 +193,7 @@ fn the_dats_set_up_adds_nodes_and_mutes_the_old_output() {
     let n = r.g.nodes.len();
     assert_eq!(n, 4 + 3, "{}", r.note);
     assert!(r.g.node(o0).unwrap().p[1] >= 0.5 || r.g.nodes.iter().filter(|x| x.kind == Kind::Output && x.s == "wasapi:dats").count() == 2);
-    let new_out = r.g.nodes.iter().filter(|x| x.kind == Kind::Output && x.s == "wasapi:dats" && x.id != o0).next().unwrap();
+    let new_out = r.g.nodes.iter().find(|x| x.kind == Kind::Output && x.s == "wasapi:dats" && x.id != o0).unwrap();
     assert!(new_out.p[1] < 0.5);
     assert_eq!(r.g.node(g0).map(|x| x.kind), Some(Kind::Generator));
     assert!(r.g.nodes.iter().any(|x| x.kind == Kind::Input && x.s == "wasapi:datsin"));

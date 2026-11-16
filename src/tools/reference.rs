@@ -196,8 +196,8 @@ impl Reference {
 
 impl Tool for Reference {
     fn update(&mut self, cx: &mut Ctx, _visible: bool) {
-        if let Some(d) = &self.open {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.open
+            && let Some(res) = d.take() {
                 self.open = None;
                 if let Some(path) = res {
                     let (slot, color) = (self.import.clone(), self.color());
@@ -215,7 +215,6 @@ impl Tool for Reference {
                     });
                 }
             }
-        }
         if let Some(r) = self.import.try_lock().and_then(|mut g| g.take()) {
             match r {
                 Ok(c) => {
@@ -341,7 +340,7 @@ impl Tool for Reference {
         // A/B difference
         heading(ui, "Difference (A - B)");
         ui.horizontal_wrapped(|ui| {
-            let mut pick = |ui: &mut Ui, id: &str, which: &mut Src| {
+            let pick = |ui: &mut Ui, id: &str, which: &mut Src| {
                 let txt = self.src_name(*which, cx);
                 egui::ComboBox::from_id_salt(id).width(120.0).selected_text(txt).show_ui(ui, |ui| {
                     ui.selectable_value(which, Src::Live, crate::lang::tr("live (avg)"));
@@ -363,15 +362,12 @@ impl Tool for Reference {
             if crate::mapping::btn(ui, "swap").clicked() {
                 std::mem::swap(&mut self.a, &mut self.b);
             }
-            if crate::mapping::btn(ui, "Align live to ref at 1 kHz").on_hover_text(crate::lang::tr("Shift the selected mask / reference so it meets the live level at 1 kHz")).clicked() {
-                if let (Some(i), Some(live)) = (self.mask.or(match self.b { Src::Ref(k) => Some(k), _ => None }), spec_at(cx.an, &cx.an.avg[self.ch], 1000.0)) {
-                    if let Some(r) = self.refs.get_mut(i) {
-                        if let Some(v) = interp(&r.pts, 1000.0) {
+            if crate::mapping::btn(ui, "Align live to ref at 1 kHz").on_hover_text(crate::lang::tr("Shift the selected mask / reference so it meets the live level at 1 kHz")).clicked()
+                && let (Some(i), Some(live)) = (self.mask.or(match self.b { Src::Ref(k) => Some(k), _ => None }), spec_at(cx.an, &cx.an.avg[self.ch], 1000.0))
+                    && let Some(r) = self.refs.get_mut(i)
+                        && let Some(v) = interp(&r.pts, 1000.0) {
                             r.offset = live - v;
                         }
-                    }
-                }
-            }
             ui.add(egui::DragValue::new(&mut self.y_range).range(2.0..=100.0).speed(0.2).prefix("+/-").suffix(crate::lang::tr(" dB")));
         });
         let (resp, painter, rect) = canvas(ui, 110.0);
@@ -391,14 +387,13 @@ impl Tool for Reference {
             diff(f).map(|d| (f, d))
         }).collect();
         // tolerance of the selected reference
-        if let Some(r) = self.mask.and_then(|m| self.refs.get(m)) {
-            if r.limits.is_none() {
+        if let Some(r) = self.mask.and_then(|m| self.refs.get(m))
+            && r.limits.is_none() {
                 for s in [-1.0, 1.0] {
                     let y = plot.ty(s * r.tol);
                     painter.with_clip_rect(pr).line_segment([Pos2::new(pr.left(), y), Pos2::new(pr.right(), y)], Stroke::new(1.0, Color32::from_rgb(255, 120, 100).gamma_multiply(0.7)));
                 }
             }
-        }
         plot.line(&painter, pts.iter().copied(), Stroke::new(1.5, Color32::from_rgb(120, 220, 255)));
         painter.text(Pos2::new(rect.left() + 2.0, pr.top()), Align2::LEFT_TOP, "dB", FontId::proportional(9.0), crate::views::TXT);
         if let Some(h) = resp.hover_pos().filter(|p| pr.contains(*p)) {

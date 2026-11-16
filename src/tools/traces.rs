@@ -240,7 +240,7 @@ impl Library {
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        if std::fs::write(p, self.to_text()).is_ok() {
+        if crate::fsutil::atomic_write(p, self.to_text()).is_ok() {
             self.dirty = false;
         }
     }
@@ -248,8 +248,8 @@ impl Library {
     /// Collect finished file dialogs; returns a status message.
     pub fn poll(&mut self) -> Option<String> {
         let mut note = None;
-        if let Some(d) = &self.save_dlg {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.save_dlg
+            && let Some(res) = d.take() {
                 self.save_dlg = None;
                 if let Some(path) = res {
                     note = Some(match std::fs::write(&path, self.to_text()) {
@@ -258,9 +258,8 @@ impl Library {
                     });
                 }
             }
-        }
-        if let Some(d) = &self.load_dlg {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.load_dlg
+            && let Some(res) = d.take() {
                 self.load_dlg = None;
                 if let Some(path) = res {
                     let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -274,7 +273,6 @@ impl Library {
                     }
                 }
             }
-        }
         note
     }
 
@@ -283,11 +281,10 @@ impl Library {
         let n = self.items.len();
         let title = if n > 0 { format!("Traces ({n})") } else { "Traces".to_string() };
         ui.horizontal(|ui| {
-            if ui.add_enabled(store.is_some(), egui::Button::new(crate::lang::tr("Store"))).on_hover_text(crate::lang::tr("Keep the current curve (unsmoothed) as a named trace to overlay and compare")).clicked() {
-                if let Some((f, m, p)) = store {
+            if ui.add_enabled(store.is_some(), egui::Button::new(crate::lang::tr("Store"))).on_hover_text(crate::lang::tr("Keep the current curve (unsmoothed) as a named trace to overlay and compare")).clicked()
+                && let Some((f, m, p)) = store {
                     self.add(None, f, m, p);
                 }
-            }
             if let Some(r) = self.rel {
                 let name = self.items.get(r).map(|m| m.name.clone()).unwrap_or_default();
                 ui.label(RichText::new(format!("relative to {name}")).small().color(Color32::from_rgb(255, 214, 10)));

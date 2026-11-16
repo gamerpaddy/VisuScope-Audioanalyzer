@@ -146,8 +146,6 @@ pub struct Engine {
     pub default_in: Mutex<String>,
     pub gens: Arc<Mutex<Vec<GenParams>>>,
     pub sh: Arc<Shared>,
-    /// milliseconds of audio the sinks hold back (for the latency display)
-    pub block_ms: Mutex<f32>,
 }
 
 impl Engine {
@@ -170,7 +168,6 @@ impl Engine {
             default_in: Mutex::new(String::new()),
             gens,
             sh,
-            block_ms: Mutex::new(0.0),
         })
     }
 
@@ -806,11 +803,10 @@ impl Run {
         for n in self.nodes.iter_mut() {
             if let Rt::Input { dev, rs, li, ri, .. } = &mut n.rt {
                 let Some((cap, _)) = self.caps.get(dev) else { continue };
-                if rs.is_none() {
-                    if let Some((sr, _)) = cap.format() {
+                if rs.is_none()
+                    && let Some((sr, _)) = cap.format() {
                         *rs = Some(Rs::new(sr, self.rate));
                     }
-                }
                 let (Some(rs), Some(lanes)) = (rs.as_mut(), self.drain.get(dev.as_str())) else { continue };
                 let ch = cap.format().map_or(2, |f| f.1);
                 let (a, b) = ((*li).min(ch.max(1) - 1), (*ri).min(ch.max(1) - 1));
@@ -893,11 +889,10 @@ impl Run {
                         rs.trim_out(keep_lo);
                     }
                 }
-                Rt::Tl { rs: Some(rs), .. } => {
-                    if rs.queued_out() > keep_hi {
+                Rt::Tl { rs: Some(rs), .. }
+                    if rs.queued_out() > keep_hi => {
                         rs.trim_out(keep_lo);
                     }
-                }
                 _ => {}
             }
         }

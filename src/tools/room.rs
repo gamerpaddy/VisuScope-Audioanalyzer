@@ -325,10 +325,10 @@ mod tests {
     fn mtf_matches_schroeder_formula() {
         let sr = 16000.0;
         let t60 = 1.0f64;
-        let e: Vec<f64> = (0..(3.0 * sr) as usize).map(|i| 10f64.powf(-6.0 * (i as f64 / sr as f64) / t60)).collect();
+        let e: Vec<f64> = (0..(3.0 * sr) as usize).map(|i| 10f64.powf(-6.0 * (i as f64 / sr) / t60)).collect();
         for &f in &[0.63, 2.0, 8.0] {
             let want = 1.0 / (1.0 + (TAU * f * t60 / 13.8155).powi(2)).sqrt();
-            assert!((mtf(&e, sr as f64, f) - want).abs() < 0.01, "F {f}");
+            assert!((mtf(&e, sr, f) - want).abs() < 0.01, "F {f}");
         }
     }
 

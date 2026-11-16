@@ -128,11 +128,10 @@ impl Tool for Daw {
         if let Some(v) = i.get::<f32>("rec_off") {
             self.rec_off_ms = v.clamp(-500.0, 500.0);
         }
-        if let Some(v) = i.get::<f64>("pps") {
-            if v.is_finite() {
+        if let Some(v) = i.get::<f64>("pps")
+            && v.is_finite() {
                 self.pps = v.clamp(0.5, 60000.0);
             }
-        }
     }
 
     fn command(&mut self, c: &str) {

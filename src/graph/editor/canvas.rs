@@ -105,12 +105,11 @@ impl Routing {
             let line: Vec<Pos2> = (0..=24).map(|k| bezier_at(&pts, k as f32 / 24.0)).collect();
             painter.extend(Shape::dashed_line(&line, Stroke::new(1.6, Color32::from_rgb(255, 170, 70).gamma_multiply(0.8)), 6.0, 4.0));
         }
-        if let Some((to, port)) = wire_hit {
-            if bg.clicked() || ui.input(|i| i.pointer.primary_clicked()) {
+        if let Some((to, port)) = wire_hit
+            && (bg.clicked() || ui.input(|i| i.pointer.primary_clicked())) {
                 self.sel_wire = Some((to, port));
                 self.sel.clear();
             }
-        }
         // a right-click picks the wire under the pointer (or none) for the menu
         if bg.secondary_clicked() {
             self.sel_wire = wire_hit;
@@ -280,7 +279,7 @@ impl Routing {
             // ports
             // a port carries a stereo pair: the dot shows the left half in cyan and the right half in pink;
             // the ports of split / merge nodes carry one channel and are drawn in that channel's colour
-            let mut dot = |ui: &mut Ui, c: Pos2, tag: (u8, NodeId, u8), wired: bool, lr: u8| {
+            let dot = |ui: &mut Ui, c: Pos2, tag: (u8, NodeId, u8), wired: bool, lr: u8| {
                 let pr = PORT_R * z.max(0.7);
                 let rr = Rect::from_center_size(c, vec2(pr * 3.2, pr * 3.2));
                 let r = ui.interact(rr, ui.scope_id().with(("port", tag)), Sense::click_and_drag());
@@ -531,8 +530,8 @@ impl Routing {
             }
         }
         // where the probe listens: a ring around the dot, or an outline around the node
-        if let Some(pr) = self.probe_hover.filter(|_| self.probe_on) {
-            if let Some(n) = self.g.node(pr.node) {
+        if let Some(pr) = self.probe_hover.filter(|_| self.probe_on)
+            && let Some(n) = self.g.node(pr.node) {
                 let col = Color32::from_rgb(120, 220, 230);
                 if self.probe_body {
                     let (w, h) = self.sizes.get(&n.id).copied().unwrap_or((node_w(n.kind), 150.0));
@@ -542,7 +541,6 @@ impl Routing {
                     painter.circle_stroke(c, 9.0 * z, Stroke::new(2.5, col));
                 }
             }
-        }
         self.search_ui(ui, cx, canvas);
         if self.fit_next && !self.g.nodes.is_empty() {
             self.fit_next = false;

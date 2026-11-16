@@ -35,6 +35,7 @@ pub enum BqType {
     HighShelf,
     HighPass,
     LowPass,
+    #[allow(dead_code)] // part of the filter set (the equalizer node offers a notch by this name)
     Notch,
     AllPass,
 }
@@ -303,10 +304,6 @@ impl FirLowpass {
         }
     }
 
-    /// The delay of the filter in frames.
-    pub fn latency(&self) -> usize {
-        self.taps.len().saturating_sub(1) / 2
-    }
 }
 
 // ---------------------------------------------------------------------- dynamics
@@ -405,6 +402,7 @@ impl LimiterUnit {
     }
 
     /// Delay of the limiter in frames.
+    #[cfg(test)]
     pub fn latency(&self) -> usize {
         self.la
     }
@@ -882,11 +880,6 @@ impl JitterUnit {
         (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 
-    /// Delay of the unit in frames when the modulation is at its centre.
-    pub fn centre_delay(&self) -> f32 {
-        self.depth + 2.0
-    }
-
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         let mask = self.buf[0].len() - 1;
         for i in 0..l.len() {
@@ -1068,10 +1061,6 @@ impl Rs {
         }
         let have = self.buf.len() as f64 - self.pos - self.half() as f64 - 2.0;
         if have <= 0.0 { 0 } else { (have / self.ratio) as usize }
-    }
-
-    pub fn queued(&self) -> usize {
-        self.buf.len()
     }
 
     /// What is queued, in frames of the graph rate (the queue itself holds frames of the source rate).

@@ -325,7 +325,7 @@ impl Distortion {
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(!self.running(), |ui| {
                 for (i, n) in MODES.iter().enumerate() {
-                    ui.selectable_value(&mut self.mode, i, crate::lang::tr(*n));
+                    ui.selectable_value(&mut self.mode, i, crate::lang::tr(n));
                 }
             });
         });
@@ -403,8 +403,8 @@ impl Distortion {
 
 impl Tool for Distortion {
     fn update(&mut self, cx: &mut Ctx, visible: bool) {
-        if let Some(d) = &self.save {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.save
+            && let Some(res) = d.take() {
                 self.save = None;
                 if let Some(path) = res {
                     cx.req.note = Some(match std::fs::write(&path, self.csv(cx)) {
@@ -413,16 +413,14 @@ impl Tool for Distortion {
                     });
                 }
             }
-        }
         if std::mem::take(&mut self.want_stop) && self.running() {
             self.finish(cx, true);
         }
-        if let Some(m) = self.want_start.take() {
-            if !self.running() {
+        if let Some(m) = self.want_start.take()
+            && !self.running() {
                 self.mode = m.min(2);
                 self.start(cx);
             }
-        }
         if !visible && self.running() {
             self.finish(cx, true);
         }
@@ -565,7 +563,7 @@ impl Tool for Distortion {
         // the unit of the scale: click it to switch between dB and percent
         {
             let r = Rect::from_min_size(Pos2::new(rect.left() + 1.0, pr.top() - 1.0), egui::vec2(26.0, 14.0));
-            let hit = ui.interact(r, ui.id().with("dist_unit"), egui::Sense::click());
+            let hit = ui.interact(r, ui.scope_id().with("dist_unit"), egui::Sense::click());
             if hit.hovered() {
                 painter.rect_filled(r, 3.0, Color32::from_white_alpha(24));
             }

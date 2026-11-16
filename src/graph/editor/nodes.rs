@@ -56,7 +56,7 @@ impl Routing {
                 let r = ui.add_enabled_ui(!(switch && followed), |ui| {
                     egui::ComboBox::from_id_salt(("pc", n.id, i)).width(w).truncate().selected_text(cur).show_ui(ui, |ui| {
                         for (k, c) in d.choices.iter().enumerate() {
-                            if ui.selectable_label(n.p[i].round() as usize == k, crate::lang::tr(*c)).clicked() {
+                            if ui.selectable_label(n.p[i].round() as usize == k, crate::lang::tr(c)).clicked() {
                                 n.p[i] = k as f32;
                                 changed = true;
                             }
@@ -322,8 +322,8 @@ impl Routing {
                         painter.circle_filled(c, (if hr.hovered() || hr.dragged() { 7.0 } else { 5.5 }) * z, col);
                         painter.circle_stroke(c, 5.5 * z, Stroke::new(1.0, Color32::BLACK));
                         painter.text(c + vec2(0.0, -11.0 * z), Align2::CENTER_CENTER, format!("{}", b + 1), FontId::proportional(8.0 * z), col);
-                        if hr.dragged() {
-                            if let Some(q) = hr.interact_pointer_pos() {
+                        if hr.dragged()
+                            && let Some(q) = hr.interact_pointer_pos() {
                                 n.p[o + 1] = fx(q.x).clamp(20.0, 20000.0).round();
                                 if uses_gain {
                                     let g = gy(q.y);
@@ -331,7 +331,6 @@ impl Routing {
                                 }
                                 ch = true;
                             }
-                        }
                         if hr.hovered() {
                             painter.text(pos2(r.right() - 4.0, r.top() + 8.0), Align2::RIGHT_CENTER, format!("{}  {:.0} Hz  {:+.1} dB  Q {:.2}", EQ_TYPES[t], n.p[o + 1], n.p[o + 2], n.p[o + 3]), FontId::proportional(9.5), Color32::from_gray(210));
                         }
@@ -340,21 +339,19 @@ impl Routing {
                         }
                     }
                     // empty space: a click or a drag makes a new band under the pointer, which the drag then moves
-                    if (resp.clicked() || resp.drag_started()) && n.p.len() / 4 < EQ_MAX {
-                        if let Some(q) = resp.interact_pointer_pos() {
+                    if (resp.clicked() || resp.drag_started()) && n.p.len() / 4 < EQ_MAX
+                        && let Some(q) = resp.interact_pointer_pos() {
                             n.p.extend([0.0, fx(q.x).round(), (gy(q.y) * 10.0).round() / 10.0, 1.0]);
                             self.eq_new = Some((n.id, n.p.len() / 4 - 1));
                             ch = true;
                         }
-                    }
                     if resp.dragged() {
-                        if let (Some((id, b)), Some(q)) = (self.eq_new, resp.interact_pointer_pos()) {
-                            if id == n.id && b < n.p.len() / 4 {
+                        if let (Some((id, b)), Some(q)) = (self.eq_new, resp.interact_pointer_pos())
+                            && id == n.id && b < n.p.len() / 4 {
                                 n.p[b * 4 + 1] = fx(q.x).round();
                                 n.p[b * 4 + 2] = (gy(q.y) * 10.0).round() / 10.0;
                                 ch = true;
                             }
-                        }
                     } else if self.eq_new.is_some_and(|(id, _)| id == n.id) {
                         self.eq_new = None;
                     }
@@ -369,7 +366,7 @@ impl Routing {
                         let cur = EQ_TYPES[(n.p[o].round() as usize).min(EQ_TYPES.len() - 1)];
                         egui::ComboBox::from_id_salt(("eqt", n.id, b)).width(66.0 * z).selected_text(cur).show_ui(ui, |ui| {
                             for (k, c) in EQ_TYPES.iter().enumerate() {
-                                if ui.selectable_label(n.p[o].round() as usize == k, crate::lang::tr(*c)).clicked() {
+                                if ui.selectable_label(n.p[o].round() as usize == k, crate::lang::tr(c)).clicked() {
                                     n.p[o] = k as f32;
                                     // a notch needs a depth: the level of the band
                                     if k == 5 && n.p[o + 2] > -1.0 {
@@ -519,11 +516,10 @@ impl Routing {
                 if n.kind == Kind::Phase && n.param(1).round() as usize == 3 {
                     ch |= phase_curve(ui, n, z);
                 }
-                if matches!(n.kind, Kind::Phase | Kind::NoiseRed | Kind::Shifter) {
-                    if let Some(s) = status.filter(|s| !s.is_empty()) {
+                if matches!(n.kind, Kind::Phase | Kind::NoiseRed | Kind::Shifter)
+                    && let Some(s) = status.filter(|s| !s.is_empty()) {
                         ui.label(RichText::new(s).small().color(Color32::from_gray(120)));
                     }
-                }
             }
         }
         // output level

@@ -48,7 +48,9 @@ impl Held {
     }
 }
 
-pub use imp::{drivers, forget_failed, open_input, open_output, probe, usable, Port};
+pub use imp::{forget_failed, open_input, open_output, probe, usable, Port};
+#[cfg(test)]
+pub use imp::drivers;
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod imp {
@@ -90,8 +92,6 @@ mod imp {
         message: extern "C" fn(i32, i32, *mut c_void, *mut f64) -> i32,
         buffer_switch_time_info: extern "C" fn(*mut c_void, i32, i32) -> *mut c_void,
     }
-
-    type Hr = i32;
 
     /// The `IASIO` vtable: IUnknown first, then the methods in the order of the header.
     #[repr(C)]
@@ -360,7 +360,7 @@ mod imp {
     extern "C" fn cb_message(selector: i32, value: i32, _msg: *mut c_void, _opt: *mut f64) -> i32 {
         match selector {
             // kAsioSelectorSupported: which messages we understand
-            1 => matches!(value, 2 | 3 | 4 | 5 | 6) as i32,
+            1 => matches!(value, 2..=6) as i32,
             // kAsioEngineVersion
             2 => 2,
             // kAsioResetRequest, kAsioBufferSizeChange: the session is rebuilt
@@ -789,7 +789,7 @@ mod tests {
 #[cfg(all(test, windows))]
 mod hardware_tests {
     use parking_lot::Mutex;
-    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
     use std::time::Duration;
 

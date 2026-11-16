@@ -9,6 +9,7 @@ mod clip;
 mod colormap;
 mod dsp;
 mod eq;
+mod fsutil;
 mod gen_ui;
 mod graph;
 mod guide;
@@ -56,14 +57,37 @@ fn primary_screen_size() -> Option<(f32, f32)> {
     (w >= 640 && h >= 400).then_some((w as f32, h as f32))
 }
 
+/// The release build is a window program without a console. For `--run` (test sequences from a script) it hooks
+/// onto the console it was started from, so the verdict is printed there.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: a plain call of the console API; it fails harmlessly when there is no parent console
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
+
 #[cfg(not(windows))]
 fn primary_screen_size() -> Option<(f32, f32)> {
     None
 }
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--run") {
+        attach_parent_console();
+        // `--run` needs a script; say so instead of opening the window and doing nothing
+        if args.iter().position(|a| a == "--run").and_then(|i| args.get(i + 1)).is_none_or(|v| v.starts_with("--")) {
+            println!("usage: visuscope --run <script.vss> [--report <file>]   (exit code 0 = pass, 1 = fail, 2 = error)");
+            std::process::exit(2);
+        }
+    }
     log::init();
-    // Release builds abort on panic; keep the message in a file so it can be reported.
+    // Keep the message of a panic in a file so it can be reported (a panic in a worker thread does not end the program).
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("{info}\n{}", std::backtrace::Backtrace::force_capture());
         eprintln!("{msg}");

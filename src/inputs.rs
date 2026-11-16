@@ -95,7 +95,7 @@ impl App {
         }
         let Some(id) = self.map.learning.clone() else { return };
         let label = self.map.learn_meta.as_ref().map(|m| m.label.clone()).or_else(|| self.map_defs.iter().find(|d| d.id == id).map(|d| d.label.clone())).unwrap_or(id);
-        egui::Area::new(egui::Id::new("learn_note")).order(egui::Order::Tooltip).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0)).show(ctx, |ui| {
+        egui::Area::new(egui::Id::unique("learn_note")).order(egui::Order::Tooltip).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0)).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{label}: press a key or button, or move a knob, fader or axis")).color(Color32::from_rgb(255, 200, 90)));
@@ -253,9 +253,9 @@ impl App {
                         }
                     });
                     // a button that is on while held, or switches at each press
-                    if slider.is_none() && !matches!(id.as_str(), "png" | "reset_minmax" | "tile" | "daw_home" | "daw_zoom_in" | "daw_zoom_out" | "daw_fit" | "daw_marker" | "daw_split" | "daw_undo" | "daw_redo" | "graph_undo" | "graph_redo") && !id.starts_with("layout_") {
-                        if let Some(bi) = self.map.bindings.iter().position(|b| b.action == id) {
-                            if self.action_state(&id).is_some() || id.starts_with("mixm:") || id.starts_with("nodet:") {
+                    if slider.is_none() && !matches!(id.as_str(), "png" | "reset_minmax" | "tile" | "daw_home" | "daw_zoom_in" | "daw_zoom_out" | "daw_fit" | "daw_marker" | "daw_split" | "daw_undo" | "daw_redo" | "graph_undo" | "graph_redo") && !id.starts_with("layout_")
+                        && let Some(bi) = self.map.bindings.iter().position(|b| b.action == id)
+                            && (self.action_state(&id).is_some() || id.starts_with("mixm:") || id.starts_with("nodet:")) {
                                 ui.horizontal(|ui| {
                                     ui.add_space(24.0);
                                     let b = &mut self.map.bindings[bi];
@@ -269,8 +269,6 @@ impl App {
                                     }
                                 });
                             }
-                        }
-                    }
                     // a slider's range, and whether the control works the other way round
                     if let (Some((lo, hi, _, unit)), Some(bi)) = (slider, self.map.bindings.iter().position(|b| b.action == id)) {
                         ui.horizontal(|ui| {

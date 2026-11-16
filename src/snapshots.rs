@@ -71,7 +71,7 @@ pub fn save(name: &str, s: &Snap) -> Result<(), String> {
         return Err("give the snapshot a name".into());
     }
     std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
-    std::fs::write(dir().join(format!("{name}.vsnap")), encode(s)).map_err(|e| e.to_string())
+    crate::fsutil::atomic_write(dir().join(format!("{name}.vsnap")), encode(s)).map_err(|e| e.to_string())
 }
 
 pub fn load(name: &str) -> Result<Snap, String> {

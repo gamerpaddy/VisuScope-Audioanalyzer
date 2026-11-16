@@ -282,7 +282,7 @@ impl Tool for Spl {
             ui.label(RichText::new(crate::lang::tr("Weighting")).small().weak());
             let w0 = self.weighting;
             for (i, n) in WEIGHT.iter().enumerate() {
-                ui.selectable_value(&mut self.weighting, i, crate::lang::tr(*n));
+                ui.selectable_value(&mut self.weighting, i, crate::lang::tr(n));
             }
             ui.label(RichText::new(crate::lang::tr("Time")).small().weak());
             let t0 = self.time;

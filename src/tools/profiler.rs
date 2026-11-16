@@ -46,11 +46,12 @@ fn mmss(t: f32) -> String {
 }
 
 impl Tool for Profiler {
-    fn update(&mut self, _cx: &mut Ctx, _visible: bool) {
+    fn update(&mut self, _cx: &mut Ctx, visible: bool) {
         if !self.started {
             self.started = true;
             prof::start();
         }
+        prof::set_detailed(visible);
     }
 
     fn status(&self) -> Option<(String, Color32)> {

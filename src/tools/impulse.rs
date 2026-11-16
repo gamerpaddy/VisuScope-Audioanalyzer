@@ -284,8 +284,8 @@ impl Impulse {
             6 if a.modes.is_none() => a.modes = Some(room::modes(ir, a.sr, a.peak_i)),
             _ => {}
         }
-        if self.view == 4 {
-            if let Some(Some(c)) = &a.csd {
+        if self.view == 4
+            && let Some(Some(c)) = &a.csd {
                 let key = (a.id, self.csd_range.to_bits());
                 if self.csd_tex.as_ref().map(|t| (t.1, t.2)) != Some(key) {
                     let lut = crate::colormap::Cmap::Inferno.lut();
@@ -301,7 +301,6 @@ impl Impulse {
                     }
                 }
             }
-        }
     }
 
     fn refresh(&mut self, r: &super::sweep::SweepResult) {
@@ -315,8 +314,8 @@ fn rt(v: Option<f32>) -> String {
 
 impl Tool for Impulse {
     fn update(&mut self, cx: &mut Ctx, _visible: bool) {
-        if let Some(d) = &self.save {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.save
+            && let Some(res) = d.take() {
                 self.save = None;
                 if let (Some(path), Some(r)) = (res, &cx.sweep.result) {
                     let mut s = String::from("time_ms,amplitude\n");
@@ -329,7 +328,6 @@ impl Tool for Impulse {
                     });
                 }
             }
-        }
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
@@ -344,7 +342,7 @@ impl Tool for Impulse {
         self.ensure(&r.ir, ui.ctx());
         ui.horizontal_wrapped(|ui| {
             for (i, v) in VIEWS.iter().enumerate() {
-                ui.selectable_value(&mut self.view, i, crate::lang::tr(*v));
+                ui.selectable_value(&mut self.view, i, crate::lang::tr(v));
             }
             ui.add(egui::Slider::new(&mut self.zoom_ms, 0.0..=1500.0).logarithmic(true).text(crate::lang::tr("view ms")).custom_formatter(|v, _| if v < 1.0 { "auto".into() } else { format!("{v:.0}") }));
             if self.view == 4 {

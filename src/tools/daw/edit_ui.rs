@@ -33,7 +33,6 @@ pub(super) struct SpecEd {
     /// the corner where the drag started (screen position)
     drag: Option<egui::Pos2>,
     len: usize,
-    sr: u32,
 }
 
 pub(super) struct StretchDlg {
@@ -137,15 +136,15 @@ impl Daw {
     pub(super) fn open_spec(&mut self, p: &Project, id: u32) {
         let Some((ti, ci)) = p.find_clip(id) else { return };
         let c = &p.tracks[ti].clips[ci];
-        self.spec = Some(SpecEd { clip: id, src_id: 0, tex: None, regions: Vec::new(), sel: None, gain_db: -80.0, drag: None, len: c.len, sr: p.sr });
+        self.spec = Some(SpecEd { clip: id, src_id: 0, tex: None, regions: Vec::new(), sel: None, gain_db: -80.0, drag: None, len: c.len });
     }
 
     /// The editor windows (spectral editor, stretch dialog).
     pub(super) fn edit_windows(&mut self, ui: &mut Ui, p: &Project) {
         // test hooks (screenshots): VISUSCOPE_SPEC=1 opens the spectral editor on the first clip, VISUSCOPE_STRETCH=1 the stretch dialog
         static HOOK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !HOOK.swap(true, Relaxed) {
-            if let Some(c) = p.tracks.iter().flat_map(|t| t.clips.iter()).next() {
+        if !HOOK.swap(true, Relaxed)
+            && let Some(c) = p.tracks.iter().flat_map(|t| t.clips.iter()).next() {
                 if std::env::var_os("VISUSCOPE_SPEC").is_some() {
                     self.open_spec(p, c.id);
                     if let Some(sp) = self.spec.as_mut() {
@@ -163,7 +162,6 @@ impl Daw {
                     self.stretch = Some(StretchDlg { tempo_pct: 125.0, semis: 3.0, mode: 0 });
                 }
             }
-        }
         self.stretch_window(ui, p);
         self.spec_window(ui, p);
     }
@@ -249,7 +247,7 @@ impl Daw {
         let mut open = true;
         let mut run: Option<EditKind> = None;
         let nyq = p.sr as f32 * 0.5;
-        egui::Window::new(format!("Spectral editor: {}", clip.name)).id(egui::Id::new("daw_spec_win")).order(egui::Order::Foreground).open(&mut open).default_size([920.0, 520.0]).resizable(true).show(ui.ctx(), |ui| {
+        egui::Window::new(format!("Spectral editor: {}", clip.name)).id(egui::Id::unique("daw_spec_win")).order(egui::Order::Foreground).open(&mut open).default_size([920.0, 520.0]).resizable(true).show(ui.ctx(), |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(crate::lang::tr("Drag on the picture to mark a region.")).small().weak());
                 ui.add(egui::Slider::new(&mut s.gain_db, -80.0..=12.0).text(crate::lang::tr("Level of new regions")).custom_formatter(|v, _| if v <= -79.9 { "removed".to_string() } else { format!("{v:+.0} dB") }));
@@ -258,13 +256,11 @@ impl Daw {
                 if ui.add_enabled(!s.regions.is_empty(), egui::Button::new(format!("Apply {} region(s)", s.regions.len()))).on_hover_text(crate::lang::tr("Process the clip's audio (Ctrl+Z undoes it)")).clicked() {
                     run = Some(EditKind::Regions(s.regions.clone()));
                 }
-                if ui.add_enabled(s.sel.is_some(), egui::Button::new(crate::lang::tr("Delete region"))).clicked() {
-                    if let Some(i) = s.sel.take() {
-                        if i < s.regions.len() {
+                if ui.add_enabled(s.sel.is_some(), egui::Button::new(crate::lang::tr("Delete region"))).clicked()
+                    && let Some(i) = s.sel.take()
+                        && i < s.regions.len() {
                             s.regions.remove(i);
                         }
-                    }
-                }
                 if ui.add_enabled(!s.regions.is_empty(), egui::Button::new(crate::lang::tr("Clear regions"))).clicked() {
                     s.regions.clear();
                     s.sel = None;
@@ -323,38 +319,32 @@ impl Daw {
             if let (Some(a), Some(b)) = (s.drag, resp.interact_pointer_pos()) {
                 painter.rect_stroke(Rect::from_two_pos(a, b), 0.0, Stroke::new(1.5, Color32::WHITE), egui::StrokeKind::Inside);
             }
-            if resp.drag_stopped() {
-                if let (Some(a), Some(b)) = (s.drag.take(), resp.interact_pointer_pos()) {
-                    if (a.x - b.x).abs() > 3.0 && (a.y - b.y).abs() > 3.0 {
+            if resp.drag_stopped()
+                && let (Some(a), Some(b)) = (s.drag.take(), resp.interact_pointer_pos())
+                    && (a.x - b.x).abs() > 3.0 && (a.y - b.y).abs() > 3.0 {
                         let (t0, t1) = (t_of(a.x.min(b.x)), t_of(a.x.max(b.x)));
                         let (f0, f1) = (f_of(a.y.max(b.y)), f_of(a.y.min(b.y)));
                         s.regions.push(Region { t0, t1, f0, f1, gain_db: s.gain_db });
                         s.sel = Some(s.regions.len() - 1);
                     }
-                }
-            }
-            if resp.clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
+            if resp.clicked()
+                && let Some(pos) = resp.interact_pointer_pos() {
                     let (tt, ff) = (t_of(pos.x), f_of(pos.y));
                     s.sel = s.regions.iter().position(|r| tt >= r.t0 && tt <= r.t1 && ff >= r.f0 && ff <= r.f1);
                 }
-            }
-            if resp.hovered() {
-                if let Some(pos) = resp.hover_pos().filter(|p| plot.contains(*p)) {
+            if resp.hovered()
+                && let Some(pos) = resp.hover_pos().filter(|p| plot.contains(*p)) {
                     resp.on_hover_text(format!("{:.2} s, {:.0} Hz", t_of(pos.x) as f32 / p.sr as f32, f_of(pos.y)));
                 }
-            }
         });
         if let Some(kind) = run {
             self.act_process(p, vec![s.clip], kind);
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Delete)) && s.sel.is_some() && open {
-            if let Some(i) = s.sel.take() {
-                if i < s.regions.len() {
+        if ui.input(|i| i.key_pressed(egui::Key::Delete)) && s.sel.is_some() && open
+            && let Some(i) = s.sel.take()
+                && i < s.regions.len() {
                     s.regions.remove(i);
                 }
-            }
-        }
         if open {
             self.spec = Some(s);
         }

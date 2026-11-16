@@ -128,12 +128,11 @@ pub fn parse_mic_cal(name: &str, text: &str) -> Option<MicCurve> {
         }
         let mut it = l.split(|c: char| c.is_whitespace() || c == ',' || c == ';').filter(|s| !s.is_empty());
         let (Some(a), Some(b)) = (it.next(), it.next()) else { continue };
-        if let (Ok(a), Ok(b)) = (a.parse::<f32>(), b.parse::<f32>()) {
-            if a > 0.0 && a.is_finite() && b.is_finite() && f.last().map_or(true, |&p| a > p) {
+        if let (Ok(a), Ok(b)) = (a.parse::<f32>(), b.parse::<f32>())
+            && a > 0.0 && a.is_finite() && b.is_finite() && f.last().is_none_or(|&p| a > p) {
                 f.push(a);
                 db.push(b);
             }
-        }
     }
     (f.len() >= 2).then(|| MicCurve { name: name.to_string(), f, db, sens, again })
 }

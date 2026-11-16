@@ -8,8 +8,8 @@ impl App {
     pub fn sync_graph_mode(&mut self) {
         use crate::tools::ROUTING;
         // test hook: VISUSCOPE_GRAPH=demo (or 1) switches the graph on, demo also starts two generators
-        if let Ok(v) = std::env::var("VISUSCOPE_GRAPH") {
-            if !self.graph_hook {
+        if let Ok(v) = std::env::var("VISUSCOPE_GRAPH")
+            && !self.graph_hook {
                 self.graph_hook = true;
                 self.graph_on = true;
                 if v == "demo" {
@@ -18,7 +18,6 @@ impl App {
                     self.gen_extra = vec![crate::tonegen::GenParams { on: true, wave: crate::tonegen::Wave::Square, freq: 220.0, level_db: [-20.0; 2], ..Default::default() }];
                 }
             }
-        }
         // test hook: VISUSCOPE_OPEN=Profiler,Timeline opens those tool windows once
         if self.layout_ready && !self.open_hook {
             self.open_hook = true;

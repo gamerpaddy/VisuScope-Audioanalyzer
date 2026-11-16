@@ -268,14 +268,14 @@ impl Sequence {
             cx.sweep.cancel();
         }
         self.run = Run::Idle;
-        if let Some(rep) = self.report.take() {
-            if let Err(e) = std::fs::write(&rep, self.report_text(cx)) {
+        if let Some(rep) = self.report.take()
+            && let Err(e) = std::fs::write(&rep, self.report_text(cx)) {
                 self.results.push(Outcome { line: 0, text: "report".into(), value: format!("{rep}: {e}"), status: Status::Error });
             }
-        }
         let verdict = self.verdict();
         self.msg = if aborted { "stopped".into() } else { verdict.to_string() };
         if self.headless {
+            println!("{verdict}");
             cx.req.exit = Some(match verdict {
                 "PASS" => 0,
                 "FAIL" => 1,
@@ -502,7 +502,7 @@ impl Sequence {
                             Some(s) => imd(cx.an, ch, s).map(|v| v.0),
                             None => None,
                         }
-                    } else if m >= 9 || (mx.valid && self.cur_freq.map_or(true, |f| (mx.fund_hz - f).abs() < f * 0.05)) {
+                    } else if m >= 9 || (mx.valid && self.cur_freq.is_none_or(|f| (mx.fund_hz - f).abs() < f * 0.05)) {
                         Self::metric(cx, m, ch)
                     } else {
                         None
@@ -542,8 +542,8 @@ impl Sequence {
 
 impl Tool for Sequence {
     fn update(&mut self, cx: &mut Ctx, visible: bool) {
-        if let Some(d) = &self.load {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.load
+            && let Some(res) = d.take() {
                 self.load = None;
                 if let Some(p) = res {
                     match std::fs::read_to_string(&p) {
@@ -552,9 +552,8 @@ impl Tool for Sequence {
                     }
                 }
             }
-        }
-        if let Some(d) = &self.save {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.save
+            && let Some(res) = d.take() {
                 self.save = None;
                 if let Some(p) = res {
                     let body = if p.extension().is_some_and(|e| e == "txt" || e == "csv") && !self.results.is_empty() { self.report_text(cx) } else { self.text.clone() };
@@ -564,12 +563,11 @@ impl Tool for Sequence {
                     });
                 }
             }
-        }
         if self.text != self.saved_text {
             if let Some(d) = script_path().parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            if std::fs::write(script_path(), &self.text).is_ok() {
+            if crate::fsutil::atomic_write(script_path(), &self.text).is_ok() {
                 self.saved_text = self.text.clone();
             }
         }

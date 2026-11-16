@@ -738,11 +738,10 @@ impl Daw {
                     self.note = "Timeline: no input device found".into();
                     return;
                 };
-                if let Some(d) = self.devs_v.iter().find(|d| d.id == input.dev) {
-                    if d.ch >= 2 {
+                if let Some(d) = self.devs_v.iter().find(|d| d.id == input.dev)
+                    && d.ch >= 2 {
                         input.mode = Mode::Pair(0);
                     }
-                }
                 let ti = match self.sel_track.and_then(|id| p.track_index(id)) {
                     Some(ti) => ti,
                     None => p.add_track(None, input.clone()),
@@ -797,11 +796,10 @@ impl Daw {
         let Some(rec) = self.rec.take() else { return };
         let mut takes: HashMap<String, capture::Take> = HashMap::new();
         for r in &rec.plan {
-            if !takes.contains_key(&r.dev) {
-                if let Some(c) = self.capt.get(&r.dev) {
+            if !takes.contains_key(&r.dev)
+                && let Some(c) = self.capt.get(&r.dev) {
                     takes.insert(r.dev.clone(), c.finish());
                 }
-            }
         }
         self.play_stop(cx);
         let (sr, off) = (self.sr(), (self.rec_off_ms * self.sr() as f32 / 1000.0) as i64);
@@ -869,11 +867,10 @@ impl Daw {
         for d in want {
             if d.starts_with("graph:") {
                 // the routing graph feeds this one; it may be replaced when the graph is rebuilt
-                if let Some(c) = crate::graph::bus().virt.lock().get(&d).cloned() {
-                    if self.capt.get(&d).map_or(true, |old| !Arc::ptr_eq(old, &c)) {
+                if let Some(c) = crate::graph::bus().virt.lock().get(&d).cloned()
+                    && self.capt.get(&d).is_none_or(|old| !Arc::ptr_eq(old, &c)) {
                         self.capt.insert(d, c);
                     }
-                }
             } else {
                 self.capt.entry(d.clone()).or_insert_with(|| Arc::new(Capture::start(d)));
             }
@@ -916,12 +913,11 @@ impl Daw {
         // peaks are taken once per device and shared by the tracks that read it
         let mut dev_peaks: HashMap<String, Vec<f32>> = HashMap::new();
         for (_, dev, _) in &seen {
-            if !dev_peaks.contains_key(dev) {
-                if let Some(c) = self.capt.get(dev) {
+            if !dev_peaks.contains_key(dev)
+                && let Some(c) = self.capt.get(dev) {
                     let ch = c.format().map_or(2, |f| f.1);
                     dev_peaks.insert(dev.clone(), c.take_peaks(ch));
                 }
-            }
         }
         for (id, dev, lanes) in seen {
             let pk = &dev_peaks[&dev];
@@ -975,26 +971,22 @@ impl Daw {
         if let Some(v) = self.devs.try_lock().and_then(|mut g| g.take()) {
             self.devs_v = v;
         }
-        if let Some(d) = &self.open_dlg {
-            if let Some(files) = d.take() {
+        if let Some(d) = &self.open_dlg
+            && let Some(files) = d.take() {
                 self.open_dlg = None;
                 let target = self.import_target.take();
                 if !files.is_empty() {
                     self.import_at(files, target);
                 }
             }
-        }
-        if let Some((d, _)) = &self.export_dlg {
-            if let Some(res) = d.take() {
-                if let Some((_, kind)) = self.export_dlg.take() {
-                    if let Some(path) = res {
+        if let Some((d, _)) = &self.export_dlg
+            && let Some(res) = d.take()
+                && let Some((_, kind)) = self.export_dlg.take()
+                    && let Some(path) = res {
                         self.run_export(path, kind);
                     }
-                }
-            }
-        }
-        if let Some((d, save)) = &self.proj_dlg {
-            if let Some(res) = d.take() {
+        if let Some((d, save)) = &self.proj_dlg
+            && let Some(res) = d.take() {
                 let save = *save;
                 self.proj_dlg = None;
                 if let Some(path) = res {
@@ -1005,7 +997,6 @@ impl Daw {
                     }
                 }
             }
-        }
         if self.busy.load(Relaxed) == 0 && self.jobs.lock().is_empty() && self.proj.lock().tracks.is_empty() {
             self.rate_decided.store(false, Relaxed);
         }

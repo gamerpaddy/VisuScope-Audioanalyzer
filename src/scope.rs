@@ -427,7 +427,7 @@ impl App {
             });
             egui::ComboBox::from_id_salt("tmode").width(64.0).selected_text(["Auto", "Normal", "Single", "Roll"][s.mode as usize]).show_ui(ui, |ui| {
                 for (i, n) in ["Auto", "Normal", "Single", "Roll"].iter().enumerate() {
-                    ui.selectable_value(&mut s.mode, i as u8, crate::lang::tr(*n));
+                    ui.selectable_value(&mut s.mode, i as u8, crate::lang::tr(n));
                 }
             });
             egui::ComboBox::from_id_salt("tedge").width(58.0).selected_text(if s.rising { "Rising" } else { "Falling" }).show_ui(ui, |ui| {
@@ -506,11 +506,10 @@ impl App {
 
         // interaction: click / drag sets the trigger level, wheel zooms
         let mut new_level = None;
-        if s.mode != 3 && (resp.clicked() || resp.dragged_by(egui::PointerButton::Primary)) {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if s.mode != 3 && (resp.clicked() || resp.dragged_by(egui::PointerButton::Primary))
+            && let Some(p) = resp.interact_pointer_pos() {
                 new_level = Some((center_y - p.y) / plot.height() * 8.0 * s.v_div - s.v_off);
             }
-        }
         let mut wheel = 0.0;
         if resp.hovered() {
             wheel = ui.input(|i| i.smooth_scroll_delta.y);

@@ -35,12 +35,37 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
 
 /// 1/`n` octave smoothing for the spectrum display: per pixel, the average power over `[b/k, b*k]`
 /// bins around the pixel's centre bin (never narrower than the pixel itself).
-fn smooth_pixels(data: &[f32], bpos: &[f32], n: f32) -> Vec<Option<f32>> {
-    let half = (data.len() - 1) as f32;
-    let mut pre = vec![0f64; data.len() + 1];
-    for (i, &x) in data.iter().enumerate() {
-        pre[i + 1] = pre[i] + (x * 0.332_192_8).exp2() as f64;
+///
+/// The prefix sums of the powers (one `exp2` per bin) are kept between frames: a stored spectrum never changes and a live one
+/// only with the next analysis (`seq`), while the display is redrawn far more often.
+fn smooth_pixels(data: &[f32], bpos: &[f32], n: f32, seq: u64) -> Vec<Option<f32>> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    type Key = (usize, usize, u64, [u32; 3]);
+    thread_local! {
+        static CACHE: RefCell<Vec<(Key, Rc<Vec<f64>>)>> = const { RefCell::new(Vec::new()) };
     }
+    let half = (data.len() - 1) as f32;
+    // the address tells the traces apart; a few sample values guard against a freed buffer that is reused for other data
+    let key: Key = (data.as_ptr() as usize, data.len(), seq, [data[0].to_bits(), data[data.len() / 3].to_bits(), data[data.len() - 1].to_bits()]);
+    let pre = CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some(i) = c.iter().position(|(k, _)| *k == key) {
+            return c[i].1.clone();
+        }
+        let mut pre = vec![0f64; data.len() + 1];
+        for (i, &x) in data.iter().enumerate() {
+            pre[i + 1] = pre[i] + (x * 0.332_192_8).exp2() as f64;
+        }
+        let pre = Rc::new(pre);
+        // traces of an older analysis are of no use any more; the list stays short
+        c.retain(|(k, _)| k.2 == seq || k.2 == 0);
+        if c.len() >= 24 {
+            c.remove(0);
+        }
+        c.push((key, pre.clone()));
+        pre
+    });
     let k = 2f32.powf(0.5 / n);
     (0..bpos.len() - 1)
         .map(|i| {
@@ -213,7 +238,7 @@ impl App {
     fn band_switch(&mut self, ui: &mut Ui, painter: &Painter, plot: Rect) {
         let ready = matches!((self.cur_a, self.cur_b), (Some(a), Some(b)) if (a - b).abs() > 1.0);
         let r = Rect::from_min_size(plot.left_top() + vec2(6.0, 6.0), vec2(74.0, 18.0));
-        let resp = ui.interact(r, ui.id().with(("band_switch", plot.left() as i32, plot.top() as i32)), Sense::click());
+        let resp = ui.interact(r, ui.scope_id().with(("band_switch", plot.left() as i32, plot.top() as i32)), Sense::click());
         let on = self.band_listen && ready;
         painter.rect_filled(r, 3.0, if on { Color32::from_rgb(110, 190, 120) } else if resp.hovered() { Color32::from_rgb(52, 62, 80) } else { Color32::from_rgba_unmultiplied(34, 40, 52, 200) });
         painter.text(r.center(), Align2::CENTER_CENTER, "Listen A-B", FontId::proportional(10.5), if on { Color32::BLACK } else if ready { Color32::from_rgb(190, 200, 215) } else { Color32::from_gray(110) });
@@ -309,22 +334,19 @@ impl App {
         // a double-click on a cursor removes it
         self.cursors_idle(ui);
         let mut removed = false;
-        if resp.double_clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.double_clicked()
+            && let Some(p) = resp.interact_pointer_pos() {
                 let (pa, pb) = (self.cur_idle.0.map(|f| x_of_u(self.f_to_u(f))), self.cur_idle.1.map(|f| x_of_u(self.f_to_u(f))));
                 removed = self.cursor_dblclick(p.x, pa, pb);
             }
-        }
-        if resp.clicked() && !removed {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.clicked() && !removed
+            && let Some(p) = resp.interact_pointer_pos() {
                 self.cur_a = Some(place(self, p));
             }
-        }
-        if resp.secondary_clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos() {
                 self.cur_b = Some(place(self, p));
             }
-        }
 
         let clip = painter.with_clip_rect(plot.expand(1.0));
         // dB grid
@@ -363,9 +385,11 @@ impl App {
         let dens = self.density_off();
         let offs = [self.unit_off(0) + dens, self.unit_off(1) + dens];
         let sm = crate::app::SMOOTH_OCT[self.smooth_oct].0;
+        // (never 0: that is the mark of a stored spectrum, which stays cached)
+        let seq = self.an.seq.max(1);
         let trace = |data: &[f32], off: f32| -> Vec<Pos2> {
             let mut pts = Vec::with_capacity(w);
-            let vals: Vec<Option<f32>> = if sm > 0.0 { smooth_pixels(data, &bpos, sm) } else { (0..w).map(|i| sample_bins(data, bpos[i], bpos[i + 1])).collect() };
+            let vals: Vec<Option<f32>> = if sm > 0.0 { smooth_pixels(data, &bpos, sm, seq) } else { (0..w).map(|i| sample_bins(data, bpos[i], bpos[i + 1])).collect() };
             for i in 0..w {
                 if let Some(v) = vals[i] {
                     pts.push(Pos2::new(plot.left() + i as f32 + 0.5, y_of_db(v + off).clamp(plot.top() - 2.0, plot.bottom() + 2.0)));
@@ -382,7 +406,7 @@ impl App {
             let sb = |hz: f32| hz / (s.sr / s.n as f32);
             let mut pts = Vec::with_capacity(w);
             let sbp: Vec<f32> = bpos.iter().map(|b| sb(b * bin_hz)).collect();
-            let vals: Vec<Option<f32>> = if sm > 0.0 { smooth_pixels(&s.data, &sbp, sm) } else { (0..w).map(|i| sample_bins(&s.data, sbp[i], sbp[i + 1])).collect() };
+            let vals: Vec<Option<f32>> = if sm > 0.0 { smooth_pixels(&s.data, &sbp, sm, 0) } else { (0..w).map(|i| sample_bins(&s.data, sbp[i], sbp[i + 1])).collect() };
             for i in 0..w {
                 if let Some(v) = vals[i] {
                     pts.push(Pos2::new(plot.left() + i as f32 + 0.5, y_of_db(v + offs[s.ch.min(1)]).clamp(plot.top() - 2.0, plot.bottom() + 2.0)));
@@ -478,7 +502,7 @@ impl App {
                     Some(v) => format!("{name} {}  {v:.1} {}", fmt_hz(f), self.spec_unit_name()),
                     None => format!("{name} {}", fmt_hz(f)),
                 };
-                let ty = fclamp(lv.map(|v| y_of_db(v)).unwrap_or(plot.top() + 20.0), plot.top() + 20.0, plot.bottom() - 10.0);
+                let ty = fclamp(lv.map(&y_of_db).unwrap_or(plot.top() + 20.0), plot.top() + 20.0, plot.bottom() - 10.0);
                 self.draw_cursor_label(&clip, Pos2::new(x + 4.0, ty), txt, c, Align2::LEFT_CENTER);
             }
         }
@@ -562,24 +586,21 @@ impl App {
         }
         self.cursors_idle(ui);
         let mut removed = false;
-        if resp.double_clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.double_clicked()
+            && let Some(p) = resp.interact_pointer_pos() {
                 let (pa, pb) = (self.cur_idle.0.map(|f| y_of_u(self.f_to_u(f))), self.cur_idle.1.map(|f| y_of_u(self.f_to_u(f))));
                 removed = self.cursor_dblclick(p.y, pa, pb);
             }
-        }
-        if resp.clicked() && !removed {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.clicked() && !removed
+            && let Some(p) = resp.interact_pointer_pos() {
                 let f = self.u_to_f(u_of_y(p.y));
                 self.cur_a = Some(f);
             }
-        }
-        if resp.secondary_clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos() {
                 let f = self.u_to_f(u_of_y(p.y));
                 self.cur_b = Some(f);
             }
-        }
         let (flo_u, fhi_u) = (self.f_lo, self.f_hi);
 
         // image
@@ -712,22 +733,19 @@ impl App {
         }
         self.cursors_idle(ui);
         let mut removed = false;
-        if resp.double_clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.double_clicked()
+            && let Some(p) = resp.interact_pointer_pos() {
                 let (pa, pb) = (self.cur_idle.0.map(|f| x_of_u(self.f_to_u(f))), self.cur_idle.1.map(|f| x_of_u(self.f_to_u(f))));
                 removed = self.cursor_dblclick(p.x, pa, pb);
             }
-        }
-        if resp.clicked() && !removed {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.clicked() && !removed
+            && let Some(p) = resp.interact_pointer_pos() {
                 self.cur_a = Some(self.u_to_f(u_of_x(p.x)));
             }
-        }
-        if resp.secondary_clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos() {
                 self.cur_b = Some(self.u_to_f(u_of_x(p.x)));
             }
-        }
         let (flo_u, fhi_u) = (self.f_lo, self.f_hi);
 
         let span = self.wf_span;

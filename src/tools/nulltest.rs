@@ -383,11 +383,10 @@ impl NullTest {
             }
         }
         let sig = if is_b { &self.b } else { &self.a };
-        if cur == Src::File {
-            if crate::mapping::small_btn(ui, "Open...").clicked() {
+        if cur == Src::File
+            && crate::mapping::small_btn(ui, "Open...").clicked() {
                 self.dlg = Some((is_b, dialogs::open("Open audio file", "Audio", decode::EXTENSIONS)));
             }
-        }
         if let Some(s) = sig {
             ui.label(RichText::new(format!("{}  {:.1} s, {} Hz", s.name, s.x.len() as f32 / s.sr as f32, s.sr)).small().weak());
         } else if cur != Src::File {
@@ -398,7 +397,7 @@ impl NullTest {
 
 /// Samples of A where the delayed B has real data (the edges are left out of the readouts).
 fn valid_range(len_a: usize, len_b: usize, delay: f64) -> (usize, usize) {
-    let k = SINC_K as isize + 2;
+    let k = SINC_K + 2;
     let d = delay.floor() as isize;
     let lo = (d + k).max(0) as usize;
     let hi = ((len_b as isize + d - k).max(0) as usize).min(len_a);
@@ -594,15 +593,14 @@ impl Tool for NullTest {
                 }
             }
         }
-        if let Some((is_b, d)) = &self.dlg {
-            if let Some(res) = d.take() {
+        if let Some((is_b, d)) = &self.dlg
+            && let Some(res) = d.take() {
                 let is_b = *is_b;
                 self.dlg = None;
                 if let Some(p) = res {
                     self.open_file(is_b, p);
                 }
             }
-        }
         let _ = cx;
     }
 
@@ -655,11 +653,10 @@ impl Tool for NullTest {
                     self.mode = i;
                 }
             }
-            if self.mode != was {
-                if let Some(p) = &self.player {
+            if self.mode != was
+                && let Some(p) = &self.player {
                     p.sh.lock().mode = self.mode;
                 }
-            }
             let ready = self.a.is_some() && self.b.is_some();
             if ui.add_enabled(ready, egui::Button::new(if self.playing { "Stop" } else { "Play" })).clicked() {
                 self.playing = !self.playing;
@@ -668,13 +665,11 @@ impl Tool for NullTest {
                 }
             }
             ui.add(egui::DragValue::new(&mut self.vol_db).range(-60.0..=0.0).suffix(crate::lang::tr(" dB")).speed(0.2)).on_hover_text(crate::lang::tr("Volume"));
-            if self.mode == 2 {
-                if ui.add(egui::DragValue::new(&mut self.boost_db).range(0.0..=60.0).prefix(crate::lang::tr("boost ")).suffix(crate::lang::tr(" dB")).speed(0.2)).on_hover_text(crate::lang::tr("Amplify the difference to hear small errors (limited at full scale)")).changed() {
-                    if let Some(p) = &self.player {
+            if self.mode == 2
+                && ui.add(egui::DragValue::new(&mut self.boost_db).range(0.0..=60.0).prefix(crate::lang::tr("boost ")).suffix(crate::lang::tr(" dB")).speed(0.2)).on_hover_text(crate::lang::tr("Amplify the difference to hear small errors (limited at full scale)")).changed()
+                    && let Some(p) = &self.player {
                         p.sh.lock().boost = db_to_lin(self.boost_db);
                     }
-                }
-            }
             // the output device: the side-bar style picker, or the first Output node of the routing graph
             let dev = if cx.graph_on {
                 crate::graph::bus().first_out.lock().clone()
@@ -758,8 +753,8 @@ impl Tool for NullTest {
             // wheel zooms around the pointer, dragging pans
             if resp.hovered() {
                 let sc = ui.input(|i| i.smooth_scroll_delta.y);
-                if sc != 0.0 {
-                    if let Some(p) = resp.hover_pos() {
+                if sc != 0.0
+                    && let Some(p) = resp.hover_pos() {
                         let t = plot.fx(p.x);
                         let ns = (span * (-sc * 0.003).exp()).max(0.002).min(total);
                         self.view_span = if ns >= total * 0.999 { 0.0 } else { ns };
@@ -767,7 +762,6 @@ impl Tool for NullTest {
                         self.view_start = (t - frac * ns).clamp(0.0, (total - ns).max(0.0));
                         ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
                     }
-                }
                 if let Some(p) = resp.hover_pos().filter(|p| pr.contains(*p)) {
                     let t = plot.fx(p.x);
                     let i = ((t * a.sr as f32) as usize).min(a.x.len().saturating_sub(1));

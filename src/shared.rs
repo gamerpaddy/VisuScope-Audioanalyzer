@@ -75,6 +75,27 @@ impl Ring {
     }
 }
 
+/// Like `Ring::copy_last`, but the lock is taken for short pieces only. The audio callback waits for this lock, and a copy of
+/// a quarter million samples in one go would hold it up long enough for the sound card to run dry if this thread is
+/// descheduled in the middle. The window is fixed by the position at the start, so it is still one consistent piece of signal.
+pub fn copy_last_chunked(ring: &Mutex<Ring>, l: &mut [f32], r: &mut [f32]) {
+    const PIECE: usize = 8192;
+    let n = l.len();
+    let total = ring.lock().total as usize;
+    // stay well inside the ring: the oldest samples must not be overwritten while the piece is being read
+    let avail = total.min(n).min(RING_CAP / 2);
+    let pad = n - avail;
+    l[..pad].fill(0.0);
+    r[..pad].fill(0.0);
+    let start = total - avail;
+    let mut done = 0;
+    while done < avail {
+        let m = PIECE.min(avail - done);
+        ring.lock().copy_abs(start + done, &mut l[pad + done..pad + done + m], &mut r[pad + done..pad + done + m]);
+        done += m;
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct Params {
     pub fft_size: usize,
@@ -207,6 +228,8 @@ pub struct Shared {
     pub ring: Mutex<Ring>,
     pub params: Mutex<Params>,
     pub analysis: Mutex<Analysis>,
+    /// `Analysis::seq` the UI took last: the DSP thread need not copy a new spectrum while the UI still has not looked at the old one
+    pub an_pulled: AtomicU64,
     /// Spectrogram columns (epoch, ROWS bytes low->high frequency) waiting for the UI.
     pub columns: Mutex<Vec<(u32, Vec<u8>)>>,
     pub status: Mutex<String>,
@@ -247,6 +270,7 @@ impl Shared {
             ring: Mutex::new(Ring::new()),
             params: Mutex::new(Params::default()),
             analysis: Mutex::new(Analysis::default()),
+            an_pulled: AtomicU64::new(0),
             columns: Mutex::new(Vec::new()),
             status: Mutex::new(String::from("No input")),
             sr: AtomicU32::new(0),

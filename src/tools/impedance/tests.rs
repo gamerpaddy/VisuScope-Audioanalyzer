@@ -101,7 +101,7 @@ fn calibration_with_a_known_resistor_corrects_the_level() {
     let h = super::super::sweep::Transfer { df: 5.0, mag_db: vec![-3.0103; 2000], phase: vec![0.0; 2000], coh: None };
     let res = SweepResult { harm: None, sr: 48000.0, ir: Vec::new(), pre: 0, h, runs: 1, capture_peak_db: -20.0, params: Default::default(), id: 1 };
     let g = calibration_gain(&res, 100.0, 100.0).unwrap();
-    assert!((g - 0.7071).abs() < 0.01, "{g}");
+    assert!((g - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01, "{g}");
 }
 
 /// With a DATS V3 connected (leads on the built-in 1 kΩ resistor): plays tones through it and prints what comes back on each input

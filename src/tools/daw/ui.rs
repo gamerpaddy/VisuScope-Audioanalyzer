@@ -230,7 +230,7 @@ struct Hit {
 
 impl Daw {
     pub(super) fn draw(&mut self, ui: &mut Ui, cx: &mut Ctx) {
-        let mut p = self.proj.lock().clone();
+        let mut p;
         self.edited = false;
         let whole = ui.max_rect();
         if ui.input(|i| i.pointer.any_pressed()) { self.keyboard_active = ui.rect_contains_pointer(whole); }
@@ -428,12 +428,11 @@ impl Daw {
                     self.ask_export(Export::StemsDir);
                     ui.close();
                 }
-                if let Some(id) = self.sel.iter().next().copied() {
-                    if crate::mapping::btn(ui, "Selected clip to WAV...").clicked() {
+                if let Some(id) = self.sel.iter().next().copied()
+                    && crate::mapping::btn(ui, "Selected clip to WAV...").clicked() {
                         self.ask_export(Export::Clip(id));
                         ui.close();
                     }
-                }
                 ui.separator();
                 if crate::mapping::btn(ui, "Bounce mix to a new track").on_hover_text(crate::lang::tr("Render the selection (or everything) into one new track")).clicked() {
                     self.act_bounce(p, false);
@@ -702,16 +701,14 @@ impl Daw {
             };
             self.touch();
         }
-        if key(none, Key::OpenBracket) {
-            if let Some(f) = p.mark_near(self.pos(), false).map(|m| m.at) {
+        if key(none, Key::OpenBracket)
+            && let Some(f) = p.mark_near(self.pos(), false).map(|m| m.at) {
                 self.seek(f);
             }
-        }
-        if key(none, Key::CloseBracket) {
-            if let Some(f) = p.mark_near(self.pos(), true).map(|m| m.at) {
+        if key(none, Key::CloseBracket)
+            && let Some(f) = p.mark_near(self.pos(), true).map(|m| m.at) {
                 self.seek(f);
             }
-        }
         if key(none, Key::M) {
             self.act_clip_prop(p, |c| c.muted = !c.muted);
         }
@@ -944,8 +941,8 @@ impl Daw {
         if let Some(h) = hover.filter(|h| edge_near(h.x, self.range).is_some()) {
             let _ = h;
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-        } else if let Some(h) = hover {
-            if self.drag.is_none() {
+        } else if let Some(h) = hover
+            && self.drag.is_none() {
                 // only a clip that is selected can be moved, trimmed or faded: the others just show where a selection starts
                 match self.hit(p, &view, &rows, h).filter(|k| self.sel.contains(&p.tracks[k.ti].clips[k.ci].id)) {
                     Some(Hit { kind: DragKind::TrimL | DragKind::TrimR, .. }) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
@@ -954,7 +951,6 @@ impl Daw {
                     None => ui.ctx().set_cursor_icon(CursorIcon::Text),
                 }
             }
-        }
         if lane_resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some((ti, _)) = ui.input(|i| i.pointer.press_origin()).and_then(|pos| Self::draw_row_at(p, &rows, pos)) {
                 // on a draw track the mouse draws
@@ -996,8 +992,8 @@ impl Daw {
                 }
             }
         }
-        if lane_resp.dragged() {
-            if let Some(ptr) = lane_resp.interact_pointer_pos() {
+        if lane_resp.dragged()
+            && let Some(ptr) = lane_resp.interact_pointer_pos() {
                 if let Some((ti, last)) = self.draw_drag {
                     let row = rows[ti];
                     let v = (((row.bottom() - 4.0 - ptr.y) / (row.height() - 8.0).max(1.0)).clamp(0.0, 1.0) * 2.0 - 1.0).clamp(-1.0, 1.0);
@@ -1045,12 +1041,11 @@ impl Daw {
                     }
                 }
             }
-        }
         if lane_resp.drag_stopped() {
             // a selection made during playback with the loop on: the playhead goes into it (it would only
             // reach the loop after playing up to its end, or never when it is further on)
-            if self.range_anchor.is_some() && self.loop_on && self.play.is_some() {
-                if let Some((a, b)) = self.range.filter(|r| r.1 > r.0 + 64) {
+            if self.range_anchor.is_some() && self.loop_on && self.play.is_some()
+                && let Some((a, b)) = self.range.filter(|r| r.1 > r.0 + 64) {
                     if let Some(pl) = &self.play {
                         pl.loop_a.store(a, Relaxed);
                         pl.loop_b.store(b, Relaxed);
@@ -1060,13 +1055,12 @@ impl Daw {
                         self.seek(a);
                     }
                 }
-            }
             self.auto_drag = None;
             self.drag = None;
             self.range_anchor = None;
         }
-        if lane_resp.clicked() {
-            if let Some(pos) = lane_resp.interact_pointer_pos() {
+        if lane_resp.clicked()
+            && let Some(pos) = lane_resp.interact_pointer_pos() {
                 let on_row = rows.iter().position(|r| pos.y >= r.top() && pos.y < r.bottom());
                 // the upper bar of a track (the clip's name strip) selects; the waveform below it places the playback cursor
                 let in_bar = on_row.is_some_and(|ti| pos.y < rows[ti].top() + TRACK_BAR_H);
@@ -1103,9 +1097,8 @@ impl Daw {
                     }
                 }
             }
-        }
-        if lane_resp.double_clicked() {
-            if let Some(pos) = lane_resp.interact_pointer_pos() {
+        if lane_resp.double_clicked()
+            && let Some(pos) = lane_resp.interact_pointer_pos() {
                 // while a track's automation is edited, a double-click on its lane makes a new point
                 let on_auto = self.auto_edit.and_then(|id| p.track_index(id)).filter(|&ti| pos.y >= rows[ti].top() && pos.y < rows[ti].bottom());
                 if let Some(ti) = on_auto {
@@ -1124,7 +1117,6 @@ impl Daw {
                     self.sel.insert(c.id);
                 }
             }
-        }
         if lane_resp.drag_stopped() {
             self.draw_drag = None;
         }
@@ -1134,22 +1126,20 @@ impl Daw {
             self.t0 = (self.t0 - dx as f64 / self.pps).max(0.0);
             ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
         }
-        if lane_resp.secondary_clicked() {
-            if let Some(pos) = lane_resp.interact_pointer_pos() {
+        if lane_resp.secondary_clicked()
+            && let Some(pos) = lane_resp.interact_pointer_pos() {
                 self.auto_ctx = self.auto_hit(p, &view, &rows, pos);
                 self.ctx_clip = if self.auto_ctx.is_some() { None } else { self.hit(p, &view, &rows, pos).map(|h| p.tracks[h.ti].clips[h.ci].id) };
-                if let Some(id) = self.ctx_clip {
-                    if !self.sel.contains(&id) {
+                if let Some(id) = self.ctx_clip
+                    && !self.sel.contains(&id) {
                         self.sel.clear();
                         self.sel.insert(id);
                     }
-                }
                 if let Some(ti) = rows.iter().position(|r| pos.y >= r.top() && pos.y < r.bottom()) {
                     self.sel_track = Some(p.tracks[ti].id);
                 }
                 self.ctx_frame = self.snap_to(&view, &self.snap_points(p, &[]), view.frame(pos.x), alt).max(0);
             }
-        }
         lane_resp.context_menu(|ui| {
             if let Some((ti, pt)) = self.auto_ctx {
                 if crate::mapping::btn(ui, "Delete this automation point").clicked() {
@@ -1232,11 +1222,10 @@ impl Daw {
             }
             p.marks.iter().map(|m| (m.id, (view.x(m.at) - x).abs())).filter(|(_, d)| *d <= 7.0).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(id, _)| id)
         };
-        if ruler_resp.secondary_clicked() {
-            if let Some(pos) = ruler_resp.interact_pointer_pos() {
+        if ruler_resp.secondary_clicked()
+            && let Some(pos) = ruler_resp.interact_pointer_pos() {
                 self.ruler_ctx = (view.frame(pos.x.max(lanes_left)).max(0), mark_at(pos.x, pos.y));
             }
-        }
         let on_mark = ruler_resp.interact_pointer_pos().and_then(|pos| mark_at(pos.x, pos.y));
         if ruler_resp.clicked() && on_mark.is_some() {
             // a click on a flag selects its region (or moves the playhead to the marker)
@@ -1244,8 +1233,8 @@ impl Daw {
                 self.range = if m.len > 0 { Some((m.at, m.at + m.len)) } else { None };
                 self.seek(m.at);
             }
-        } else if ruler_resp.clicked() || (ruler_resp.dragged() && on_mark.is_none()) {
-            if let Some(pos) = ruler_resp.interact_pointer_pos() {
+        } else if (ruler_resp.clicked() || (ruler_resp.dragged() && on_mark.is_none()))
+            && let Some(pos) = ruler_resp.interact_pointer_pos() {
                 let pts = self.snap_points(p, &[]);
                 let f = self.snap_to(&view, &pts, view.frame(pos.x.max(lanes_left)), alt).max(0);
                 // while the mouse rests on one spot during playback, the sound goes on from there: seeking again on every
@@ -1257,7 +1246,6 @@ impl Daw {
                     ui.data_mut(|d| d.insert_temp(id, f));
                 }
             }
-        }
         if ruler_resp.drag_stopped() {
             let id = ui.scope_id().with("daw_scrub_last");
             ui.data_mut(|d| d.remove::<i64>(id));
@@ -1438,14 +1426,13 @@ impl Daw {
             self.checkpoint(p);
             p.tracks.swap(a, b);
         }
-        if let Some(tid) = self.split_req.take() {
-            if let Some(ti) = p.track_index(tid) {
+        if let Some(tid) = self.split_req.take()
+            && let Some(ti) = p.track_index(tid) {
                 self.checkpoint(p);
                 if let Some(n) = p.split_channels(ti) {
                     self.sel_track = Some(p.tracks[n].id);
                 }
             }
-        }
         if let Some(ti) = dup {
             self.checkpoint(p);
             let mut t = p.tracks[ti].clone();
@@ -1475,22 +1462,20 @@ impl Daw {
         }
         // a white guide line where the ruler would put the playback cursor
         let over_wave = |h: Pos2| rows.iter().any(|r| h.y >= r.top() + TRACK_BAR_H && h.y < r.bottom());
-        if let (Some(h), None) = (hover, &self.drag) {
-            if lanes_area.contains(h) && self.range_anchor.is_none() && over_wave(h) {
+        if let (Some(h), None) = (hover, &self.drag)
+            && lanes_area.contains(h) && self.range_anchor.is_none() && over_wave(h) {
                 let pts = self.snap_points(p, &[]);
                 let f = self.snap_to(&view, &pts, view.frame(h.x), alt).max(0);
                 let x = view.x(f);
                 painter.with_clip_rect(lanes_area.union(ruler)).line_segment([pos2(x, ruler.top()), pos2(x, lanes_area.bottom())], Stroke::new(1.0, Color32::from_white_alpha(110)));
                 painter.with_clip_rect(ruler).add(Shape::convex_polygon(vec![pos2(x - 4.0, ruler.bottom() - 7.0), pos2(x + 4.0, ruler.bottom() - 7.0), pos2(x, ruler.bottom())], Color32::from_white_alpha(170), Stroke::NONE));
             }
-        }
         // hover readout
-        if let (Some(h), None) = (hover, &self.drag) {
-            if lanes_area.contains(h) && over_wave(h) {
+        if let (Some(h), None) = (hover, &self.drag)
+            && lanes_area.contains(h) && over_wave(h) {
                 let t = view.frame(h.x).max(0) as f64 / sr;
                 painter.text(pos2(h.x + 8.0, ruler.bottom() + 2.0), Align2::LEFT_TOP, clock(t as f32), FontId::monospace(9.5), Color32::from_white_alpha(120));
             }
-        }
         let _ = (cx, add_row);
     }
 

@@ -6,11 +6,10 @@ impl Daw {
     /// A click on a track header: selects it; with Ctrl it joins or leaves the group of selected tracks.
     pub(super) fn click_track(&mut self, ui: &Ui, id: u32) {
         if ui.input(|i| i.modifiers.command) {
-            if self.sel_tracks.is_empty() {
-                if let Some(cur) = self.sel_track {
+            if self.sel_tracks.is_empty()
+                && let Some(cur) = self.sel_track {
                     self.sel_tracks.insert(cur);
                 }
-            }
             if !self.sel_tracks.remove(&id) {
                 self.sel_tracks.insert(id);
             }
@@ -174,7 +173,7 @@ impl Daw {
             });
             ui.menu_button(crate::lang::tr("Height"), |ui| {
                 for (k, n) in ["Small", "Normal", "Large (split channels)"].iter().enumerate() {
-                    if ui.selectable_label(p.tracks[ti].h as usize == k, crate::lang::tr(*n)).clicked() {
+                    if ui.selectable_label(p.tracks[ti].h as usize == k, crate::lang::tr(n)).clicked() {
                         p.tracks[ti].h = k as u8;
                         self.touch();
                         ui.close();
@@ -262,11 +261,10 @@ impl Daw {
                         // the track records what its record node in the routing graph receives
                         p.tracks[ti].input = graph_input(id);
                         crate::graph::bus().request_rec_node(id, &p.tracks[ti].name);
-                    } else if t.arm && t.input.dev.is_empty() {
-                        if let Some(inp) = self.default_input_for(p, ti) {
+                    } else if t.arm && t.input.dev.is_empty()
+                        && let Some(inp) = self.default_input_for(p, ti) {
                             p.tracks[ti].input = inp;
                         }
-                    }
                     self.touch();
                 }
             });
@@ -529,11 +527,10 @@ impl Daw {
                 p.tracks[ti].input.mode = mode;
                 self.touch();
             }
-            if let Some(s) = status {
-                if s.contains("not found") || s.contains("unsupported") || s.contains("reconnect") {
+            if let Some(s) = status
+                && (s.contains("not found") || s.contains("unsupported") || s.contains("reconnect")) {
                     ui.label(RichText::new("!").color(Color32::from_rgb(255, 170, 70))).on_hover_text(s);
                 }
-            }
         });
     }
 

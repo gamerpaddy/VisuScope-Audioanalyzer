@@ -4,20 +4,15 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Format {
+    #[allow(dead_code)] // a valid file format, read and written by the tests
     Pcm16,
     Pcm24,
     Float32,
 }
 
 impl Format {
+    #[cfg(test)]
     pub const ALL: [Format; 3] = [Format::Pcm24, Format::Float32, Format::Pcm16];
-    pub fn name(self) -> &'static str {
-        match self {
-            Format::Pcm16 => "16-bit PCM",
-            Format::Pcm24 => "24-bit PCM",
-            Format::Float32 => "32-bit float",
-        }
-    }
     pub fn bytes(self) -> usize {
         match self {
             Format::Pcm16 => 2,
@@ -82,10 +77,6 @@ impl WavWriter {
         Ok(())
     }
 
-    pub fn bytes_written(&self) -> u64 {
-        44 + self.frames * self.ch as u64 * self.fmt.bytes() as u64
-    }
-
     /// Patch the sizes in the header and flush.
     pub fn finish(mut self) -> std::io::Result<()> {
         self.f.flush()?;
@@ -100,6 +91,7 @@ impl WavWriter {
     }
 }
 
+#[cfg(test)]
 pub struct WavData {
     pub sr: u32,
     pub l: Vec<f32>,
@@ -107,6 +99,7 @@ pub struct WavData {
     pub src_channels: u16,
 }
 
+#[cfg(test)]
 impl WavData {
     /// First two channels (a mono file is duplicated into both).
     pub fn from_channels(sr: u32, mut ch: Vec<Vec<f32>>) -> Self {

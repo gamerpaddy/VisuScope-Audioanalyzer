@@ -82,7 +82,11 @@ pub fn current() -> String {
 pub fn set(name: &str) {
     let table = match name {
         "English" | "" => None,
-        "Deutsch" => Some(parse(GERMAN)),
+        // parsed once: the table lives for the whole run, switching back and forth must not leak a copy each time
+        "Deutsch" => {
+            static DE: std::sync::OnceLock<HashMap<&'static str, &'static str>> = std::sync::OnceLock::new();
+            Some(DE.get_or_init(|| parse(GERMAN)).clone())
+        }
         n if n.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') => std::fs::read_to_string(dir().join(format!("lang_{n}.txt"))).ok().map(|t| parse(&t)),
         _ => None,
     };

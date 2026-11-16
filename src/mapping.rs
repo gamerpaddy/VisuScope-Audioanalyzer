@@ -20,7 +20,7 @@ impl Src {
         match self {
             Src::Key { key, ctrl, shift, alt } => format!("key:{}{}{}{key}", if *ctrl { "ctrl+" } else { "" }, if *shift { "shift+" } else { "" }, if *alt { "alt+" } else { "" }),
             Src::Midi { cc, ch, num } => format!("midi:{}:{ch}:{num}", if *cc { "cc" } else { "note" }),
-            Src::Pad { dev, axis, code } => format!("pad:{}:{}:{}", dev.replace(':', " ").replace('|', " "), if *axis { "axis" } else { "btn" }, code.replace(':', " ").replace('|', " ")),
+            Src::Pad { dev, axis, code } => format!("pad:{}:{}:{}", dev.replace([':', '|'], " "), if *axis { "axis" } else { "btn" }, code.replace([':', '|'], " ")),
         }
     }
 
@@ -334,7 +334,10 @@ static DEVICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Called by the sources (the keyboard of the window, MIDI, controllers).
 pub fn push_event(src: Src, value: f32) {
     let mut q = EVENTS.lock();
-    if q.len() < 512 {
+    // when the UI falls behind, new presses and axis moves are dropped, but a release (value 0) is kept (up to a hard limit):
+    // a lost release would leave a key or button held for ever
+    let room = if value == 0.0 { 2048 } else { 512 };
+    if q.len() < room {
         q.push_back((src, value));
     }
 }
@@ -439,7 +442,7 @@ impl Mapper {
         if let Some(d) = file().parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(file(), self.encode());
+        let _ = crate::fsutil::atomic_write(file(), self.encode());
     }
 
     pub fn binding(&self, action: &str) -> Option<&Binding> {
@@ -596,7 +599,7 @@ mod midi {
                 let name = String::from_utf16_lossy(&pname[..len]);
                 if !open.iter().any(|o| o.0 == id) {
                     let mut h: HMIDIIN = std::ptr::null_mut();
-                    if midiInOpen(&mut h, id, callback as usize, 0, CALLBACK_FUNCTION) == 0 {
+                    if midiInOpen(&mut h, id, callback as *const () as usize, 0, CALLBACK_FUNCTION) == 0 {
                         midiInStart(h);
                         open.push((id, h as isize));
                     } else {
@@ -627,6 +630,8 @@ fn pad_thread() {
         return;
     };
     let mut last_list = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    // last value sent per axis: a stick at rest jitters by tiny steps, which are not worth an event (nor a name string)
+    let mut axes: HashMap<(gilrs::GamepadId, gilrs::ev::Code), f32> = HashMap::new();
     loop {
         while let Some(gilrs::Event { id, event, .. }) = g.next_event() {
             let name = || g.gamepad(id).name().to_string();
@@ -634,7 +639,14 @@ fn pad_thread() {
                 gilrs::EventType::ButtonPressed(_, code) => push_event(Src::Pad { dev: name(), axis: false, code: code.to_string() }, 1.0),
                 gilrs::EventType::ButtonReleased(_, code) => push_event(Src::Pad { dev: name(), axis: false, code: code.to_string() }, 0.0),
                 // sticks and sliders go from -1 to 1: 0 to 1 for the mapping
-                gilrs::EventType::AxisChanged(_, v, code) => push_event(Src::Pad { dev: name(), axis: true, code: code.to_string() }, ((v + 1.0) / 2.0).clamp(0.0, 1.0)),
+                gilrs::EventType::AxisChanged(_, v, code) => {
+                    let v = ((v + 1.0) / 2.0).clamp(0.0, 1.0);
+                    let last = axes.entry((id, code)).or_insert(f32::NAN);
+                    if last.is_nan() || (v - *last).abs() >= 0.002 || v == 0.0 || v == 1.0 {
+                        *last = v;
+                        push_event(Src::Pad { dev: name(), axis: true, code: code.to_string() }, v);
+                    }
+                }
                 _ => {}
             }
         }
@@ -642,7 +654,9 @@ fn pad_thread() {
             last_list = std::time::Instant::now();
             set_devices("Controller", g.gamepads().map(|(_, p)| p.name().to_string()).collect());
         }
-        std::thread::sleep(std::time::Duration::from_millis(4));
+        // with no controller connected there is only the arrival of one to wait for
+        let idle = g.gamepads().next().is_none();
+        std::thread::sleep(std::time::Duration::from_millis(if idle { 250 } else { 4 }));
     }
 }
 
@@ -679,17 +693,17 @@ fn media_thread() {
             }
             let mut msg: MSG = std::mem::zeroed();
             while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                if msg.message == WM_HOTKEY {
-                    if let Some(name) = MEDIA_KEYS.get((msg.wParam as usize).wrapping_sub(1)) {
+                if msg.message == WM_HOTKEY
+                    && let Some(name) = MEDIA_KEYS.get((msg.wParam as usize).wrapping_sub(1)) {
                         // (a hotkey is a press without a release: both are delivered)
                         let src = Src::Key { key: name.to_string(), ctrl: false, shift: false, alt: false };
                         push_event(src.clone(), 1.0);
                         push_event(src, 0.0);
                     }
-                }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(40));
+        // media keys are only taken while a binding wants them: then 40 ms is quick enough, otherwise look rarely
+        std::thread::sleep(std::time::Duration::from_millis(if want || registered { 40 } else { 250 }));
     }
 }
 
@@ -737,7 +751,7 @@ mod tests {
             let back = Src::decode(&s.encode()).unwrap();
             // names with the characters of the format in them are cleaned, nothing else changes
             if let (Src::Pad { dev: a, .. }, Src::Pad { dev: b, .. }) = (&s, &back) {
-                assert_eq!(a.replace(':', " ").replace('|', " "), *b);
+                assert_eq!(a.replace([':', '|'], " "), *b);
             } else {
                 assert_eq!(back, s);
             }

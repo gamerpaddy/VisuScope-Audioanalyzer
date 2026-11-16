@@ -373,12 +373,11 @@ impl Impedance {
     fn apply_cal(&mut self) {
         self.cal_rs = None;
         self.cal_gain = None;
-        if let (Some(o), Some(p)) = (self.cal_open, self.cal_pt) {
-            if let Some((g, rs)) = two_point_calibration(o, p, 1000.0) {
+        if let (Some(o), Some(p)) = (self.cal_open, self.cal_pt)
+            && let Some((g, rs)) = two_point_calibration(o, p, 1000.0) {
                 self.cal_gain = Some(g);
                 self.cal_rs = Some(rs);
             }
-        }
         self.save_cal();
     }
 
@@ -400,7 +399,7 @@ impl Impedance {
         if let Some(d) = path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(path, t);
+        let _ = crate::fsutil::atomic_write(path, t);
     }
 
     fn load_cal(&mut self) {
@@ -477,8 +476,8 @@ impl Tool for Impedance {
                 _ => {}
             }
         }
-        if let Some(d) = &self.save {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.save
+            && let Some(res) = d.take() {
                 self.save = None;
                 if let (Some(path), Some(c)) = (res, &self.curve) {
                     let mut s = String::from("freq_hz,impedance_ohm,phase_deg,resistance_ohm,reactance_ohm\n");
@@ -492,7 +491,6 @@ impl Tool for Impedance {
                     });
                 }
             }
-        }
         if let Some(n) = self.lib.poll() {
             cx.req.note = Some(n);
         }
@@ -677,14 +675,13 @@ impl Impedance {
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut self.cal_r).range(0.1..=100_000.0).speed(0.5).suffix(" Ω"));
                     let ok = cx.sweep.result.is_some() && !busy;
-                    if ui.add_enabled(ok, egui::Button::new(crate::lang::tr("Calibrate"))).on_hover_text(crate::lang::tr("Connect a resistor of this value in place of the device, press Measure, then Calibrate: the level is set so that it reads this value")).clicked() {
-                        if let Some(g) = cx.sweep.result.as_ref().and_then(|r| calibration_gain(r, self.r_ref + self.r_out, self.cal_r)) {
+                    if ui.add_enabled(ok, egui::Button::new(crate::lang::tr("Calibrate"))).on_hover_text(crate::lang::tr("Connect a resistor of this value in place of the device, press Measure, then Calibrate: the level is set so that it reads this value")).clicked()
+                        && let Some(g) = cx.sweep.result.as_ref().and_then(|r| calibration_gain(r, self.r_ref + self.r_out, self.cal_r)) {
                             self.cal_gain = Some(g);
                             self.save_cal();
                             self.rebuild(cx);
                             self.note = format!("Calibrated with {}", fmt_ohm(self.cal_r));
                         }
-                    }
                     if self.cal_gain.is_some() && crate::mapping::small_btn(ui, "Reset").clicked() {
                         self.cal_gain = None;
                         self.save_cal();
@@ -836,7 +833,7 @@ impl Impedance {
                 let mech = ts::mechanics(&a, self.d_mm * 1e-3, self.vas_method(), self.fs2);
                 *ts::LAST.lock() = Some((a, mech.as_ref().ok().copied(), ts::piston_area(self.d_mm * 1e-3)));
                 egui::Grid::new("imp_ts_res").num_columns(4).spacing([14.0, 3.0]).show(ui, |ui| {
-                    let mut row = |ui: &mut Ui, k1: &str, v1: String, k2: &str, v2: String| {
+                    let row = |ui: &mut Ui, k1: &str, v1: String, k2: &str, v2: String| {
                         ui.label(RichText::new(k1).small().weak());
                         ui.label(RichText::new(v1).monospace());
                         ui.label(RichText::new(k2).small().weak());
@@ -857,13 +854,11 @@ impl Impedance {
                     ui.label(RichText::new(e.as_str()).small().color(Color32::from_rgb(255, 170, 90)));
                 }
                 ui.horizontal(|ui| {
-                    if crate::mapping::small_btn(ui, "Copy").on_hover_text(crate::lang::tr("The parameters as text")).clicked() {
-                        if let Some(t) = self.ts_text() {
-                            if crate::clip::copy(&t) {
+                    if crate::mapping::small_btn(ui, "Copy").on_hover_text(crate::lang::tr("The parameters as text")).clicked()
+                        && let Some(t) = self.ts_text()
+                            && crate::clip::copy(&t) {
                                 self.note = "Copied".into();
                             }
-                        }
-                    }
                     if crate::mapping::small_btn(ui, "Clear").clicked() {
                         self.free = None;
                         self.fs2 = None;

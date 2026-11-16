@@ -34,12 +34,11 @@ impl App {
         if req.use_dats {
             self.use_dats();
         }
-        if req.dats_nodes {
-            if let Some(d) = self.dats.clone() {
+        if req.dats_nodes
+            && let Some(d) = self.dats.clone() {
                 self.graph_on = true;
                 self.tool_command("Routing", &format!("datsnodes	{}	{}", d.in_id.clone().unwrap_or_default(), d.out_id.clone().unwrap_or_default()));
             }
-        }
         if let Some(code) = req.exit {
             self.shutdown_tools();
             self.save_settings(true);
@@ -263,6 +262,18 @@ impl App {
             self.sweep.start();
         }
         if let Some((script, report)) = self.autorun.clone() {
+            // no input device ever opened: a script that cannot start must end with the error code, not wait for ever
+            if self.sh.t0.elapsed().as_secs() >= 30 && self.sh.sr.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                let msg = format!("cannot run {script}: no audio input became ready within 30 s");
+                println!("{msg}");
+                crate::log::log(&msg);
+                if let Some(r) = report.filter(|r| !r.is_empty()) {
+                    let _ = std::fs::write(r, format!("ERROR
+{msg}
+"));
+                }
+                std::process::exit(2);
+            }
             if self.sh.t0.elapsed().as_secs() >= 4 && self.sh.sr.load(std::sync::atomic::Ordering::Relaxed) > 0 {
                 self.autorun = None;
                 if let Some(k) = (0..tools::TOOL_COUNT).find(|&k| tools::INFO[k].short == "Sequence") {

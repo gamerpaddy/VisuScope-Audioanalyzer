@@ -20,7 +20,7 @@ pub fn matches(label: &str, q: &str) -> bool {
 
 impl App {
     pub fn palette_ui(&mut self, ctx: &egui::Context) {
-        let id = egui::Id::new("command_palette");
+        let id = egui::Id::unique("command_palette");
         let mut st: State = ctx.data_mut(|d| d.get_temp(id)).unwrap_or_default();
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
             st = State { open: !st.open, focus: true, ..Default::default() };

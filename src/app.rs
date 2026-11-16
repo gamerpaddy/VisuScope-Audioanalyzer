@@ -237,6 +237,7 @@ fn spawn_watchdog(sh: Arc<Shared>) {
         .name("watchdog".into())
         .spawn(move || {
             let mut reported = false;
+            let mut dsp_reported = false;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 if sh.quit.load(Relaxed) {
@@ -261,9 +262,18 @@ fn spawn_watchdog(sh: Arc<Shared>) {
                     );
                     crate::log::log(&format!("HANG: {msg}"));
                     let _ = std::fs::write(crate::log::path().with_file_name("visuscope_hang.log"), msg);
-                } else if stalled < 1000 && reported {
+                }
+                // the DSP thread beats every few milliseconds, also while paused: a long silence means it died or is stuck
+                let dsp_age = now.saturating_sub(sh.dsp_beat.load(Relaxed));
+                if sh.dsp_beat.load(Relaxed) > 0 && dsp_age > 5000 && !dsp_reported {
+                    dsp_reported = true;
+                    crate::log::log(&format!("WATCHDOG: the DSP thread has not run for {dsp_age} ms"));
+                } else if dsp_age < 1000 {
+                    dsp_reported = false;
+                }
+                if stalled < 1000 && reported {
                     reported = false;
-                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("visuscope_hang.log") {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::log::path().with_file_name("visuscope_hang.log")) {
                         use std::io::Write;
                         let _ = writeln!(f, "UI recovered at t={now} ms");
                         crate::log::log("UI recovered after stall");
@@ -277,7 +287,7 @@ fn spawn_watchdog(sh: Arc<Shared>) {
 /// True for the text of a NaN or infinite number.
 pub fn is_not_finite(v: &str) -> bool {
     let s = v.trim().to_ascii_lowercase();
-    let s = s.trim_start_matches(|c| c == '+' || c == '-');
+    let s = s.trim_start_matches(['+', '-']);
     s.starts_with("nan") || s.starts_with("inf")
 }
 
@@ -614,11 +624,10 @@ impl App {
         // the version that wrote the file (0 = before versions were written): changes of meaning between versions go here
         let ver = get::<u32>(&m, "settings_ver").unwrap_or(0);
         let m = migrate_settings(ver, m);
-        if let Some(id) = m.get("device") {
-            if let Some(i) = self.devices.iter().position(|d| d.id == *id) {
+        if let Some(id) = m.get("device")
+            && let Some(i) = self.devices.iter().position(|d| d.id == *id) {
                 self.sel_dev = i;
             }
-        }
         // older versions stored a pair index (0 = 1+2, 1 = 3+4 ...)
         if let Some(v) = get::<usize>(&m, "pair") {
             self.ch_a = (v * 2).min(MAX_CH - 1);
@@ -631,11 +640,10 @@ impl App {
             self.ch_b = v.min(MAX_CH - 1);
         }
         let p = &mut self.p;
-        if let Some(v) = get::<usize>(&m, "fft") {
-            if v.is_power_of_two() && (1024..=262144).contains(&v) {
+        if let Some(v) = get::<usize>(&m, "fft")
+            && v.is_power_of_two() && (1024..=262144).contains(&v) {
                 p.fft_size = v;
             }
-        }
         if let Some(w) = m.get("window").and_then(|n| Window::ALL.iter().find(|w| w.name() == *n)) {
             p.window = *w;
         }
@@ -760,11 +768,10 @@ impl App {
         }
         set!(self.cal.on, "cal_on");
         for (k, c) in [("cal_vpk_l", 0usize), ("cal_vpk_r", 1)] {
-            if let Some(v) = get::<f32>(&m, k) {
-                if v.is_finite() && v > 1e-9 {
+            if let Some(v) = get::<f32>(&m, k)
+                && v.is_finite() && v > 1e-9 {
                     self.cal.vpk[c] = v;
                 }
-            }
         }
         if let Some(v) = get::<f32>(&m, "cal_ref") {
             self.cal.ref_vrms = v.clamp(1e-6, 1000.0);
@@ -818,11 +825,10 @@ impl App {
         if let Some(v) = get::<f32>(&m, "sc_t_div") {
             self.scope.t_div = v.clamp(1e-6, 120.0);
         }
-        if let Some(v) = get::<f32>(&m, "sc_v_div") {
-            if v.is_finite() && v > 0.0 {
+        if let Some(v) = get::<f32>(&m, "sc_v_div")
+            && v.is_finite() && v > 0.0 {
                 self.scope.v_div = v;
             }
-        }
         if let Some(v) = get::<u8>(&m, "sc_mode") {
             self.scope.mode = v.min(3);
         }
@@ -891,7 +897,7 @@ impl App {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if std::fs::write(&path, &s).is_ok() {
+        if crate::fsutil::atomic_write(&path, &s).is_ok() {
             self.last_saved = s;
         }
     }
@@ -992,11 +998,17 @@ impl App {
     }
 
     fn refresh_textures(&mut self) {
+        // The history is stored column by column, the texture row by row: a transpose. Done in tiles of 16 columns, so that
+        // the 16 source columns stay in the cache while a tile is written (a plain loop strides through 50 MB per pixel).
+        const TILE: usize = 16;
         let mut px = vec![self.dyn_lut[0]; SG_W * ROWS];
-        for x in 0..SG_W {
-            let col = &self.sg_hist[x * ROWS..(x + 1) * ROWS];
+        for x0 in (0..SG_W).step_by(TILE) {
+            let x1 = (x0 + TILE).min(SG_W);
             for y in 0..ROWS {
-                px[y * SG_W + x] = self.dyn_lut[col[y] as usize];
+                let row = &mut px[y * SG_W + x0..y * SG_W + x1];
+                for (dx, out) in row.iter_mut().enumerate() {
+                    *out = self.dyn_lut[self.sg_hist[(x0 + dx) * ROWS + y] as usize];
+                }
             }
         }
         self.sg_tex.set(ColorImage::new([SG_W, ROWS], px), TextureOptions::LINEAR);
@@ -1013,6 +1025,7 @@ impl App {
             return;
         }
         self.an_seq = a.seq;
+        self.sh.an_pulled.store(a.seq, std::sync::atomic::Ordering::Relaxed);
         let d = &mut self.an;
         d.seq = a.seq;
         d.epoch = a.epoch;
@@ -1040,27 +1053,39 @@ impl App {
 
     fn ingest_columns(&mut self) {
         let cols = std::mem::take(&mut *self.sh.columns.lock());
+        // Several columns can arrive in one frame: they are uploaded to the textures in one piece each (a run of
+        // neighbouring columns of the spectrogram, a run of rows of the waterfall), not one call per column.
+        let (mut sg_x0, mut sg_n, mut sg_px) = (0usize, 0usize, Vec::<Color32>::new());
+        let (mut wf_y0, mut wf_n, mut wf_px) = (0usize, 0usize, Vec::<Color32>::new());
         for (ep, col) in cols {
             if ep != self.epoch {
                 if ep > self.epoch {
                     self.clear_history();
                     self.epoch = ep;
+                    (sg_n, wf_n) = (0, 0);
+                    sg_px.clear();
+                    wf_px.clear();
                 } else {
                     continue;
                 }
-            }
-            if self.recolor {
-                // Textures are about to be rebuilt wholesale; just record history.
             }
             let x = self.sg_head;
             for r in 0..ROWS {
                 self.sg_hist[x * ROWS + (ROWS - 1 - r)] = col[r];
             }
             if !self.recolor {
-                let px: Vec<Color32> = self.sg_hist[x * ROWS..(x + 1) * ROWS].iter().map(|&v| self.dyn_lut[v as usize]).collect();
-                self.sg_tex.set_partial([x, 0], ColorImage::new([1, ROWS], px), TextureOptions::LINEAR);
+                if sg_n == 0 {
+                    sg_x0 = x;
+                }
+                sg_px.extend(self.sg_hist[x * ROWS..(x + 1) * ROWS].iter().map(|&v| self.dyn_lut[v as usize]));
+                sg_n += 1;
             }
             self.sg_head = (x + 1) % SG_W;
+            if self.sg_head == 0 {
+                // the run ends at the right edge of the texture
+                self.upload_sg(sg_x0, sg_n, &mut sg_px);
+                sg_n = 0;
+            }
             if self.sg_back > 0 {
                 self.sg_back = (self.sg_back + 1).min(SG_W - self.sg_span);
             }
@@ -1068,19 +1093,46 @@ impl App {
             let y = self.wf_head;
             self.wf_hist[y * ROWS..(y + 1) * ROWS].copy_from_slice(&col);
             if !self.recolor {
-                let px: Vec<Color32> = col.iter().map(|&v| self.dyn_lut[v as usize]).collect();
-                self.wf_tex.set_partial([0, y], ColorImage::new([ROWS, 1], px), TextureOptions::LINEAR);
+                if wf_n == 0 {
+                    wf_y0 = y;
+                }
+                wf_px.extend(col.iter().map(|&v| self.dyn_lut[v as usize]));
+                wf_n += 1;
             }
             self.wf_head = (y + 1) % WF_H;
+            if self.wf_head == 0 {
+                self.upload_wf(wf_y0, wf_n, &mut wf_px);
+                wf_n = 0;
+            }
             if self.wf_back > 0 {
                 self.wf_back = (self.wf_back + 1).min(WF_H - self.wf_span);
             }
             self.d3.push(&col, self.p.cols_per_sec.min(self.p.update_hz));
         }
+        self.upload_sg(sg_x0, sg_n, &mut sg_px);
+        self.upload_wf(wf_y0, wf_n, &mut wf_px);
     }
 
-    pub fn nyq(&self) -> f32 {
-        if self.an.sr > 0.0 { self.an.sr * 0.5 } else { 24000.0 }
+    /// `n` columns of the spectrogram (column after column in `px`), starting at texture column `x0`.
+    fn upload_sg(&mut self, x0: usize, n: usize, px: &mut Vec<Color32>) {
+        if n > 0 && !self.recolor {
+            let mut img = vec![Color32::BLACK; n * ROWS];
+            for i in 0..n {
+                for y in 0..ROWS {
+                    img[y * n + i] = px[i * ROWS + y];
+                }
+            }
+            self.sg_tex.set_partial([x0, 0], ColorImage::new([n, ROWS], img), TextureOptions::LINEAR);
+        }
+        px.clear();
+    }
+
+    /// `n` rows of the waterfall (row after row in `px`), starting at texture row `y0`.
+    fn upload_wf(&mut self, y0: usize, n: usize, px: &mut Vec<Color32>) {
+        if n > 0 && !self.recolor {
+            self.wf_tex.set_partial([0, y0], ColorImage::new([ROWS, n], std::mem::take(px)), TextureOptions::LINEAR);
+        }
+        px.clear();
     }
 
     pub fn sr(&self) -> f32 {
@@ -1192,11 +1244,10 @@ impl App {
         let kc = (b.round() as usize).clamp(1, data.len() - 2);
         // On a peak, use the window's main-lobe shape to undo scalloping loss, so a 0 dBFS tone reads
         // 0 dBFS wherever it falls between bins. Elsewhere: 3-point parabola in dB.
-        if self.snap_peak && (b - kc as f32).abs() <= 0.5 {
-            if let Some(v) = dsp::corrected_peak_db(data, kc, &self.an.peak_tab) {
+        if self.snap_peak && (b - kc as f32).abs() <= 0.5
+            && let Some(v) = dsp::corrected_peak_db(data, kc, &self.an.peak_tab) {
                 return Some(v);
             }
-        }
         let (a, m, c) = (data[kc - 1], data[kc], data[kc + 1]);
         let t = b - kc as f32;
         Some(m + 0.5 * t * (c - a) + 0.5 * t * t * (a - 2.0 * m + c))
@@ -1354,7 +1405,7 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.cal.entry_val).speed(0.01));
             egui::ComboBox::from_id_salt("entryunit").width(60.0).selected_text(["Vpk", "Vrms", "dBV", "dBu"][self.cal.entry_unit as usize]).show_ui(ui, |ui| {
                 for (i, n) in ["Vpk", "Vrms", "dBV", "dBu"].iter().enumerate() {
-                    ui.selectable_value(&mut self.cal.entry_unit, i as u8, crate::lang::tr(*n));
+                    ui.selectable_value(&mut self.cal.entry_unit, i as u8, crate::lang::tr(n));
                 }
             });
             if crate::mapping::small_btn(ui, "L").clicked() {
@@ -1405,11 +1456,10 @@ impl App {
                 self.note = "Calibration failed: no usable signal (apply the reference first)".into();
             } else {
                 for c in 0..2 {
-                    if mask[c] {
-                        if let Some(v) = self.vpk_from_measurement(c) {
+                    if mask[c]
+                        && let Some(v) = self.vpk_from_measurement(c) {
                             self.set_vpk([c == 0, c == 1], v);
                         }
-                    }
                 }
                 self.note = "Calibrated from measurement".into();
             }
@@ -1529,7 +1579,7 @@ impl App {
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("snapsrc").width(70.0).selected_text(["Live", "Avg", "Max", "Min"][self.snap_src]).show_ui(ui, |ui| {
                 for (i, n) in ["Live", "Avg", "Max", "Min"].iter().enumerate() {
-                    ui.selectable_value(&mut self.snap_src, i, crate::lang::tr(*n));
+                    ui.selectable_value(&mut self.snap_src, i, crate::lang::tr(n));
                 }
             });
             if crate::mapping::btn(ui, "Capture").clicked() {
@@ -1609,13 +1659,12 @@ impl eframe::App for App {
             // On Windows main() already created the window at 75% of the screen, centred.
             let presized = crate::PRESIZED.load(std::sync::atomic::Ordering::Relaxed);
             if presized || ms.is_some() || self.size_frames > 20 {
-                if !presized {
-                    if let Some(ms) = ms {
+                if !presized
+                    && let Some(ms) = ms {
                         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(ms * 0.75));
                         // centring must wait until the new size has been applied
                         self.center_at = Some(self.size_frames + 6);
                     }
-                }
                 self.sized = true;
                 // windows are laid out only after the area has reached its final size
                 self.settle = if presized { 3 } else { 10 };
@@ -1698,13 +1747,12 @@ impl eframe::App for App {
         }
         self.options_ui(&ctx);
         self.track_layout();
-        if self.layout_ready {
-            if let Some(n) = self.layout_env.take() {
+        if self.layout_ready
+            && let Some(n) = self.layout_env.take() {
                 self.apply_preset_index(n);
             }
-        }
-        if let Some((path, after)) = self.shot_env.clone() {
-            if self.layout_ready && self.sh.t0.elapsed().as_secs_f32() > after {
+        if let Some((path, after)) = self.shot_env.clone()
+            && self.layout_ready && self.sh.t0.elapsed().as_secs_f32() > after {
                 match self.shot_state {
                     None => {
                         self.shot_state = Some(Instant::now());
@@ -1714,7 +1762,6 @@ impl eframe::App for App {
                     _ => {}
                 }
             }
-        }
         beat(self, 8);
         self.ms[WIN_COUNT] += 0.1 * (t_frame.elapsed().as_secs_f32() * 1000.0 - self.ms[WIN_COUNT]);
         if self.last_save_t.elapsed().as_secs_f32() > 2.0 {

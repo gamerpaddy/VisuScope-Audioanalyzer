@@ -23,13 +23,12 @@ impl Daw {
         self.checkpoint(p);
         let only = if any_sel { Some(&sel[..]) } else { None };
         // with a selected track, only that track is split
-        if only.is_none() {
-            if let Some(ti) = self.sel_track.and_then(|id| p.track_index(id)) {
+        if only.is_none()
+            && let Some(ti) = self.sel_track.and_then(|id| p.track_index(id)) {
                 let ids: Vec<u32> = p.tracks[ti].clips.iter().map(|c| c.id).collect();
                 p.split_at(t, Some(&ids));
                 return;
             }
-        }
         p.split_at(t, only);
     }
 
@@ -57,11 +56,10 @@ impl Daw {
         let shift = b - a;
         self.sel.clear();
         for id in ids {
-            if let Some(start) = p.find_clip(id).map(|(ti, ci)| p.tracks[ti].clips[ci].start) {
-                if let Some(n) = p.duplicate_clip(id, Some(start + shift)) {
+            if let Some(start) = p.find_clip(id).map(|(ti, ci)| p.tracks[ti].clips[ci].start)
+                && let Some(n) = p.duplicate_clip(id, Some(start + shift)) {
                     self.sel.insert(n);
                 }
-            }
         }
     }
 
@@ -217,11 +215,10 @@ impl Daw {
     /// Tracks chosen for merging: the ones selected with Ctrl + click plus the current track.
     pub(super) fn merge_ids(&self, p: &Project) -> Vec<u32> {
         let mut ids: Vec<u32> = self.sel_tracks.iter().copied().collect();
-        if let Some(t) = self.sel_track {
-            if !ids.contains(&t) && !ids.is_empty() {
+        if let Some(t) = self.sel_track
+            && !ids.contains(&t) && !ids.is_empty() {
                 ids.push(t);
             }
-        }
         ids.retain(|id| p.track_index(*id).is_some());
         ids
     }

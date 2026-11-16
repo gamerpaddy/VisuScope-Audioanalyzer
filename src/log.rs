@@ -19,13 +19,23 @@ pub fn init() {
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if std::fs::metadata(&p).map(|m| m.len() > 512 * 1024).unwrap_or(false) {
-        let _ = std::fs::remove_file(&p);
+    if std::fs::metadata(&p).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
+        let _ = std::fs::rename(&p, p.with_extension("log.old"));
     }
     log("---- start ----");
 }
 
+/// Once the file is this big it is moved to `visuscope.log.old` (one old file is kept), so a long session cannot fill the disk.
+const MAX_BYTES: u64 = 512 * 1024;
+
 pub fn log(msg: &str) {
+    static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 63 {
+        let p = path();
+        if std::fs::metadata(&p).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
+            let _ = std::fs::rename(&p, p.with_extension("log.old"));
+        }
+    }
     let up = START.get_or_init(Instant::now).elapsed().as_secs_f32();
     let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path()) {

@@ -209,18 +209,17 @@ fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<
     let fmt = cfg.sample_format();
     let mut sr = cfg.sample_rate();
     // test hook: after VISUSCOPE_SIM_CHANGE fires, report a different sample rate to the analysis side
-    if SIM_ACTIVE.load(Relaxed) {
-        if let Some(v) = std::env::var("VISUSCOPE_SIM_SR").ok().and_then(|s| s.parse::<u32>().ok()) {
+    if SIM_ACTIVE.load(Relaxed)
+        && let Some(v) = std::env::var("VISUSCOPE_SIM_SR").ok().and_then(|s| s.parse::<u32>().ok()) {
             sr = v;
         }
-    }
     let ch = cfg.channels();
-    let mut sc: cpal::StreamConfig = cfg.clone().into();
-    let default_buf = sc.buffer_size.clone();
+    let mut sc: cpal::StreamConfig = cfg.into();
+    let default_buf = sc.buffer_size;
     if let cpal::SupportedBufferSize::Range { min, max } = cfg.buffer_size() {
         sc.buffer_size = cpal::BufferSize::Fixed(std::env::var("VISUSCOPE_INPUT_BUFFER_FRAMES").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(2048).clamp(*min, *max));
     }
-    let mut sc_default = sc.clone();
+    let mut sc_default = sc;
     sc_default.buffer_size = default_buf;
 
     {

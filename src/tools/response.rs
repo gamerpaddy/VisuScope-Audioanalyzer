@@ -310,8 +310,8 @@ impl Tool for Response {
                 self.hist.remove(0);
             }
         }
-        if let Some(d) = &self.save {
-            if let Some(res) = d.take() {
+        if let Some(d) = &self.save
+            && let Some(res) = d.take() {
                 self.save = None;
                 if let (Some(path), Some(c)) = (res, &self.curve) {
                     let mut s = String::from("freq_hz,mag_db,phase_deg,group_delay_ms,coherence\n");
@@ -324,7 +324,6 @@ impl Tool for Response {
                     });
                 }
             }
-        }
     }
 
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
@@ -339,7 +338,7 @@ impl Tool for Response {
             ui.label(RichText::new(crate::lang::tr("Below")).small().weak());
             egui::ComboBox::from_id_salt("rsp_lo").width(92.0).selected_text(crate::lang::tr(LOWER[self.lower])).show_ui(ui, |ui| {
                 for (i, s) in LOWER.iter().enumerate() {
-                    ui.selectable_value(&mut self.lower, i, crate::lang::tr(*s));
+                    ui.selectable_value(&mut self.lower, i, crate::lang::tr(s));
                 }
             });
             ui.checkbox(&mut self.normalize, crate::lang::tr("Normalise")).on_hover_text(crate::lang::tr("Shift the magnitude so the 1 kHz value reads 0 dB"));
@@ -379,15 +378,14 @@ impl Tool for Response {
         cx.lib.ui(ui, self.curve.as_ref().map(|c| (c.f.clone(), c.raw.clone(), c.phase_deg.clone())));
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(crate::lang::tr("Spatial average")).small().weak()).on_hover_text(crate::lang::tr("Measure at several microphone positions and add each one: the average of the positions is stored as one trace, a better base for an equaliser than one position. (Average in the Traces window does the same, by power, for traces that are stored already.)"));
-            if ui.add_enabled(self.curve.is_some(), egui::Button::new(crate::lang::tr("Add position"))).clicked() {
-                if let Some(c) = &self.curve {
+            if ui.add_enabled(self.curve.is_some(), egui::Button::new(crate::lang::tr("Add position"))).clicked()
+                && let Some(c) = &self.curve {
                     if self.spat_f.len() != c.f.len() || self.spat_f.first() != c.f.first() || self.spat_f.last() != c.f.last() {
                         self.spat.clear();
                         self.spat_f = c.f.clone();
                     }
                     self.spat.push((c.raw.clone(), c.phase_deg.clone()));
                 }
-            }
             ui.label(format!("{}", self.spat.len()));
             ui.selectable_value(&mut self.spat_vec, false, crate::lang::tr("power")).on_hover_text(crate::lang::tr("Average of the powers: the phase is ignored"));
             ui.selectable_value(&mut self.spat_vec, true, crate::lang::tr("vector")).on_hover_text(crate::lang::tr("Average with the phase: what does not arrive in phase at all positions cancels"));
@@ -400,11 +398,10 @@ impl Tool for Response {
             }
         });
         // rebuild the display curve if there is a new result, a new smoothing or a new gate
-        if let Some(r) = &cx.sweep.result {
-            if self.key != (r.id, self.smooth, self.gate().to_bits()) {
+        if let Some(r) = &cx.sweep.result
+            && self.key != (r.id, self.smooth, self.gate().to_bits()) {
                 self.build(r);
             }
-        }
         // the gate on the impulse response: drag the line
         if let (true, Some(r)) = (self.gate_on, &cx.sweep.result) {
             let (resp, painter, rect) = super::plot::canvas_h(ui, 62.0);
@@ -543,7 +540,7 @@ impl Tool for Response {
             painter.text(Pos2::new(x + 4.0, pr.bottom() - 4.0), Align2::LEFT_BOTTOM, format!("gate {} ms: valid above {}", self.gate_ms, crate::app::fmt_hz(fv)), FontId::proportional(9.5), Color32::from_rgb(255, 214, 10));
         }
         if let Some(r) = &cx.sweep.result {
-            painter.text(Pos2::new(pr.left() + 6.0, rect.bottom() - 20.0 - if has_lower { 0.0 } else { 0.0 }), Align2::LEFT_BOTTOM, format!("{} run(s), input peak {:.1} dBFS, {} ms window", r.runs, r.capture_peak_db, r.params.resp_ms as i32), FontId::proportional(9.5), Color32::from_white_alpha(90));
+            painter.text(Pos2::new(pr.left() + 6.0, rect.bottom() - 20.0), Align2::LEFT_BOTTOM, format!("{} run(s), input peak {:.1} dBFS, {} ms window", r.runs, r.capture_peak_db, r.params.resp_ms as i32), FontId::proportional(9.5), Color32::from_white_alpha(90));
         }
     }
 

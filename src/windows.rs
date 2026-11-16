@@ -546,7 +546,7 @@ impl App {
         let mut best: Option<f32> = None;
         for &t in targets {
             let d = t - m;
-            if d.abs() < SNAP && best.map_or(true, |b| d.abs() < b.abs()) {
+            if d.abs() < SNAP && best.is_none_or(|b| d.abs() < b.abs()) {
                 best = Some(d);
             }
         }
@@ -837,7 +837,7 @@ impl App {
                 self.wins[i].rect = kept;
             }
             let r = self.shown_rect_of(i, area, kept);
-            let id = egui::Id::new(("visuscope_win", i));
+            let id = egui::Id::unique(("visuscope_win", i));
             let focused = self.focus == i;
             let collapsed = self.wins[i].collapsed;
             let maximized = self.wins[i].prev.is_some();
@@ -966,13 +966,12 @@ impl App {
         for (i, e) in events {
             if e.raise {
                 self.focus = i;
-                ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new(("visuscope_win", i))));
+                ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::unique(("visuscope_win", i))));
             }
-            if let Some(k) = e.drag {
-                if self.win_drag.is_none() {
+            if let Some(k) = e.drag
+                && self.win_drag.is_none() {
                     self.begin_drag(ctx, i, k, area);
                 }
-            }
             if e.collapse {
                 self.wins[i].collapsed = !self.wins[i].collapsed;
             }
@@ -992,7 +991,7 @@ impl App {
         }
         // snap guides and the dock preview while dragging
         if self.win_drag.is_some() {
-            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("snap_overlay")));
+            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("snap_overlay")));
             for &(vertical, pos) in &self.snap_guides {
                 let (a, b) = if vertical { (pos2(pos, area.min.y), pos2(pos, area.max.y)) } else { (pos2(area.min.x, pos), pos2(area.max.x, pos)) };
                 p.line_segment([a, b], Stroke::new(1.0, Color32::from_rgba_unmultiplied(110, 170, 255, 150)));

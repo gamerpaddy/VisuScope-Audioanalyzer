@@ -116,11 +116,10 @@ impl App {
         }
         let want = self.mon_on && !self.mon_feedback() && !self.graph_on;
         let dev = self.mon_output_id().unwrap_or_default();
-        if let Some((_, d)) = &self.mon_handle {
-            if !want || *d != dev {
+        if let Some((_, d)) = &self.mon_handle
+            && (!want || *d != dev) {
                 self.mon_handle = None;
             }
-        }
         if want && self.mon_handle.is_none() {
             self.sh.mon_q.lock().buf.clear();
             let h = crate::tools::monitor::start(self.sh.mon_q.clone(), self.mon_gain.clone(), Some(dev.clone()).filter(|d| !d.is_empty()), self.mon_status.clone());
@@ -444,7 +443,7 @@ impl App {
             let before = self.p.spectro_src;
             egui::ComboBox::from_id_salt("sgsrc").selected_text(["Left", "Right", "Max(L,R)", "Difference L - R"][self.p.spectro_src.min(3) as usize]).show_ui(ui, |ui| {
                 for (i, n) in ["Left", "Right", "Max(L,R)", "Difference L - R"].iter().enumerate() {
-                    ui.selectable_value(&mut self.p.spectro_src, i as u8, crate::lang::tr(*n));
+                    ui.selectable_value(&mut self.p.spectro_src, i as u8, crate::lang::tr(n));
                 }
             }).response.on_hover_text(crate::lang::tr("Difference: what is louder in the left than in the right channel is orange, the other way round blue. Put two signals on L and R to compare them (a before / after, two microphones)"));
             if self.p.spectro_src == 3 {

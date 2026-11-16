@@ -148,7 +148,7 @@ impl Tool for LiveTf {
             ui.label(RichText::new(crate::lang::tr("Below")).small().weak());
             egui::ComboBox::from_id_salt("tf_lo").width(92.0).selected_text(crate::lang::tr(LOWER[self.lower])).show_ui(ui, |ui| {
                 for (i, s) in LOWER.iter().enumerate() {
-                    ui.selectable_value(&mut self.lower, i, crate::lang::tr(*s));
+                    ui.selectable_value(&mut self.lower, i, crate::lang::tr(s));
                 }
             });
             ui.checkbox(&mut self.blank, crate::lang::tr("Blank")).on_hover_text(crate::lang::tr("Hide the trace where the coherence is low (no usable signal or too much noise)"));

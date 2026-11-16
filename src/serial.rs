@@ -59,11 +59,10 @@ pub fn from_text(text: &str) -> Cfg {
             Some(("eol", v)) => c.eol = v.parse::<usize>().unwrap_or(1).min(EOL.len() - 1),
             Some(("boot_ms", v)) => c.boot_ms = v.parse::<u32>().unwrap_or(2000).min(20000),
             Some(("cmd", v)) => {
-                if let Some((n, t)) = v.split_once('\t') {
-                    if c.cmds.len() < 64 {
+                if let Some((n, t)) = v.split_once('\t')
+                    && c.cmds.len() < 64 {
                         c.cmds.push((n.to_string(), t.to_string()));
                     }
-                }
             }
             _ => {}
         }
@@ -79,7 +78,7 @@ pub fn cfg() -> Cfg {
 pub fn set_cfg(c: Cfg) {
     let mut g = CFG.lock();
     if g.as_ref() != Some(&c) {
-        let _ = std::fs::write(file(), to_text(&c));
+        let _ = crate::fsutil::atomic_write(file(), to_text(&c));
         *g = Some(c);
     }
 }

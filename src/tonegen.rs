@@ -226,7 +226,7 @@ fn raw_noise(kind: NoiseKind, st: &mut NoiseState, rng: &mut Rng) -> f32 {
             let b = &mut st.b;
             b[0] = 0.99886 * b[0] + w * 0.0555179;
             b[1] = 0.99332 * b[1] + w * 0.0750759;
-            b[2] = 0.96900 * b[2] + w * 0.1538520;
+            b[2] = 0.96900 * b[2] + w * 0.153_852;
             b[3] = 0.86650 * b[3] + w * 0.3104856;
             b[4] = 0.55000 * b[4] + w * 0.5329522;
             b[5] = -0.7616 * b[5] - w * 0.0168980;
@@ -686,11 +686,10 @@ where
                 data.iter_mut().for_each(|d| *d = T::from_sample(0.0));
                 return;
             }
-            if let Some(g) = params.try_lock() {
-                if *g != last {
+            if let Some(g) = params.try_lock()
+                && *g != last {
                     last = g.clone();
                 }
-            }
             scratch.resize(data.len(), 0.0);
             st.render(&last, &mut scratch, ch);
             for (d, s) in data.iter_mut().zip(scratch.iter()) {

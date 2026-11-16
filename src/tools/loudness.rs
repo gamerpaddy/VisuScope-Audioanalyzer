@@ -186,11 +186,10 @@ impl Engine {
         }
         let st = if self.q.len() >= 30 { Some(mean(30)) } else { None };
         self.short = lufs(mean(30));
-        if let Some(s) = st {
-            if self.st_hist.len() < 1 << 20 {
+        if let Some(s) = st
+            && self.st_hist.len() < 1 << 20 {
                 self.st_hist.push(s as f32);
             }
-        }
         self.hist.push_back((self.momentary, self.short));
         if self.hist.len() > HIST_LEN {
             self.hist.pop_front();

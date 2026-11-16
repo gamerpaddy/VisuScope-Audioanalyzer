@@ -98,7 +98,7 @@ impl Plot {
     /// Vertical grid; log axes get decade lines, linear axes nice steps. `fmt` labels major lines.
     pub fn grid_x(&self, p: &Painter, fmt: &dyn Fn(f32) -> String) {
         let clip = p.with_clip_rect(self.r.expand(1.0));
-        let mut line = |x: f32, major: bool, label: bool| {
+        let line = |x: f32, major: bool, label: bool| {
             let px = self.tx(x);
             if px < self.r.left() - 0.5 || px > self.r.right() + 0.5 {
                 return;

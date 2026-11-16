@@ -115,8 +115,8 @@ fn phase_curve(ui: &mut Ui, n: &mut Node, z: f32) -> bool {
     if resp.double_clicked() {
         v = vec![0.0; CURVE_N];
         ch = true;
-    } else if resp.dragged_by(egui::PointerButton::Primary) || resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
+    } else if (resp.dragged_by(egui::PointerButton::Primary) || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos() {
             let prev = pos - ui.input(|i| i.pointer.delta());
             let (a, b) = (idx(prev), idx(pos));
             let (da, db) = (deg(prev), deg(pos));
@@ -127,7 +127,6 @@ fn phase_curve(ui: &mut Ui, n: &mut Node, z: f32) -> bool {
             }
             ch = true;
         }
-    }
     let pts: Vec<Pos2> = v.iter().enumerate().map(|(i, d)| pos2(xo(i as f32), yo(*d))).collect();
     p.add(egui::Shape::line(pts, Stroke::new(1.6, Color32::from_rgb(255, 170, 70))));
     if let Some(pos) = resp.hover_pos() {
@@ -262,7 +261,7 @@ fn param_port(ui: &Ui, z: f32, at: Pos2, node: NodeId, i: usize, range: (f32, f3
         rows.retain(|r| r.0 != (node, i));
         rows.push(((node, i), at));
     }
-    let r = ui.interact(Rect::from_center_size(at, vec2(12.0, 12.0) * z), ui.id().with(("ctlport", node, i)), Sense::click());
+    let r = ui.interact(Rect::from_center_size(at, vec2(12.0, 12.0) * z), ui.scope_id().with(("ctlport", node, i)), Sense::click());
     r.clone().on_hover_text(if followed { "Controlled by a signal (right-click: range, disconnect)" } else { "Control input: drag a wire here from the output of a node" });
     crate::slider::context_menu(&r, |ui| mod_menu_for(ui, node, i, range));
 }
@@ -616,30 +615,27 @@ impl Routing {
         }
         for (input, dev) in devs {
             let kind = if input { Kind::Input } else { Kind::Output };
-            if let Some(id) = self.g.nodes.iter().filter(|n| n.kind == kind).map(|n| n.id).min() {
-                if let Some(n) = self.g.node_mut(id) {
+            if let Some(id) = self.g.nodes.iter().filter(|n| n.kind == kind).map(|n| n.id).min()
+                && let Some(n) = self.g.node_mut(id) {
                     n.s = dev;
                     changed = true;
                 }
-            }
         }
         for (id, p, state) in togs {
-            if let Some(n) = self.g.node_mut(id) {
-                if n.kind.info().params.get(p).is_some_and(|d| d.choices.len() == 2) && p < n.p.len() {
+            if let Some(n) = self.g.node_mut(id)
+                && n.kind.info().params.get(p).is_some_and(|d| d.choices.len() == 2) && p < n.p.len() {
                     let cur = n.p[p] >= 0.5;
                     n.p[p] = if state.unwrap_or(!cur) { 1.0 } else { 0.0 };
                     changed = true;
                 }
-            }
         }
         for (id, k, state) in mutes {
-            if let Some(n) = self.g.node_mut(id) {
-                if n.kind == Kind::Mixer && k < MIX_MAX && 2 + MIX_MAX + k < n.p.len() {
+            if let Some(n) = self.g.node_mut(id)
+                && n.kind == Kind::Mixer && k < MIX_MAX && 2 + MIX_MAX + k < n.p.len() {
                     let cur = n.p[2 + MIX_MAX + k] >= 0.5;
                     n.p[2 + MIX_MAX + k] = if state.unwrap_or(!cur) { 1.0 } else { 0.0 };
                     changed = true;
                 }
-            }
         }
         if changed {
             self.push();
@@ -682,7 +678,7 @@ impl Routing {
         if let Some(d) = file().parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(file(), self.g.encode());
+        let _ = crate::fsutil::atomic_write(file(), self.g.encode());
         self.dirty = false;
         self.last_save = Instant::now();
     }
@@ -845,12 +841,11 @@ impl Routing {
                 }
             }
             Link::Insert(to, port) => {
-                if let Some(old) = self.g.edge_into(to, port).copied() {
-                    if info.inputs > 0 && info.outputs > 0 {
+                if let Some(old) = self.g.edge_into(to, port).copied()
+                    && info.inputs > 0 && info.outputs > 0 {
                         let _ = self.g.connect_from(old.from, old.from_port, id, 0);
                         let _ = self.g.connect(id, to, port);
                     }
-                }
             }
             _ => {}
         }
@@ -899,7 +894,7 @@ impl Routing {
         let pos = pos2(screen.x.clamp(canvas.left() + 4.0, (canvas.right() - win_w - 20.0).max(canvas.left() + 4.0)), screen.y.clamp(canvas.top() + 4.0, (canvas.bottom() - win_h - 50.0).max(canvas.top() + 4.0)));
         let mut close = esc;
         // own area per mode, so the size remembered from the other mode never carries over
-        let area = egui::Area::new(egui::Id::new(("routing_search", self.search_n, browse_now))).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+        let area = egui::Area::new(egui::Id::unique(("routing_search", self.search_n, browse_now))).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_width(win_w);
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -958,11 +953,10 @@ impl Routing {
                 });
             });
         });
-        if enter {
-            if let Some((_, e)) = hits.get(s.sel) {
+        if enter
+            && let Some((_, e)) = hits.get(s.sel) {
                 chosen = Some((*e).clone());
             }
-        }
         // a click outside closes it
         if ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer() {
             close = true;
@@ -1230,11 +1224,10 @@ impl Tool for Routing {
         let f: Vec<&str> = c.split('\t').collect();
         match f.as_slice() {
             ["setp", n, p, v] => {
-                if let (Ok(n), Ok(p), Ok(v)) = (n.parse::<NodeId>(), p.parse::<usize>(), v.parse::<f32>()) {
-                    if v.is_finite() {
+                if let (Ok(n), Ok(p), Ok(v)) = (n.parse::<NodeId>(), p.parse::<usize>(), v.parse::<f32>())
+                    && v.is_finite() {
                         self.bound_set.insert((n, p), v);
                     }
-                }
             }
             ["setdev", which, id] => {
                 if self.bound_dev.len() < 8 {
@@ -1335,8 +1328,8 @@ impl Tool for Routing {
         if let Some(chains) = xo {
             self.take_crossover(chains);
         }
-        if let Some((id, dlg)) = &self.ir_dlg {
-            if let Some(res) = dlg.take() {
+        if let Some((id, dlg)) = &self.ir_dlg
+            && let Some(res) = dlg.take() {
                 let id = *id;
                 self.ir_dlg = None;
                 if let (Some(path), Some(n)) = (res, self.g.node_mut(id)) {
@@ -1344,7 +1337,6 @@ impl Tool for Routing {
                     self.push();
                 }
             }
-        }
         if self.dirty && self.last_save.elapsed().as_secs_f32() > 1.0 {
             self.save_file();
         }
@@ -1444,11 +1436,10 @@ impl Tool for Routing {
             let cur = if self.rate_pref == 0 { "auto".to_string() } else { format!("{} Hz", self.rate_pref) };
             egui::ComboBox::from_id_salt("graph_rate").width(80.0).selected_text(cur).show_ui(ui, |ui| {
                 for r in [0u32, 44100, 48000, 88200, 96000, 176400, 192000] {
-                    if ui.selectable_value(&mut self.rate_pref, r, if r == 0 { "auto (first input)".to_string() } else { format!("{r} Hz") }).clicked() {
-                        if let Some(e) = &self.eng {
+                    if ui.selectable_value(&mut self.rate_pref, r, if r == 0 { "auto (first input)".to_string() } else { format!("{r} Hz") }).clicked()
+                        && let Some(e) = &self.eng {
                             e.rev.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                    }
                 }
             });
             if let Some(e) = &self.eng {

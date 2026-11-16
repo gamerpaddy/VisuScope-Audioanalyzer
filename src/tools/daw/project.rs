@@ -83,7 +83,7 @@ pub fn find_beat_grid(ch: &[Vec<f32>], sr: u32) -> Option<BeatGrid> {
         (0..n)
             .map(|i| {
                 acc += o[i];
-                if i >= 2 * w + 1 {
+                if i > 2 * w {
                     acc -= o[i - 2 * w - 1];
                 }
                 acc / (i + 1).min(2 * w + 1) as f32
@@ -851,7 +851,7 @@ impl Project {
     pub fn split_at(&mut self, t: i64, only: Option<&[u32]>) -> usize {
         let mut made = 0;
         for ti in 0..self.tracks.len() {
-            let ids: Vec<u32> = self.tracks[ti].clips.iter().filter(|c| c.start < t && c.end() > t && only.map_or(true, |o| o.contains(&c.id))).map(|c| c.id).collect();
+            let ids: Vec<u32> = self.tracks[ti].clips.iter().filter(|c| c.start < t && c.end() > t && only.is_none_or(|o| o.contains(&c.id))).map(|c| c.id).collect();
             for id in ids {
                 let nid = self.next();
                 let ci = self.tracks[ti].clips.iter().position(|c| c.id == id).unwrap();

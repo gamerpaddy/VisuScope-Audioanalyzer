@@ -155,13 +155,12 @@ impl TfEngine {
 
         if tp.auto_delay && self.cnt >= 3 && self.est_t.elapsed() >= self.est_every {
             self.est_t = Instant::now();
-            if let Some(r) = self.residual_delay(sr as f32) {
-                if r.abs() >= 1.5 {
+            if let Some(r) = self.residual_delay(sr as f32)
+                && r.abs() >= 1.5 {
                     self.delay = (self.delay + r).clamp(-(n as f32) * 0.45, n as f32 * 0.45);
                     self.clear_avg();
                     return;
                 }
-            }
         }
 
         // publish

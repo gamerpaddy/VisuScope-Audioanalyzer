@@ -104,7 +104,7 @@ impl Tool for Peaks {
             ui.checkbox(&mut self.show, crate::lang::tr("Mark on spectrum"));
             egui::ComboBox::from_id_salt("pk_label").width(130.0).selected_text(crate::lang::tr(LABELS[self.label])).show_ui(ui, |ui| {
                 for (i, l) in LABELS.iter().enumerate() {
-                    ui.selectable_value(&mut self.label, i, crate::lang::tr(*l));
+                    ui.selectable_value(&mut self.label, i, crate::lang::tr(l));
                 }
             });
         });

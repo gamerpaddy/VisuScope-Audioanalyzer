@@ -145,8 +145,8 @@ fn take(p: &mut Option<dialogs::Pending>) -> Option<std::path::PathBuf> {
 
 impl Tool for EqTool {
     fn update(&mut self, cx: &mut Ctx, visible: bool) {
-        for (kind, path) in (0..5).map(|k| (k, take(&mut self.saves[k]))).collect::<Vec<_>>() {
-            let Some(path) = path else { continue };
+        for kind in 0..5 {
+            let Some(path) = take(&mut self.saves[kind]) else { continue };
             let sr = self.design_sr();
             let taps = TAPS[self.taps];
             let res = match kind {

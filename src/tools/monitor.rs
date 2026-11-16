@@ -244,7 +244,7 @@ pub fn start(queue: Arc<Mutex<Queue>>, gain: Arc<AtomicU32>, dev_id: Option<Stri
                     }
                     Err(e) => {
                         crate::log::log(&format!("monitor: build failed: {e}"));
-                        *status.lock() = format!("{e}");
+                        *status.lock() = e.to_string();
                         for _ in 0..20 {
                             if stop2.load(Relaxed) {
                                 break;
@@ -438,11 +438,10 @@ mod tests {
         while t < secs {
             // the source delivers what is due (a stall holds it back)
             loop {
-                if let Some((a, d)) = stall {
-                    if next_chunk >= a && next_chunk < a + d {
+                if let Some((a, d)) = stall
+                    && next_chunk >= a && next_chunk < a + d {
                         next_chunk = a + d;
                     }
-                }
                 if due == 0.0 {
                     due = next_chunk + rnd() * jitter_ms / 1000.0;
                 }

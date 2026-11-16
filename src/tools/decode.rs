@@ -1,7 +1,9 @@
 //! Opens most audio files: WAV through the built-in reader, everything else through Symphonia
 //! (MP3, FLAC, Ogg Vorbis, AAC / M4A / MP4, ALAC, MKV / WebM audio, AIFF-less PCM containers).
 
-use super::wavio::{self, WavData};
+use super::wavio::{self};
+#[cfg(test)]
+use super::wavio::WavData;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
@@ -13,6 +15,7 @@ use symphonia::core::probe::Hint;
 /// File extensions offered by the open dialog.
 pub const EXTENSIONS: &[&str] = &["wav", "flac", "mp3", "ogg", "oga", "m4a", "mp4", "aac", "alac", "mkv", "mka", "webm", "caf", "w64"];
 
+#[cfg(test)]
 pub fn read(path: &std::path::Path) -> Result<WavData, String> {
     read_all(path).map(|(sr, ch)| WavData::from_channels(sr, ch))
 }
@@ -66,7 +69,7 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<(u32, Vec<Vec<f32>>), Str
             Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(Error::ResetRequired) => break,
             Err(e) => {
-                if out.first().map_or(true, |c| c.is_empty()) {
+                if out.first().is_none_or(|c| c.is_empty()) {
                     return Err(format!("read error: {e}"));
                 }
                 break;
@@ -87,7 +90,7 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<(u32, Vec<Vec<f32>>), Str
                 b.copy_interleaved_ref(audio);
                 if out.len() != chans {
                     // a stream that changes its channel count mid-file: keep what we have, start over only if empty
-                    if out.first().map_or(true, |c| c.is_empty()) {
+                    if out.first().is_none_or(|c| c.is_empty()) {
                         out = vec![Vec::new(); chans];
                     } else {
                         continue;
@@ -105,14 +108,14 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<(u32, Vec<Vec<f32>>), Str
             // a corrupt packet: skip it
             Err(Error::DecodeError(_)) => continue,
             Err(e) => {
-                if out.first().map_or(true, |c| c.is_empty()) {
+                if out.first().is_none_or(|c| c.is_empty()) {
                     return Err(format!("decode error: {e}"));
                 }
                 break;
             }
         }
     }
-    if out.first().map_or(true, |c| c.is_empty()) || sr == 0 {
+    if out.first().is_none_or(|c| c.is_empty()) || sr == 0 {
         return Err("no audio decoded".into());
     }
     let _ = chans;

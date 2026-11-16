@@ -38,14 +38,13 @@ impl Daw {
                     self.play_start(cx);
                 }
             }
-            if let Some(out) = self.an_out.clone() {
-                if crate::mapping::small_btn(ui, "Store spectrum as trace").on_hover_text(crate::lang::tr("Add the averaged spectrum to the trace library (Response, Transfer and EQ windows can use it)")).clicked() {
+            if let Some(out) = self.an_out.clone()
+                && crate::mapping::small_btn(ui, "Store spectrum as trace").on_hover_text(crate::lang::tr("Add the averaged spectrum to the trace library (Response, Transfer and EQ windows can use it)")).clicked() {
                     let name = format!("Timeline {what} ({})", src);
                     let avg: Vec<f32> = (0..out.f.len()).map(|i| 10.0 * (0.5 * (10f32.powf(out.db[0][i] / 10.0) + 10f32.powf(out.db[1][i] / 10.0))).max(1e-12).log10()).collect();
                     cx.lib.add(Some(name), out.f.clone(), avg, Vec::new());
                     cx.req.note = Some("Spectrum stored in the trace library".into());
                 }
-            }
             if self.an_running {
                 ui.spinner();
             }
@@ -189,15 +188,14 @@ impl Daw {
             pl.line(&painter, out.f.iter().copied().zip(out.db[c].iter().copied()), Stroke::new(1.3, col.gamma_multiply(0.9)));
         }
         painter.text(rect.left_top() + vec2(48.0, 6.0), Align2::LEFT_TOP, "Average spectrum (dBFS)", FontId::proportional(9.5), Color32::from_rgb(130, 142, 160));
-        if let Some(h) = resp.hover_pos() {
-            if plot_r.contains(h) {
+        if let Some(h) = resp.hover_pos()
+            && plot_r.contains(h) {
                 let f = pl.fx(h.x);
                 if let Some(i) = out.f.iter().position(|&x| x >= f) {
                     painter.line_segment([pos2(h.x, plot_r.top()), pos2(h.x, plot_r.bottom())], Stroke::new(1.0, Color32::from_white_alpha(50)));
                     pl.label(&painter, pos2(plot_r.right() - 4.0, plot_r.top() + 4.0), format!("{}Hz  L {:.1}  R {:.1}", hz_label(out.f[i]), out.db[0][i], out.db[1][i]), Color32::WHITE, Align2::RIGHT_TOP);
                 }
             }
-        }
     }
 
     pub(super) fn spectrogram_view(&mut self, ui: &mut Ui, out: &Arc<AnalysisOut>, r: Rect, range: (i64, i64), sr: u32) {

@@ -32,7 +32,7 @@ pub fn probe_all() -> Vec<DevEx> {
             if crate::asio::is_asio(&d.id) {
                 // an ASIO driver is opened once to find out what it has (the answer is kept)
                 let i = crate::asio::probe(crate::asio::name_of(&d.id))?;
-                return (i.n_in > 0).then(|| DevEx { id: d.id, label: d.label, ch: i.n_in, sr: i.sr });
+                return (i.n_in > 0).then_some(DevEx { id: d.id, label: d.label, ch: i.n_in, sr: i.sr });
             }
             let did: cpal::DeviceId = d.id.parse().ok()?;
             let dev = host.device_by_id(&did)?;
@@ -144,11 +144,10 @@ impl Capture {
             pk[2] = pk[2].max(m.abs());
             if let Some(g) = g.as_mut() {
                 for (k, (on, v)) in [(n0, x), (n1, y), (n2, m)].into_iter().enumerate() {
-                    if on {
-                        if let Some(lane) = g.get_mut(k) {
+                    if on
+                        && let Some(lane) = g.get_mut(k) {
                             lane.push(v);
                         }
-                    }
                 }
             }
         }
@@ -307,7 +306,7 @@ fn run(id: String, buf: Arc<Buf>, stop: Arc<AtomicBool>, info: Arc<Mutex<Option<
             }
             Err(e) => {
                 crate::log::log(&format!("daw capture: {e}"));
-                *status.lock() = format!("{e}");
+                *status.lock() = e.to_string();
                 for _ in 0..25 {
                     if stop.load(Relaxed) {
                         break;
@@ -423,33 +422,27 @@ where
                     let v = f32::from_sample(*s);
                     peak[c] = peak[c].max(v.abs());
                     mix += v;
-                    if let Some(g) = guard.as_mut() {
-                        if buf.need[c].load(Relaxed) {
-                            if let Some(lane) = g.get_mut(c) {
+                    if let Some(g) = guard.as_mut()
+                        && buf.need[c].load(Relaxed)
+                            && let Some(lane) = g.get_mut(c) {
                                 lane.push(v);
                             }
-                        }
-                    }
-                    if let Some(t) = tguard.as_mut() {
-                        if tneed[c] {
+                    if let Some(t) = tguard.as_mut()
+                        && tneed[c] {
                             t[c].push(v);
                         }
-                    }
                 }
                 let mix = mix / lanes as f32;
                 peak[lanes] = peak[lanes].max(mix.abs());
-                if let Some(g) = guard.as_mut() {
-                    if need.contains(&lanes) {
-                        if let Some(lane) = g.get_mut(lanes) {
+                if let Some(g) = guard.as_mut()
+                    && need.contains(&lanes)
+                        && let Some(lane) = g.get_mut(lanes) {
                             lane.push(mix);
                         }
-                    }
-                }
-                if let Some(t) = tguard.as_mut() {
-                    if tneed[lanes] {
+                if let Some(t) = tguard.as_mut()
+                    && tneed[lanes] {
                         t[lanes].push(mix);
                     }
-                }
                 n += 1;
             }
             // nobody reads the tap (graph stalled): do not grow without bound

@@ -108,17 +108,15 @@ impl App {
 
     /// Every frame (from the assistant's tick): a chosen calibration file arrives.
     pub fn wizard_poll(&mut self) {
-        if let Some(w) = self.assist.wiz.as_mut() {
-            if let Some((slot, d)) = &w.cal_dlg {
-                if let Some(res) = d.take() {
+        if let Some(w) = self.assist.wiz.as_mut()
+            && let Some((slot, d)) = &w.cal_dlg
+                && let Some(res) = d.take() {
                     let slot = *slot;
                     w.cal_dlg = None;
                     if let Some(p) = res {
                         w.cal[slot] = Some(p);
                     }
                 }
-            }
-        }
     }
 
     /// The plan the walk-through ends in: the chosen devices and values, in the order they are applied.
@@ -150,11 +148,10 @@ impl App {
             p.actions.push(Action::Monitor);
         }
         // 4. the routing patch, 5. the windows and their layout
-        if w.use_preset {
-            if let Some(pr) = w.plan.preset {
+        if w.use_preset
+            && let Some(pr) = w.plan.preset {
                 p.actions.push(Action::Preset(pr));
             }
-        }
         if let Some(a) = w.plan.actions.iter().find(|a| matches!(a, Action::Windows(_))) {
             p.actions.push(a.clone());
         }
@@ -234,7 +231,7 @@ impl App {
                     ui.label(RichText::new(crate::lang::tr("Distortion measurement")).strong());
                     egui::ComboBox::from_id_salt("wz_dist").selected_text(["THD vs frequency", "THD vs level", "IMD vs level", "Swept harmonics (from the sweep)"][(*m).min(3)]).show_ui(ui, |ui| {
                         for (i, n) in ["THD vs frequency", "THD vs level", "IMD vs level", "Swept harmonics (from the sweep)"].iter().enumerate() {
-                            ui.selectable_value(m, i, crate::lang::tr(*n));
+                            ui.selectable_value(m, i, crate::lang::tr(n));
                         }
                     });
                 }

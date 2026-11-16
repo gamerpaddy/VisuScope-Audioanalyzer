@@ -1026,5 +1026,5 @@ Resume	Fortsetzen
 Turntable	Drehteller
 Measure all	Alle messen
 Stop	Stopp
-Response time	Ansprechzeit
 Serial	Seriell
+Rate	Abtastrate

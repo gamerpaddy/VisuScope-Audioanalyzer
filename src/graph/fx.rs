@@ -781,7 +781,7 @@ impl NoiseRedUnit {
             }
             self.ch[0].pos = (self.ch[0].pos + 1) % NR_N;
             self.ch[1].pos = self.ch[0].pos;
-            if self.ch[0].pos % NR_HOP == 0 {
+            if self.ch[0].pos.is_multiple_of(NR_HOP) {
                 self.frame(0);
                 self.frame(1);
             }

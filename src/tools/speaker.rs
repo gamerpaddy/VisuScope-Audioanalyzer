@@ -20,7 +20,7 @@ fn bw(n: usize, x: f32) -> C {
     let one = C::new(1.0, 0.0);
     let d = match n {
         1 => s + one,
-        2 => s * s + s * 1.414_213_6 + one,
+        2 => s * s + s * std::f32::consts::SQRT_2 + one,
         3 => (s + one) * (s * s + s + one),
         _ => (s * s + s * 0.765_366_9 + one) * (s * s + s * 1.847_759 + one),
     };
@@ -286,8 +286,8 @@ impl Speaker {
     fn box_ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         let last = *super::ts::LAST.lock();
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(last.is_some(), egui::Button::new(crate::lang::tr("Take from Impedance"))).on_hover_text(crate::lang::tr("Use the Thiele-Small parameters the Impedance window worked out (Fs, Qts, Qes, and Vas and the cone area when it has them). Measure the driver there first; this tab only simulates")).clicked() {
-                if let Some((a, m, sd)) = last {
+            if ui.add_enabled(last.is_some(), egui::Button::new(crate::lang::tr("Take from Impedance"))).on_hover_text(crate::lang::tr("Use the Thiele-Small parameters the Impedance window worked out (Fs, Qts, Qes, and Vas and the cone area when it has them). Measure the driver there first; this tab only simulates")).clicked()
+                && let Some((a, m, sd)) = last {
                     self.drv.fs = a.fs;
                     self.drv.qts = a.qts;
                     self.drv.qes = a.qes;
@@ -297,7 +297,6 @@ impl Speaker {
                         self.drv.vas_l = m.vas * 1e3;
                     }
                 }
-            }
             let d = &mut self.drv;
             ui.add(egui::DragValue::new(&mut d.fs).range(5.0..=2000.0).speed(0.2).prefix(crate::lang::tr("Fs ")).suffix(crate::lang::tr(" Hz")));
             ui.add(egui::DragValue::new(&mut d.qts).range(0.05..=3.0).speed(0.005).prefix(crate::lang::tr("Qts ")));
@@ -399,7 +398,7 @@ impl Speaker {
                         ui.label(RichText::new(if hp { "high-pass" } else { "low-pass" }).small().weak());
                         egui::ComboBox::from_id_salt(format!("spk_xo_{k}_{hp}")).width(118.0).selected_text(crate::lang::tr(XO[*kind])).show_ui(ui, |ui| {
                             for (i, n) in XO.iter().enumerate() {
-                                ui.selectable_value(kind, i, crate::lang::tr(*n));
+                                ui.selectable_value(kind, i, crate::lang::tr(n));
                             }
                         });
                         ui.add_enabled(*kind > 0, egui::DragValue::new(fc).range(10.0..=40000.0).speed(2.0).suffix(crate::lang::tr(" Hz")));
@@ -700,13 +699,12 @@ impl Speaker {
 impl Tool for Speaker {
     fn update(&mut self, cx: &mut Ctx, _visible: bool) {
         // the table has had its time: sweep
-        if let Some((angle, since)) = self.turning {
-            if since.elapsed().as_secs_f32() >= self.settle && !cx.sweep.busy() {
+        if let Some((angle, since)) = self.turning
+            && since.elapsed().as_secs_f32() >= self.settle && !cx.sweep.busy() {
                 self.turning = None;
                 cx.sweep.start();
                 self.pending = Some((angle, cx.sweep.result.as_ref().map(|r| r.id).unwrap_or(0)));
             }
-        }
         if let Some((angle, old)) = self.pending {
             if let Some(r) = cx.sweep.result.as_ref().filter(|r| r.id != old) {
                 let (f, mag, ph) = super::response::curve_of(r);
@@ -735,7 +733,7 @@ impl Tool for Speaker {
     fn ui(&mut self, ui: &mut Ui, cx: &mut Ctx) {
         ui.horizontal(|ui| {
             for (i, t) in TABS.iter().enumerate() {
-                ui.selectable_value(&mut self.tab, i, crate::lang::tr(*t));
+                ui.selectable_value(&mut self.tab, i, crate::lang::tr(t));
             }
         });
         ui.separator();

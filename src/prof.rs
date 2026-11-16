@@ -155,7 +155,6 @@ pub struct State {
     pub events: VecDeque<Event>,
     pub counters_ok: bool,
     pub total_hiccups: u32,
-    pub cpu_name: String,
 }
 
 /// Safety buffer in milliseconds (Options): extra audio the outputs and the routing graph hold back so that short
@@ -182,6 +181,13 @@ pub fn state() -> &'static Mutex<State> {
 }
 
 static STARTED: AtomicBool = AtomicBool::new(false);
+/// The Profiler window is open: probe the scheduler often. Otherwise a few times a second is enough to notice a stall
+/// for the status bar, and the program does not wake a thread 250 times a second for nothing.
+static DETAILED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_detailed(on: bool) {
+    DETAILED.store(on, Relaxed);
+}
 static WAKE_MAX_US: AtomicU64 = AtomicU64::new(0);
 static LATE2: AtomicU32 = AtomicU32::new(0);
 static LATE5: AtomicU32 = AtomicU32::new(0);
@@ -210,7 +216,7 @@ pub fn start() {
                 LATE10.fetch_add(1, Relaxed);
             }
             // a few hundred probes a second are plenty to see a stall, and every wake-up costs power
-            std::thread::sleep(Duration::from_millis(3));
+            std::thread::sleep(Duration::from_millis(if DETAILED.load(Relaxed) { 3 } else { 47 }));
         })
         .ok();
     std::thread::Builder::new().name("prof-sample".into()).spawn(sample_loop).ok();
@@ -238,8 +244,8 @@ fn sample_loop() {
         let esr = C.eng_sr.load(Relaxed);
         s.eng_block_ms = if esr > 0 { s.eng_block_frames * 1000.0 / esr as f32 } else { 0.0 };
         C.block_avg_ms.store(s.eng_block_ms.to_bits(), Relaxed);
-        if let Some(c) = sys.as_mut() {
-            if let Some(v) = c.read() {
+        if let Some(c) = sys.as_mut()
+            && let Some(v) = c.read() {
                 s.dpc = v.dpc;
                 s.dpc_worst = v.dpc_worst;
                 s.intr = v.intr;
@@ -249,7 +255,6 @@ fn sample_loop() {
                 s.ctx_rate = v.ctx_rate;
                 s.queue = v.queue;
             }
-        }
         // hiccups: something that would be heard
         let (xr, uf, late) = (C.xruns.load(Relaxed), C.out_underruns.load(Relaxed), C.eng_late.load(Relaxed));
         let (d_xr, d_uf, d_late) = (xr.wrapping_sub(last_xr), uf.wrapping_sub(last_uf), late.wrapping_sub(last_late));

@@ -64,7 +64,6 @@ const fn c(name: &'static str, def: usize, choices: &'static [&'static str]) -> 
 }
 
 pub const EQ_TYPES: &[&str] = &["Bell", "Low shelf", "High shelf", "High-pass", "Low-pass", "Notch", "Off"];
-pub const EQ_BANDS: usize = 4;
 pub const MIX_MAX: usize = 8;
 
 const P_NONE: &[ParamDef] = &[];
@@ -262,6 +261,7 @@ impl Kind {
         Kind::ALL.into_iter().find(|k| k.code() == s)
     }
 
+    #[cfg(test)]
     pub fn is_source(self) -> bool {
         self.info().inputs == 0
     }
@@ -409,11 +409,10 @@ impl Graph {
 
     /// Add a node; there is only one analyzer, so a second request returns the existing one.
     pub fn add(&mut self, kind: Kind, x: f32, y: f32) -> NodeId {
-        if kind == Kind::Analyzer {
-            if let Some(n) = self.nodes.iter().find(|n| n.kind == Kind::Analyzer) {
+        if kind == Kind::Analyzer
+            && let Some(n) = self.nodes.iter().find(|n| n.kind == Kind::Analyzer) {
                 return n.id;
             }
-        }
         self.next += 1;
         let id = self.next;
         self.nodes.push(Node::new(id, kind, x, y));
@@ -424,10 +423,6 @@ impl Graph {
         self.nodes.retain(|n| n.id != id);
         self.edges.retain(|e| e.from != id && e.to != id);
         self.mods.retain(|m| m.node != id && m.src != id);
-    }
-
-    pub fn modulation(&self, node: NodeId, param: usize) -> Option<&Modulation> {
-        self.mods.iter().find(|m| m.node == node && m.param == param)
     }
 
     /// Let a parameter follow a signal (replaces what it followed before). Refused for a source without an output, the node
@@ -611,12 +606,11 @@ impl Graph {
             if !ready {
                 let ids: Vec<NodeId> = self.nodes.iter().filter(|n| n.kind == Kind::Output && n.s == out_id).map(|n| n.id).collect();
                 for id in ids {
-                    if let Some(n) = self.node_mut(id) {
-                        if n.p.len() > 1 && n.p[1] < 0.5 {
+                    if let Some(n) = self.node_mut(id)
+                        && n.p.len() > 1 && n.p[1] < 0.5 {
                             n.p[1] = 1.0;
                             muted += 1;
                         }
-                    }
                 }
                 let g = self.add(Kind::Generator, 40.0, below);
                 let o = self.add(Kind::Output, 360.0, below);
@@ -731,19 +725,17 @@ impl Graph {
                 g.nodes.push(n);
             } else if let Some(r) = l.strip_prefix("mod ") {
                 let f: Vec<&str> = r.split('|').collect();
-                if f.len() >= 8 {
-                    if let (Ok(node), Ok(param), Ok(src), Ok(a), Ok(b), Ok(c), Ok(d)) = (f[0].parse(), f[1].parse(), f[2].parse(), f[3].parse(), f[4].parse(), f[5].parse(), f[6].parse()) {
+                if f.len() >= 8
+                    && let (Ok(node), Ok(param), Ok(src), Ok(a), Ok(b), Ok(c), Ok(d)) = (f[0].parse(), f[1].parse(), f[2].parse(), f[3].parse(), f[4].parse(), f[5].parse(), f[6].parse()) {
                         // (after the nodes: a line that comes before its nodes is dropped)
                         let _ = g.set_modulation(Modulation { node, param, src, in_lo: a, in_hi: b, out_lo: c, out_hi: d, log: f[7] == "1" });
                     }
-                }
             } else if let Some(r) = l.strip_prefix("edge ") {
                 let f: Vec<&str> = r.split('|').collect();
-                if f.len() >= 3 {
-                    if let (Ok(a), Ok(b), Ok(p)) = (f[0].parse(), f[1].parse(), f[2].parse::<u8>()) {
+                if f.len() >= 3
+                    && let (Ok(a), Ok(b), Ok(p)) = (f[0].parse(), f[1].parse(), f[2].parse::<u8>()) {
                         let _ = g.connect_from(a, f.get(3).and_then(|v| v.parse().ok()).unwrap_or(0), b, p);
                     }
-                }
             }
         }
         Some(g)

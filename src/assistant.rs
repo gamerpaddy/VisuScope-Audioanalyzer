@@ -683,19 +683,17 @@ impl App {
                 self.assist.text = t;
                 self.assist_plan();
                 // (VISUSCOPE_ASSIST_WALK=<step> starts the walk-through at that step: screenshots)
-                if let Some(step) = std::env::var("VISUSCOPE_ASSIST_WALK").ok().and_then(|v| v.parse::<usize>().ok()) {
-                    if let Some(p) = self.assist.plan.clone() {
+                if let Some(step) = std::env::var("VISUSCOPE_ASSIST_WALK").ok().and_then(|v| v.parse::<usize>().ok())
+                    && let Some(p) = self.assist.plan.clone() {
                         self.wizard_start(p);
                         if let Some(w) = self.assist.wiz.as_mut() {
                             w.at = step.min(w.steps.len() - 1);
                         }
                     }
-                }
-                if std::env::var_os("VISUSCOPE_ASSIST_RUN").is_some() {
-                    if let Some(p) = self.assist.plan.clone() {
+                if std::env::var_os("VISUSCOPE_ASSIST_RUN").is_some()
+                    && let Some(p) = self.assist.plan.clone() {
                         self.assist_apply(&p, false);
                     }
-                }
             }
         }
         if let Some((run, t0)) = self.assist.active {
@@ -843,11 +841,10 @@ impl App {
         if do_plan {
             self.assist_plan();
         }
-        if walk {
-            if let Some(p) = self.assist.plan.clone() {
+        if walk
+            && let Some(p) = self.assist.plan.clone() {
                 self.wizard_start(p);
             }
-        }
         if let (Some(start), Some(p)) = (apply, self.assist.plan.clone()) {
             self.assist_apply(&p, start);
         }

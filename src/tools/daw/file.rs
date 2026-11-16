@@ -140,12 +140,11 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
     for l in text.lines() {
         if let Some(r) = l.strip_prefix("src ") {
             let f: Vec<&str> = r.split('|').collect();
-            if f.len() >= 3 {
-                if let Ok(id) = f[0].parse::<u32>() {
+            if f.len() >= 3
+                && let Ok(id) = f[0].parse::<u32>() {
                     files.insert(id, (base.join(f[1]), unesc(f[2])));
                     max_src = max_src.max(id);
                 }
-            }
         }
     }
     for l in lines {
@@ -158,41 +157,34 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                 proj.tracks[ti].draw = true;
             }
         } else if let Some(r) = l.strip_prefix("curve ") {
-            if let Some((id, pts)) = r.split_once('|') {
-                if let Some(ti) = id.trim().parse::<u32>().ok().and_then(|id| proj.track_index(id)) {
+            if let Some((id, pts)) = r.split_once('|')
+                && let Some(ti) = id.trim().parse::<u32>().ok().and_then(|id| proj.track_index(id)) {
                     for pt in pts.split(',') {
-                        if let Some((fr, v)) = pt.split_once(':') {
-                            if let (Ok(fr), Ok(v)) = (fr.trim().parse::<i64>(), v.trim().parse::<f32>()) {
-                                if v.is_finite() && fr >= 0 {
+                        if let Some((fr, v)) = pt.split_once(':')
+                            && let (Ok(fr), Ok(v)) = (fr.trim().parse::<i64>(), v.trim().parse::<f32>())
+                                && v.is_finite() && fr >= 0 {
                                     proj.tracks[ti].curve_set(fr.min(i64::MAX / 4), v);
                                 }
-                            }
-                        }
                     }
                 }
-            }
         } else if let Some(r) = l.strip_prefix("auto ") {
-            if let Some((id, pts)) = r.split_once('|') {
-                if let Some(ti) = id.trim().parse::<u32>().ok().and_then(|id| proj.track_index(id)) {
+            if let Some((id, pts)) = r.split_once('|')
+                && let Some(ti) = id.trim().parse::<u32>().ok().and_then(|id| proj.track_index(id)) {
                     for pt in pts.split(',') {
-                        if let Some((fr, db)) = pt.split_once(':') {
-                            if let (Ok(fr), Ok(db)) = (fr.trim().parse::<i64>(), db.trim().parse::<f32>()) {
-                                if db.is_finite() && fr >= 0 {
+                        if let Some((fr, db)) = pt.split_once(':')
+                            && let (Ok(fr), Ok(db)) = (fr.trim().parse::<i64>(), db.trim().parse::<f32>())
+                                && db.is_finite() && fr >= 0 {
                                     proj.tracks[ti].auto_set(fr.min(i64::MAX / 4), db);
                                 }
-                            }
-                        }
                     }
                 }
-            }
         } else if let Some(r) = l.strip_prefix("mark ") {
             let f: Vec<&str> = r.split('|').collect();
-            if let (true, Ok(id), Ok(at), Ok(len)) = (f.len() >= 4, f[0].parse::<u32>(), f.get(1).unwrap_or(&"").parse::<i64>(), f.get(2).unwrap_or(&"").parse::<i64>()) {
-                if proj.marks.len() < Project::MAX_MARKS {
+            if let (true, Ok(id), Ok(at), Ok(len)) = (f.len() >= 4, f[0].parse::<u32>(), f.get(1).unwrap_or(&"").parse::<i64>(), f.get(2).unwrap_or(&"").parse::<i64>())
+                && proj.marks.len() < Project::MAX_MARKS {
                     proj.reserve_id(id);
                     proj.marks.push(Mark { id, at: at.clamp(0, i64::MAX / 4), len: len.clamp(0, i64::MAX / 4), name: unesc(f[3]) });
                 }
-            }
         } else if let Some(r) = l.strip_prefix("track ") {
             let f: Vec<&str> = r.split('|').collect();
             if f.len() < 10 {
