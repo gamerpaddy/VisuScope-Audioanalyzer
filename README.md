@@ -69,7 +69,7 @@ Prebuilt Windows builds are on the [Releases](../../releases) page.
 
 ## Build
 
-Needs Rust 1.85 or newer.
+Needs Rust 1.95 or newer.
 
 ```
 cargo build --release

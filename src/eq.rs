@@ -21,16 +21,23 @@ pub fn coeffs(f: &Filt, sr: f64) -> [f64; 5] {
     [(1.0 + alpha * a) / a0, -2.0 * c / a0, (1.0 - alpha * a) / a0, -2.0 * c / a0, (1.0 - alpha / a) / a0]
 }
 
-fn biquad_gain(c: &[f64; 5], w: f64) -> Complex64 {
+/// Response of one biquad at the point `z1 = e^(-jw)` of the unit circle (`z2` its square): the sine and cosine of the frequency
+/// are worked out once for all the filters.
+fn biquad_gain(c: &[f64; 5], z1: Complex64, z2: Complex64) -> Complex64 {
+    (Complex64::new(c[0], 0.0) + z1 * c[1] + z2 * c[2]) / (Complex64::new(1.0, 0.0) + z1 * c[3] + z2 * c[4])
+}
+
+/// Combined response of filters whose coefficients are known, at the angular frequency `w`, in dB.
+fn response_cs(cs: &[[f64; 5]], w: f64) -> f64 {
     let z1 = Complex64::from_polar(1.0, -w);
     let z2 = z1 * z1;
-    (Complex64::new(c[0], 0.0) + z1 * c[1] + z2 * c[2]) / (Complex64::new(1.0, 0.0) + z1 * c[3] + z2 * c[4])
+    cs.iter().map(|c| 20.0 * biquad_gain(c, z1, z2).norm().max(1e-12).log10()).sum()
 }
 
 /// Combined response of the filters at `f` in dB.
 pub fn response_db(filts: &[Filt], sr: f64, f: f64) -> f64 {
-    let w = TAU * f / sr;
-    filts.iter().map(|x| 20.0 * biquad_gain(&coeffs(x, sr), w).norm().max(1e-12).log10()).sum()
+    let cs: Vec<[f64; 5]> = filts.iter().map(|x| coeffs(x, sr)).collect();
+    response_cs(&cs, TAU * f / sr)
 }
 
 /// Greedy fit: repeatedly put a peaking filter on the largest remaining error of `desired` (dB, the
@@ -58,9 +65,11 @@ pub fn fit(f: &[f32], desired: &[f32], n: usize, max_boost: f32, max_cut: f32, q
         let w0 = TAU * f[k] as f64 / sr as f64;
         let q = (1.0 / (2.0 * (LN_2 / 2.0 * bw * w0 / w0.sin()).sinh())).clamp(0.5, qmax as f64) as f32;
         let filt = Filt { f: f[k], gain: v.clamp(-max_cut, max_boost), q };
+        // (the coefficients of the new filter are the same for every point: once, not once per point)
+        let cs = [coeffs(&filt, sr as f64)];
         for (i, r) in res.iter_mut().enumerate() {
             if inb(f[i]) {
-                *r -= response_db(&[filt], sr as f64, f[i] as f64) as f32;
+                *r -= response_cs(&cs, TAU * f[i] as f64 / sr as f64) as f32;
             }
         }
         out.push(filt);
@@ -71,14 +80,16 @@ pub fn fit(f: &[f32], desired: &[f32], n: usize, max_boost: f32, max_cut: f32, q
 
 /// Largest boost of the combined filters over 20 Hz - 20 kHz, dB (>= 0): the preamp needed to avoid clipping.
 pub fn peak_boost(filts: &[Filt], sr: f64) -> f32 {
-    (0..600).map(|i| response_db(filts, sr, 20.0 * 1000f64.powf(i as f64 / 599.0))).fold(0.0f64, f64::max) as f32
+    let cs: Vec<[f64; 5]> = filts.iter().map(|x| coeffs(x, sr)).collect();
+    (0..600).map(|i| response_cs(&cs, TAU * (20.0 * 1000f64.powf(i as f64 / 599.0)) / sr)).fold(0.0f64, f64::max) as f32
 }
 
 fn desired_mag(filts: &[Filt], sr: f64, nfft: usize) -> Vec<f64> {
+    let cs: Vec<[f64; 5]> = filts.iter().map(|x| coeffs(x, sr)).collect();
     (0..=nfft / 2)
         .map(|k| {
             let f = (k as f64 * sr / nfft as f64).max(1.0);
-            10f64.powf(response_db(filts, sr, f) / 20.0)
+            10f64.powf(response_cs(&cs, TAU * f / sr) / 20.0)
         })
         .collect()
 }
@@ -154,6 +165,124 @@ pub fn biquad_csv(filts: &[Filt], sr: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the code as it was: the coefficients of every filter and the sine and cosine of the frequency were worked out again at every point
+
+    fn old_biquad_gain(c: &[f64; 5], w: f64) -> Complex64 {
+        let z1 = Complex64::from_polar(1.0, -w);
+        let z2 = z1 * z1;
+        (Complex64::new(c[0], 0.0) + z1 * c[1] + z2 * c[2]) / (Complex64::new(1.0, 0.0) + z1 * c[3] + z2 * c[4])
+    }
+
+    fn old_response_db(filts: &[Filt], sr: f64, f: f64) -> f64 {
+        let w = TAU * f / sr;
+        filts.iter().map(|x| 20.0 * old_biquad_gain(&coeffs(x, sr), w).norm().max(1e-12).log10()).sum()
+    }
+
+    fn old_peak_boost(filts: &[Filt], sr: f64) -> f32 {
+        (0..600).map(|i| old_response_db(filts, sr, 20.0 * 1000f64.powf(i as f64 / 599.0))).fold(0.0f64, f64::max) as f32
+    }
+
+    fn old_desired_mag(filts: &[Filt], sr: f64, nfft: usize) -> Vec<f64> {
+        (0..=nfft / 2)
+            .map(|k| {
+                let f = (k as f64 * sr / nfft as f64).max(1.0);
+                10f64.powf(old_response_db(filts, sr, f) / 20.0)
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn old_fit(f: &[f32], desired: &[f32], n: usize, max_boost: f32, max_cut: f32, qmax: f32, band: (f32, f32), sr: f32) -> Vec<Filt> {
+        let inb = |fr: f32| fr >= band.0 && fr <= band.1;
+        let mut res: Vec<f32> = f.iter().zip(desired).map(|(&fr, &d)| if inb(fr) && d.is_finite() { d.clamp(-max_cut, max_boost) } else { 0.0 }).collect();
+        let mut out: Vec<Filt> = Vec::new();
+        for _ in 0..n {
+            let (k, v) = res.iter().enumerate().fold((0, 0f32), |m, (i, &v)| if v.abs() > m.1.abs() { (i, v) } else { m });
+            if v.abs() < 0.4 {
+                break;
+            }
+            let half = v.abs() * 0.5;
+            let s = v.signum();
+            let (mut lo, mut hi) = (k, k);
+            while lo > 0 && res[lo - 1] * s > half {
+                lo -= 1;
+            }
+            while hi + 1 < res.len() && res[hi + 1] * s > half {
+                hi += 1;
+            }
+            let bw = ((f[(hi + 1).min(f.len() - 1)] / f[lo.saturating_sub(1)]).log2() as f64).max(0.12);
+            let w0 = TAU * f[k] as f64 / sr as f64;
+            let q = (1.0 / (2.0 * (LN_2 / 2.0 * bw * w0 / w0.sin()).sinh())).clamp(0.5, qmax as f64) as f32;
+            let filt = Filt { f: f[k], gain: v.clamp(-max_cut, max_boost), q };
+            for (i, r) in res.iter_mut().enumerate() {
+                if inb(f[i]) {
+                    *r -= old_response_db(&[filt], sr as f64, f[i] as f64) as f32;
+                }
+            }
+            out.push(filt);
+        }
+        out.sort_by(|a, b| a.f.total_cmp(&b.f));
+        out
+    }
+
+    fn some_filters(n: usize) -> Vec<Filt> {
+        (0..n).map(|i| Filt { f: 40.0 * 1.6f32.powi(i as i32), gain: if i % 2 == 0 { 5.0 - i as f32 * 0.7 } else { -4.0 + i as f32 * 0.5 }, q: 0.7 + 0.45 * i as f32 }).collect()
+    }
+
+    /// The faster evaluation gives bit for bit what the old one gave: the response, the preamp, the target of the FIRs, and the fit.
+    #[test]
+    fn hoisted_coefficients_change_nothing() {
+        for n in [1usize, 3, 10] {
+            let filts = some_filters(n);
+            for sr in [44100.0f64, 48000.0, 96000.0] {
+                for f in [20.0, 63.5, 1000.0, 8000.0, 19999.0] {
+                    assert_eq!(response_db(&filts, sr, f), old_response_db(&filts, sr, f), "{n} filters, {sr} Hz, at {f}");
+                }
+                assert_eq!(peak_boost(&filts, sr), old_peak_boost(&filts, sr));
+                assert!(desired_mag(&filts, sr, 4096) == old_desired_mag(&filts, sr, 4096));
+            }
+        }
+        assert_eq!(response_db(&[], 48000.0, 1000.0), old_response_db(&[], 48000.0, 1000.0));
+        // the fit, on a measurement made of a few humps and a ripple
+        let f = grid();
+        let desired: Vec<f32> = f.iter().enumerate().map(|(i, &x)| -(6.0 * (-((x / 90.0).ln()).powi(2) * 8.0).exp() + 3.0 * (-((x / 700.0).ln()).powi(2) * 3.0).exp() + 1.5 * ((i as f32) * 0.7).sin())).collect();
+        for n in [2usize, 6, 12] {
+            assert_eq!(fit(&f, &desired, n, 6.0, 12.0, 10.0, (30.0, 8000.0), 48000.0), old_fit(&f, &desired, n, 6.0, 12.0, 10.0, (30.0, 8000.0), 48000.0));
+        }
+        let filts = some_filters(5);
+        assert!(fir_linear(&filts, 48000.0, 1024) == {
+            // the FIR through the old target
+            let nfft = (1024usize * 4).next_power_of_two();
+            let spec: Vec<Complex64> = old_desired_mag(&filts, 48000.0, nfft).into_iter().map(|m| Complex64::new(m, 0.0)).collect();
+            let h = ifft_real(&spec, nfft);
+            (0..1024usize).map(|i| (h[(i + nfft - 512) % nfft] * (0.5 - 0.5 * (TAU * i as f64 / 1023.0).cos())) as f32).collect::<Vec<f32>>()
+        });
+    }
+
+    /// Cost of the preamp estimate (the Equaliser window works it out in every frame) and of the FIR design, old against new
+    /// (cargo test --locked eq_cost -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn eq_cost() {
+        let filts = some_filters(12);
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            std::hint::black_box(old_peak_boost(&filts, 48000.0));
+        }
+        let old = t.elapsed() / 200;
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            std::hint::black_box(peak_boost(&filts, 48000.0));
+        }
+        println!("peak_boost, 12 filters: old {old:?}, new {:?}", t.elapsed() / 200);
+        let t = std::time::Instant::now();
+        std::hint::black_box(old_desired_mag(&filts, 48000.0, 65536));
+        let old = t.elapsed();
+        let t = std::time::Instant::now();
+        std::hint::black_box(desired_mag(&filts, 48000.0, 65536));
+        println!("target of an 8192 tap FIR, 12 filters: old {old:?}, new {:?}", t.elapsed());
+    }
 
     fn grid() -> Vec<f32> {
         (0..400).map(|i| 20.0 * 1000f32.powf(i as f32 / 399.0)).collect()

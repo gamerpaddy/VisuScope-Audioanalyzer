@@ -193,6 +193,38 @@ struct Way {
     inv: bool,
 }
 
+/// What the crossover tab draws: the level of each active way, the sum as complex values, and (when asked for) the level of the
+/// sum with the second active way inverted.
+pub struct XoOut {
+    pub curves: Vec<Vec<f32>>,
+    pub sum: Vec<C>,
+    pub rev: Option<Vec<f32>>,
+}
+
+/// One way at `x` as a complex number: its trace (level and phase) with the filters, gain, delay and polarity; None where the trace
+/// has no data.
+fn way_response(items: &[Meas], w: &Way, x: f32) -> Option<C> {
+    let m = items.get(w.tr.min(items.len().checked_sub(1)?))?;
+    let db = m.at(x);
+    if !db.is_finite() {
+        return None;
+    }
+    let ph = phase_at(m, x).to_radians() - std::f32::consts::TAU * x * w.delay_ms * 1e-3;
+    let h = C::from_polar(10f32.powf((db + w.gain) / 20.0), ph) * xo_filter(w.hp, x, w.hp_f, true) * xo_filter(w.lp, x, w.lp_f, false);
+    Some(if w.inv { -h } else { h })
+}
+
+/// The crossover over the frequencies `f` for the active ways `act` (indices into `ways`). The reversed sum is the sum with the
+/// second active way turned over, which is the sum minus twice that way.
+fn xo_response(items: &[Meas], ways: &[Way; 3], act: &[usize], f: &[f32], want_rev: bool) -> XoOut {
+    let hs: Vec<Vec<Option<C>>> = act.iter().map(|&k| f.iter().map(|&x| way_response(items, &ways[k], x)).collect()).collect();
+    let db = |c: C| 20.0 * c.norm().max(1e-9).log10();
+    let curves = hs.iter().map(|h| h.iter().map(|c| c.map(db).unwrap_or(f32::NAN)).collect()).collect();
+    let sum: Vec<C> = (0..f.len()).map(|i| hs.iter().filter_map(|h| h[i]).sum::<C>()).collect();
+    let rev = (want_rev && hs.len() >= 2).then(|| (0..f.len()).map(|i| db(sum[i] - hs[1][i].map_or(C::new(0.0, 0.0), |c| c * 2.0))).collect());
+    XoOut { curves, sum, rev }
+}
+
 pub struct Speaker {
     tab: usize,
     drv: Drv,
@@ -411,24 +443,11 @@ impl Speaker {
             }
         });
         let f = log_grid(20.0, 20000.0, 480);
-        let n_items = cx.lib.items.len();
-        let way_h = |w: &Way, x: f32, flip: bool| -> Option<C> {
-            let m = cx.lib.items.get(w.tr.min(n_items - 1))?;
-            let db = m.at(x);
-            if !db.is_finite() {
-                return None;
-            }
-            let ph = phase_at(m, x).to_radians() - std::f32::consts::TAU * x * w.delay_ms * 1e-3;
-            let h = C::from_polar(10f32.powf((db + w.gain) / 20.0), ph) * xo_filter(w.hp, x, w.hp_f, true) * xo_filter(w.lp, x, w.lp_f, false);
-            Some(if w.inv != flip { -h } else { h })
-        };
         let act: Vec<usize> = (0..3).filter(|&k| self.ways[k].on).collect();
+        // (each way is worked out once for the three curves; the reversed sum only when it is shown)
+        let XoOut { curves, sum, rev } = xo_response(&cx.lib.items, &self.ways, &act, &f, self.reverse_null);
         let db = |c: C| 20.0 * c.norm().max(1e-9).log10();
-        let curves: Vec<Vec<f32>> = act.iter().map(|&k| f.iter().map(|&x| way_h(&self.ways[k], x, false).map(db).unwrap_or(f32::NAN)).collect()).collect();
-        let sum_of = |flip_k: Option<usize>| -> Vec<C> { f.iter().map(|&x| act.iter().filter_map(|&k| way_h(&self.ways[k], x, flip_k == Some(k))).sum::<C>()).collect() };
-        let sum = sum_of(None);
         let sum_db: Vec<f32> = sum.iter().map(|c| if c.norm() > 0.0 { db(*c) } else { f32::NAN }).collect();
-        let rev: Option<Vec<f32>> = (act.len() >= 2).then(|| sum_of(Some(act[1])).iter().map(|c| db(*c)).collect());
         let no_phase = act.iter().any(|&k| cx.lib.items.get(self.ways[k].tr).is_some_and(|m| m.phase.len() != m.f.len()));
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.reverse_null, crate::lang::tr("Reverse null")).on_hover_text(crate::lang::tr("Also show the sum with the second active way inverted: a deep, even notch at the crossover means the ways are in phase there"));
@@ -822,6 +841,100 @@ mod tests {
         }
         assert!(directivity_index(&[(0.0, 0.0), (90.0, 0.0), (180.0, 0.0)]).abs() < 0.01);
         assert!(directivity_index(&[(0.0, 0.0), (30.0, -6.0), (60.0, -20.0), (90.0, -40.0)]) > 6.0);
+    }
+
+    /// The version that worked every way out for each of the curves, the sum and the reversed sum, as the reference.
+    fn xo_old(items: &[Meas], ways: &[Way; 3], act: &[usize], f: &[f32]) -> (Vec<Vec<f32>>, Vec<C>, Option<Vec<f32>>) {
+        let n_items = items.len();
+        let way_h = |w: &Way, x: f32, flip: bool| -> Option<C> {
+            let m = items.get(w.tr.min(n_items - 1))?;
+            let db = m.at(x);
+            if !db.is_finite() {
+                return None;
+            }
+            let ph = phase_at(m, x).to_radians() - std::f32::consts::TAU * x * w.delay_ms * 1e-3;
+            let h = C::from_polar(10f32.powf((db + w.gain) / 20.0), ph) * xo_filter(w.hp, x, w.hp_f, true) * xo_filter(w.lp, x, w.lp_f, false);
+            Some(if w.inv != flip { -h } else { h })
+        };
+        let db = |c: C| 20.0 * c.norm().max(1e-9).log10();
+        let curves = act.iter().map(|&k| f.iter().map(|&x| way_h(&ways[k], x, false).map(db).unwrap_or(f32::NAN)).collect()).collect();
+        let sum_of = |flip_k: Option<usize>| -> Vec<C> { f.iter().map(|&x| act.iter().filter_map(|&k| way_h(&ways[k], x, flip_k == Some(k))).sum::<C>()).collect() };
+        let sum = sum_of(None);
+        let rev = (act.len() >= 2).then(|| sum_of(Some(act[1])).iter().map(|c| db(*c)).collect());
+        (curves, sum, rev)
+    }
+
+    fn traces() -> Vec<Meas> {
+        let mut s = 17u32;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s as f32 / u32::MAX as f32
+        };
+        // three traces over different ranges (so that some frequencies have no data in some of them), the last one without phase
+        [(30.0f32, 5000.0f32, true), (400.0, 20000.0, true), (20.0, 20000.0, false)]
+            .iter()
+            .map(|&(a, b, ph)| {
+                let f = log_grid(a, b, 120);
+                Meas { name: String::new(), color: Color32::WHITE, visible: true, mag: f.iter().map(|_| 80.0 + 10.0 * rnd()).collect(), phase: if ph { f.iter().map(|_| 360.0 * rnd() - 180.0).collect() } else { Vec::new() }, f }
+            })
+            .collect()
+    }
+
+    fn test_ways() -> [Way; 3] {
+        let w = |tr, hp, hp_f, lp, lp_f, gain, delay_ms, inv| Way { on: true, tr, hp, hp_f, lp, lp_f, gain, delay_ms, inv };
+        [w(0, 0, 80.0, 5, 2500.0, 0.0, 0.0, false), w(1, 5, 2500.0, 0, 20000.0, -2.0, 0.3, true), w(2, 2, 300.0, 3, 3000.0, 1.0, 0.1, false)]
+    }
+
+    #[test]
+    fn the_crossover_worked_out_once_per_way_gives_the_same_curves_as_the_one_worked_out_for_each_curve() {
+        let items = traces();
+        let ways = test_ways();
+        let f = log_grid(20.0, 20000.0, 480);
+        for act in [vec![0usize, 1], vec![0, 1, 2], vec![1], vec![0, 2], vec![]] {
+            let (c0, s0, r0) = xo_old(&items, &ways, &act, &f);
+            let new = xo_response(&items, &ways, &act, &f, true);
+            assert_eq!(new.curves.len(), c0.len());
+            for (a, b) in new.curves.iter().zip(&c0) {
+                for (x, y) in a.iter().zip(b) {
+                    assert!((x.is_nan() && y.is_nan()) || (x - y).abs() < 1e-3, "{x} {y}");
+                }
+            }
+            for (a, b) in new.sum.iter().zip(&s0) {
+                assert!((a - b).norm() < 1e-4 * (1.0 + b.norm()), "{a} {b}");
+            }
+            assert_eq!(new.rev.is_some(), r0.is_some());
+            if let (Some(a), Some(b)) = (&new.rev, &r0) {
+                // (the notch of a reversed sum is where the ways cancel: away from a deep null the levels agree)
+                for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                    assert!((x - y).abs() < 0.05 || (*x < 20.0 && *y < 20.0), "{i}: {x} {y}");
+                }
+            }
+            // not asked for: not made
+            assert!(xo_response(&items, &ways, &act, &f, false).rev.is_none());
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_crossover_curves() {
+        let items = traces();
+        let ways = test_ways();
+        let f = log_grid(20.0, 20000.0, 480);
+        let t = std::time::Instant::now();
+        let mut acc = 0.0f32;
+        for _ in 0..200 {
+            let (c, s, r) = xo_old(&items, &ways, &[0, 1], &f);
+            acc += c[0][10] + s[10].re + r.map_or(0.0, |r| r[10]);
+        }
+        let old = t.elapsed() / 200;
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            let o = xo_response(&items, &ways, &[0, 1], &f, false);
+            acc += o.curves[0][10] + o.sum[10].re;
+        }
+        println!("crossover, 2 ways, 480 points, per frame: old {old:?}, new {:?} ({acc})", t.elapsed() / 200);
     }
 
     #[test]

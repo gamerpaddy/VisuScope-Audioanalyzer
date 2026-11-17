@@ -230,6 +230,38 @@ pub struct App {
     pub autorun: Option<(String, Option<String>)>,
 }
 
+/// The test hooks of the environment that are looked at while the program runs. They are read once: the frame loop asked the system
+/// for them (a search of the environment and a string for each) several times in every frame.
+pub struct EnvHooks {
+    /// VISUSCOPE_LATENCY_TEST: its text, when set
+    pub latency_test: Option<String>,
+    /// VISUSCOPE_OPTIONS
+    pub options: bool,
+    /// VISUSCOPE_GALLERY
+    pub gallery: bool,
+    /// VISUSCOPE_GRAPH: its text, when set
+    pub graph: Option<String>,
+    /// VISUSCOPE_LAYOUT
+    pub layout: bool,
+    /// VISUSCOPE_AUTO_SWEEP
+    pub auto_sweep: bool,
+}
+
+pub fn env_hooks() -> &'static EnvHooks {
+    static H: std::sync::OnceLock<EnvHooks> = std::sync::OnceLock::new();
+    H.get_or_init(|| {
+        let text = |k: &str| std::env::var_os(k).map(|v| v.to_string_lossy().to_string());
+        EnvHooks {
+            latency_test: text("VISUSCOPE_LATENCY_TEST"),
+            options: std::env::var_os("VISUSCOPE_OPTIONS").is_some(),
+            gallery: std::env::var_os("VISUSCOPE_GALLERY").is_some(),
+            graph: text("VISUSCOPE_GRAPH"),
+            layout: std::env::var_os("VISUSCOPE_LAYOUT").is_some(),
+            auto_sweep: std::env::var_os("VISUSCOPE_AUTO_SWEEP").is_some(),
+        }
+    })
+}
+
 /// If the UI thread stops responding for 3 s, write what every thread was doing to `visuscope_hang.log`.
 fn spawn_watchdog(sh: Arc<Shared>) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -886,7 +918,8 @@ impl App {
             return;
         }
         // screenshot and test runs must not change the user's settings
-        if self.shot_env.is_some() || std::env::var_os("VISUSCOPE_GRAPH").is_some() || std::env::var_os("VISUSCOPE_LAYOUT").is_some() || std::env::var_os("VISUSCOPE_LATENCY_TEST").is_some() {
+        let env = env_hooks();
+        if self.shot_env.is_some() || env.graph.is_some() || env.layout || env.latency_test.is_some() {
             return;
         }
         let s = self.settings_string();
@@ -1020,35 +1053,13 @@ impl App {
 
     fn pull_analysis(&mut self) {
         // never block the UI thread on the DSP thread: skip this frame if it is publishing
-        let Some(a) = self.sh.analysis.try_lock() else { return };
+        let Some(mut a) = self.sh.analysis.try_lock() else { return };
         if a.seq == self.an_seq {
             return;
         }
         self.an_seq = a.seq;
         self.sh.an_pulled.store(a.seq, std::sync::atomic::Ordering::Relaxed);
-        let d = &mut self.an;
-        d.seq = a.seq;
-        d.epoch = a.epoch;
-        d.sr = a.sr;
-        d.n = a.n;
-        for c in 0..2 {
-            d.live[c].clone_from(&a.live[c]);
-            d.avg[c].clone_from(&a.avg[c]);
-            d.max[c].clone_from(&a.max[c]);
-            d.min[c].clone_from(&a.min[c]);
-        }
-        d.corr.clone_from(&a.corr);
-        d.metrics = a.metrics;
-        d.meas_n = a.meas_n;
-        d.scallop_db = a.scallop_db;
-        d.peak_tab.clone_from(&a.peak_tab);
-        d.rms_db = a.rms_db;
-        d.peak_db = a.peak_db;
-        d.dc = a.dc;
-        d.enbw_bins = a.enbw_bins;
-        d.coherent_gain = a.coherent_gain;
-        d.dsp_ms = a.dsp_ms;
-        d.dsp_fps = a.dsp_fps;
+        take_analysis(&mut self.an, &mut a);
     }
 
     fn ingest_columns(&mut self) {
@@ -1334,7 +1345,7 @@ impl App {
             }
             s.push('\n');
         }
-        self.note = match std::fs::write(&path, s) {
+        self.note = match crate::fsutil::atomic_write(&path, s) {
             Ok(_) => format!("Saved {path}"),
             Err(e) => format!("CSV error: {e}"),
         };
@@ -1610,6 +1621,17 @@ impl App {
         }
     }
 
+    /// The last thing before the process ends (the window was closed, or a headless run is over): the threads that watch `quit` stop,
+    /// the capture, the generator and the monitor let go of their devices, and an ASIO driver gets a moment to stop its buffers
+    /// (a driver that is still running when the process disappears can leave the interface in a bad state).
+    pub fn stop_for_exit(&mut self) {
+        self.sh.quit.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.audio = None;
+        self.gen_handle = None;
+        self.mon_handle = None;
+        crate::asio::shutdown(std::time::Duration::from_millis(1500));
+    }
+
     pub fn zoom_f(&mut self, factor: f32) {
         let c = 0.5 * (self.f_lo + self.f_hi);
         zoom_view(&mut self.f_lo, &mut self.f_hi, factor, c, 0.002);
@@ -1626,6 +1648,7 @@ impl eframe::App for App {
         self.shutdown_tools();
         self.save_settings(true);
         self.lib.save_auto();
+        self.stop_for_exit();
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -1697,7 +1720,10 @@ impl eframe::App for App {
             self.refresh_textures();
         }
         let dt = ctx.input(|i| i.stable_dt).clamp(0.001, 0.1);
-        self.stereo.update(&self.sh, dt);
+        // the window is the only reader of what it computes: with it closed (or collapsed to its title bar) it is not run at all
+        let w = &self.wins[2];
+        let stereo_shown = w.open && (self.popped[2] || !w.collapsed) && self.stereo.wanted();
+        self.stereo.update(&self.sh, dt, stereo_shown);
         beat(self, 5);
         if !self.readout_hold && self.sm_t.elapsed().as_secs_f32() >= 1.0 / self.readout_hz {
             self.sm_t = Instant::now();
@@ -1723,7 +1749,7 @@ impl eframe::App for App {
         self.handle_hotkeys(&ctx);
         self.palette_ui(&ctx);
         self.latency_test();
-        if std::env::var_os("VISUSCOPE_LATENCY_TEST").is_some() {
+        if env_hooks().latency_test.is_some() {
             ctx.request_repaint();
         }
         let theme = if self.light { egui::Theme::Light } else { egui::Theme::Dark };
@@ -1742,7 +1768,7 @@ impl eframe::App for App {
             }
         });
 
-        if self.layout_ready && std::env::var_os("VISUSCOPE_OPTIONS").is_some() {
+        if self.layout_ready && env_hooks().options {
             self.opts_open = true;
         }
         self.options_ui(&ctx);
@@ -1792,6 +1818,35 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(1.0 / self.fps_cap));
         }
     }
+}
+
+/// Take the published analysis `a` over into `d`. The big vectors (up to several MB together, under the lock the DSP thread publishes
+/// with) change places instead of being copied: the DSP thread overwrites all of them in full the next time it publishes (`copy_into`
+/// resizes and fills; the correlation only when the measurement engine exists, and `meas_n` is 0 otherwise), and nothing else
+/// reads `Shared::analysis`. What stays behind in `a` is the previous picture of the UI.
+fn take_analysis(d: &mut Analysis, a: &mut Analysis) {
+    d.seq = a.seq;
+    d.epoch = a.epoch;
+    d.sr = a.sr;
+    d.n = a.n;
+    for c in 0..2 {
+        std::mem::swap(&mut d.live[c], &mut a.live[c]);
+        std::mem::swap(&mut d.avg[c], &mut a.avg[c]);
+        std::mem::swap(&mut d.max[c], &mut a.max[c]);
+        std::mem::swap(&mut d.min[c], &mut a.min[c]);
+    }
+    std::mem::swap(&mut d.corr, &mut a.corr);
+    d.metrics = a.metrics;
+    d.meas_n = a.meas_n;
+    d.scallop_db = a.scallop_db;
+    d.peak_tab.clone_from(&a.peak_tab);
+    d.rms_db = a.rms_db;
+    d.peak_db = a.peak_db;
+    d.dc = a.dc;
+    d.enbw_bins = a.enbw_bins;
+    d.coherent_gain = a.coherent_gain;
+    d.dsp_ms = a.dsp_ms;
+    d.dsp_fps = a.dsp_fps;
 }
 
 /// A Dayton Audio DATS V3 on the USB: its audio input and output (found by the name Windows shows).
@@ -1861,6 +1916,117 @@ pub fn pan_view(lo: &mut f32, hi: &mut f32, delta: f32) {
     let nlo = (*lo + delta).clamp(0.0, 1.0 - w);
     *lo = nlo;
     *hi = nlo + w;
+}
+
+#[cfg(test)]
+mod analysis_tests {
+    use super::*;
+
+    fn noise(n: usize, seed: &mut u64) -> Vec<f32> {
+        (0..n)
+            .map(|_| {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                (*seed >> 11) as f32 / (1u64 << 53) as f32 * 100.0 - 120.0
+            })
+            .collect()
+    }
+
+    fn analysis(seq: u64, sizes: [usize; 3], seed: &mut u64) -> Analysis {
+        let mut a = Analysis { seq, epoch: seq as u32, sr: 48000.0, n: sizes[0], meas_n: sizes[2] * 2, ..Default::default() };
+        for c in 0..2 {
+            a.live[c] = noise(sizes[0], seed);
+            a.avg[c] = noise(sizes[0], seed);
+            a.max[c] = noise(sizes[1], seed);
+            a.min[c] = noise(sizes[1], seed);
+        }
+        a.corr = noise(sizes[2], seed);
+        a.peak_tab = vec![[1.0, seq as f32]; 7];
+        a.rms_db = [-3.0, -4.0];
+        a.dsp_ms = 1.5;
+        a
+    }
+
+    /// How the analysis was taken over before the buffers changed places: every vector copied under the lock.
+    fn old_take(d: &mut Analysis, a: &Analysis) {
+        d.seq = a.seq;
+        d.epoch = a.epoch;
+        d.sr = a.sr;
+        d.n = a.n;
+        for c in 0..2 {
+            d.live[c].clone_from(&a.live[c]);
+            d.avg[c].clone_from(&a.avg[c]);
+            d.max[c].clone_from(&a.max[c]);
+            d.min[c].clone_from(&a.min[c]);
+        }
+        d.corr.clone_from(&a.corr);
+        d.metrics = a.metrics;
+        d.meas_n = a.meas_n;
+        d.scallop_db = a.scallop_db;
+        d.peak_tab.clone_from(&a.peak_tab);
+        d.rms_db = a.rms_db;
+        d.peak_db = a.peak_db;
+        d.dc = a.dc;
+        d.enbw_bins = a.enbw_bins;
+        d.coherent_gain = a.coherent_gain;
+        d.dsp_ms = a.dsp_ms;
+        d.dsp_fps = a.dsp_fps;
+    }
+
+    fn same(x: &Analysis, y: &Analysis) -> bool {
+        (x.seq, x.epoch, x.sr, x.n, x.meas_n, x.rms_db, x.dsp_ms) == (y.seq, y.epoch, y.sr, y.n, y.meas_n, y.rms_db, y.dsp_ms)
+            && x.live == y.live && x.avg == y.avg && x.max == y.max && x.min == y.min && x.corr == y.corr && x.peak_tab == y.peak_tab
+    }
+
+    #[test]
+    fn taking_the_published_analysis_by_swapping_gives_what_copying_gave() {
+        let mut seed = 0x1234_5678_9abc_def1u64;
+        // the UI side and the published side go through several rounds, with the sizes changing (an FFT size switch)
+        let mut ui_new = Analysis::default();
+        let mut ui_old = Analysis::default();
+        let mut shared = analysis(0, [0, 0, 0], &mut seed);
+        for round in 1..8u64 {
+            let sizes = if round % 3 == 0 { [1025, 513, 4097] } else { [8193, 4097, 8193] };
+            // what the DSP thread does: it writes all of the vectors in full (copy_into resizes and fills)
+            let fresh = analysis(round, sizes, &mut seed);
+            for c in 0..2 {
+                for (dst, src) in [(&mut shared.live[c], &fresh.live[c]), (&mut shared.avg[c], &fresh.avg[c]), (&mut shared.max[c], &fresh.max[c]), (&mut shared.min[c], &fresh.min[c])] {
+                    dst.resize(src.len(), 0.0);
+                    dst.copy_from_slice(src);
+                }
+            }
+            shared.corr.resize(fresh.corr.len(), 0.0);
+            shared.corr.copy_from_slice(&fresh.corr);
+            (shared.seq, shared.epoch, shared.sr, shared.n, shared.meas_n, shared.rms_db, shared.dsp_ms) = (fresh.seq, fresh.epoch, fresh.sr, fresh.n, fresh.meas_n, fresh.rms_db, fresh.dsp_ms);
+            shared.peak_tab.clone_from(&fresh.peak_tab);
+            old_take(&mut ui_old, &fresh);
+            take_analysis(&mut ui_new, &mut shared);
+            assert!(same(&ui_new, &ui_old), "round {round}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_take_analysis() {
+        let mut seed = 7u64;
+        let a = analysis(1, [131073, 131073, 131073], &mut seed);
+        let (mut d, mut s) = (Analysis::default(), a.clone());
+        let n = 200;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            s.seq = i;
+            old_take(&mut d, &s);
+        }
+        let old = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            s.seq = i;
+            take_analysis(&mut d, &mut s);
+        }
+        let new = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+        println!("take analysis (FFT 262144): old {old:.3} ms, new {new:.4} ms per frame ({})", d.seq);
+    }
 }
 
 #[cfg(test)]

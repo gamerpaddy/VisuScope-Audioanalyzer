@@ -1181,7 +1181,10 @@ impl App {
             for p in &img.pixels {
                 raw.extend_from_slice(&[p.r(), p.g(), p.b(), p.a()]);
             }
-            *note.lock() = match image::save_buffer(&path, &raw, w, h, image::ColorType::Rgba8) {
+            // (written through a temporary file: a screenshot that is half written is not left under the name of a good one)
+            let format = image::ImageFormat::from_path(&path).unwrap_or(image::ImageFormat::Png);
+            let saved = crate::fsutil::atomic_write_with(&path, |tmp| image::save_buffer_with_format(tmp, &raw, w, h, image::ColorType::Rgba8, format).map_err(std::io::Error::other));
+            *note.lock() = match saved {
                 Ok(_) => format!("Saved {path}"),
                 Err(e) => format!("PNG error: {e}"),
             };

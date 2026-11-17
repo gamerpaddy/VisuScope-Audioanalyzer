@@ -83,6 +83,9 @@ pub fn auto_range(series: &[Series], step: f32, min_span: f32) -> (f32, f32) {
 /// Series colours that stay readable on white.
 pub const COLORS: [[u8; 3]; 8] = [[43, 108, 176], [214, 99, 18], [34, 139, 70], [150, 70, 180], [200, 40, 90], [90, 90, 90], [0, 150, 170], [160, 120, 0]];
 
+/// More grid lines than this are never drawn on one axis.
+const MAX_GRID: usize = 200;
+
 pub fn svg_plot(p: &PlotSpec) -> String {
     let (w, h) = (760.0f32, 300.0f32);
     let (l, r, t, b) = (58.0f32, 14.0f32, 26.0f32, 36.0f32);
@@ -99,7 +102,11 @@ pub fn svg_plot(p: &PlotSpec) -> String {
     // horizontal grid
     let ystep = nice_step(y1 - y0, 7.0);
     let mut v = (y0 / ystep).ceil() * ystep;
-    while v <= y1 + 1e-4 {
+    // (the count is bounded: far from zero a step is below the spacing of the numbers, `v += ystep` stays where it is, and the loop
+    // would never end)
+    let mut lines = 0;
+    while v <= y1 + 1e-4 && lines < MAX_GRID {
+        lines += 1;
         let y = ty(v);
         let _ = write!(s, "<line x1=\"{l}\" x2=\"{}\" y1=\"{y:.1}\" y2=\"{y:.1}\" stroke=\"#ddd\"/><text x=\"{}\" y=\"{:.1}\" text-anchor=\"end\" fill=\"#555\">{}</text>", l + pw, l - 4.0, y + 3.0, trim_num(v));
         v += ystep;
@@ -119,7 +126,7 @@ pub fn svg_plot(p: &PlotSpec) -> String {
     } else {
         let step = nice_step(x1 - x0, 8.0);
         let mut x = (x0 / step).ceil() * step;
-        while x <= x1 + 1e-4 {
+        while x <= x1 + 1e-4 && xs.len() < MAX_GRID {
             xs.push((x, true));
             x += step;
         }
@@ -259,6 +266,16 @@ pub fn frd_text(f: &[f32], mag: &[f32], phase: &[f32], rew_header: bool) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plot_far_from_zero_ends_instead_of_looping_over_its_grid() {
+        // 1e9 + 20 is 1e9 in f32 (the numbers are 64 apart): the grid step of 20 never moved the position
+        let p = |xlog: bool, x: (f32, f32), y: (f32, f32)| PlotSpec { title: "t".into(), xlog, xlabel: "x".into(), ylabel: "y".into(), x, y, series: vec![Series { name: "s".into(), color: [1, 2, 3], pts: vec![(x.0, y.0), (x.1, y.1)] }] };
+        for spec in [p(false, (1.0e9, 1.0e9 + 100.0), (0.0, 1.0)), p(false, (0.0, 1.0), (1.0e9, 1.0e9 + 100.0)), p(true, (-10.0, -1.0), (0.0, 1.0)), p(true, (0.0, 0.0), (0.0, 1.0)), p(false, (f32::NAN, 1.0), (f32::INFINITY, 1.0))] {
+            let svg = svg_plot(&spec);
+            assert!(svg.ends_with("</svg>") && svg.matches("<line").count() < 2 * MAX_GRID + 10, "{} lines", svg.matches("<line").count());
+        }
+    }
 
     #[test]
     fn renders_plot_and_escapes() {

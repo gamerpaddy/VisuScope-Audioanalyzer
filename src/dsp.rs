@@ -205,6 +205,8 @@ struct State {
     peak_tab: Vec<[f32; 2]>,
     rowlo: Vec<f32>,
     rowhi: Vec<f32>,
+    /// scratch of the spectrogram column: the spectrum as the chosen source shows it (L-R difference, or the larger of the two)
+    spec_src: Vec<f32>,
     metrics: [Metrics; 2],
     epoch: u32,
     meng: Option<MeasEngine>,
@@ -243,6 +245,7 @@ impl State {
             peak_tab: Vec::new(),
             rowlo: vec![],
             rowhi: vec![],
+            spec_src: vec![],
             metrics: Default::default(),
             epoch: 0,
             meng: None,
@@ -272,6 +275,11 @@ impl State {
         // the average, maximum and minimum belong to the bins: only another size, window or rate makes them meaningless (the
         // log / linear axis changes how the spectrogram rows map to the bins, not the spectrum)
         let keep_traces = !size_changed && p.window == self.win && sr == self.sr;
+        // the scalloping loss and the main-lobe table belong to the window (and the size): another rate or the log / linear axis does
+        // not change them, and the table costs over a million sines and cosines
+        let new_window = self.fft.is_none() || size_changed || p.window != self.win;
+        // (the table is made for a fixed length: only another window changes it)
+        let new_table = self.peak_tab.is_empty() || p.window != self.win;
         if self.sr != sr || self.log != p.log_freq {
             self.epoch += 1;
         }
@@ -294,7 +302,7 @@ impl State {
             self.live[c] = vec![-200.0; h];
         }
         // scalloping loss: response of the window half a bin away from a bin centre
-        {
+        if new_window {
             let wf = window_f64(p.window, n);
             let w0: f64 = wf.iter().sum();
             let (mut re, mut im) = (0.0f64, 0.0f64);
@@ -304,6 +312,8 @@ impl State {
                 im -= w * ph.sin();
             }
             self.scallop_db = (20.0 * (w0 / (re * re + im * im).sqrt().max(1e-30)).log10()) as f32;
+        }
+        if new_table {
             self.peak_tab = peak_table(p.window);
         }
         if !keep_traces {
@@ -320,6 +330,118 @@ impl State {
         };
         self.rowlo = (0..ROWS).map(edge).collect();
         self.rowhi = (1..=ROWS).map(edge).collect();
+    }
+}
+
+impl State {
+    /// The windowed signal of both channels as one complex buffer (L real, R imaginary).
+    fn window_input(&mut self) {
+        let Self { buf, l, r, w, .. } = self;
+        for (((b, &l), &r), &w) in buf.iter_mut().zip(l.iter()).zip(r.iter()).zip(w.iter()) {
+            *b = Complex32::new(l * w, r * w);
+        }
+    }
+
+    /// Splits the FFT of the frame (`buf`) into the two channels and updates, per bin, the power, the live level (dB), the
+    /// running power average and the hold values. `c` scales power to full scale, `alpha` is the weight of this frame in the
+    /// average. The averages are in the power domain only: `avg_db` turns them into dB when they are published.
+    fn frame_bins(&mut self, c: f32, alpha: f32) {
+        let n = self.n;
+        let h = n / 2 + 1;
+        let mask = n - 1;
+        let Self { buf, mic_lin, plin, live, avgp, mx, mn, .. } = self;
+        let [plin_l, plin_r] = plin;
+        let [live_l, live_r] = live;
+        let [avgp_l, avgp_r] = avgp;
+        let [mx_l, mx_r] = mx;
+        let [mn_l, mn_r] = mn;
+        // (all cut to the same length, so that the loop below needs no bounds checks)
+        let (mic_l, mic_r) = (&mic_lin[0][..h], &mic_lin[1][..h]);
+        let (plin_l, plin_r) = (&mut plin_l[..h], &mut plin_r[..h]);
+        let (live_l, live_r) = (&mut live_l[..h], &mut live_r[..h]);
+        let (avgp_l, avgp_r) = (&mut avgp_l[..h], &mut avgp_r[..h]);
+        let (mx_l, mx_r) = (&mut mx_l[..h], &mut mx_r[..h]);
+        let (mn_l, mn_r) = (&mut mn_l[..h], &mut mn_r[..h]);
+        for k in 0..h {
+            let zk = buf[k];
+            let zn = buf[(n - k) & mask].conj();
+            let xl = (zk + zn) * 0.5;
+            let d = zk - zn;
+            let xr = Complex32::new(d.im, -d.re) * 0.5;
+            let pl = xl.norm_sqr() * mic_l[k];
+            let pr = xr.norm_sqr() * mic_r[k];
+            plin_l[k] = pl;
+            plin_r[k] = pr;
+            let dl = DB_PER_LOG2 * fast_log2(pl * c + 1e-30);
+            let dr = DB_PER_LOG2 * fast_log2(pr * c + 1e-30);
+            live_l[k] = dl;
+            live_r[k] = dr;
+            avgp_l[k] += alpha * (pl - avgp_l[k]);
+            avgp_r[k] += alpha * (pr - avgp_r[k]);
+            if dl > mx_l[k] {
+                mx_l[k] = dl;
+            }
+            if dr > mx_r[k] {
+                mx_r[k] = dr;
+            }
+            if dl < mn_l[k] {
+                mn_l[k] = dl;
+            }
+            if dr < mn_r[k] {
+                mn_r[k] = dr;
+            }
+        }
+    }
+
+    /// The running power averages as dB (what `frame_bins` used to compute for every bin of every frame).
+    fn avg_db(&mut self, c: f32) {
+        for ch in 0..2 {
+            for (a, &p) in self.avg[ch].iter_mut().zip(self.avgp[ch].iter()) {
+                *a = DB_PER_LOG2 * fast_log2(p * c + 1e-30);
+            }
+        }
+    }
+}
+
+/// One column of the spectrogram: for each row (a band of bins, see `State::rebuild`) the level of the chosen source (0 = L, 1 = R,
+/// 3 = L-R difference, otherwise the larger of the two) as a byte. `scratch` takes the source when it has to be derived.
+fn spectro_column(live: [&[f32]; 2], src: u8, rowlo: &[f32], rowhi: &[f32], half: usize, scratch: &mut Vec<f32>, col: &mut [u8]) {
+    let (a, b) = (live[0], live[1]);
+    // what is shown per bin, worked out once per column instead of once per access
+    let s: &[f32] = match src {
+        0 => a,
+        1 => b,
+        // difference of the channels in dB, shown around the middle of the range (bins with no signal in either channel stay neutral)
+        3 => {
+            scratch.clear();
+            scratch.extend(a.iter().zip(b).map(|(&a, &b)| if a.max(b) < -100.0 { -75.0 } else { -75.0 + (a - b).clamp(-75.0, 75.0) }));
+            scratch
+        }
+        _ => {
+            scratch.clear();
+            scratch.extend(a.iter().zip(b).map(|(&a, &b)| a.max(b)));
+            scratch
+        }
+    };
+    let get = |k: usize| s[k.min(half)];
+    for ((out, &b0), &b1) in col.iter_mut().zip(rowlo).zip(rowhi) {
+        let v = if b1 - b0 < 1.0 {
+            let mid = 0.5 * (b0 + b1);
+            let k0 = mid.floor().max(0.0) as usize;
+            let fr = mid - mid.floor();
+            get(k0) * (1.0 - fr) + get(k0 + 1) * fr
+        } else {
+            let a = b0.floor().max(0.0) as usize;
+            let b = (b1.ceil() as usize).min(half);
+            let mut m = -300.0f32;
+            for k in a..=b {
+                let v = get(k);
+                // a difference keeps the largest deviation from the middle, up or down
+                m = if src == 3 && m > -299.0 { if (v + 75.0).abs() > (m + 75.0).abs() { v } else { m } } else { m.max(v) };
+            }
+            m
+        };
+        *out = (((v + HIST_DB_RANGE) / HIST_DB_RANGE) * 255.0).clamp(0.0, 255.0) as u8;
     }
 }
 
@@ -346,6 +468,8 @@ fn wait(sh: &Shared, ms: u64) {
 }
 
 fn run(sh: Arc<Shared>) {
+    // the averages decay towards the denormal range in digital silence, which makes every bin of every frame slow (per thread)
+    crate::prof::flush_denormals();
     let mut planner = FftPlanner::<f32>::new();
     let mut st = State::new();
     let mut last_total = 0u64;
@@ -431,48 +555,14 @@ fn run(sh: Arc<Shared>) {
             }
         }
 
-        for i in 0..n {
-            let w = st.w[i];
-            st.buf[i] = Complex32::new(st.l[i] * w, st.r[i] * w);
-        }
+        st.window_input();
         let fft = st.fft.clone().unwrap();
         fft.process_with_scratch(&mut st.buf, &mut st.scratch);
 
         let c = ((2.0 / st.sw) * (2.0 / st.sw)) as f32;
         let alpha = (1.0 / p.avg_count.max(1.0)).max(1.0 / (st.avg_cnt as f32 + 1.0));
         st.avg_cnt = st.avg_cnt.saturating_add(1);
-        let mask = n - 1;
-        for k in 0..=half {
-            let zk = st.buf[k];
-            let zn = st.buf[(n - k) & mask].conj();
-            let xl = (zk + zn) * 0.5;
-            let d = zk - zn;
-            let xr = Complex32::new(d.im, -d.re) * 0.5;
-            let pl = xl.norm_sqr() * st.mic_lin[0][k];
-            let pr = xr.norm_sqr() * st.mic_lin[1][k];
-            st.plin[0][k] = pl;
-            st.plin[1][k] = pr;
-            let dl = DB_PER_LOG2 * fast_log2(pl * c + 1e-30);
-            let dr = DB_PER_LOG2 * fast_log2(pr * c + 1e-30);
-            st.live[0][k] = dl;
-            st.live[1][k] = dr;
-            st.avgp[0][k] += alpha * (pl - st.avgp[0][k]);
-            st.avgp[1][k] += alpha * (pr - st.avgp[1][k]);
-            st.avg[0][k] = DB_PER_LOG2 * fast_log2(st.avgp[0][k] * c + 1e-30);
-            st.avg[1][k] = DB_PER_LOG2 * fast_log2(st.avgp[1][k] * c + 1e-30);
-            if dl > st.mx[0][k] {
-                st.mx[0][k] = dl;
-            }
-            if dr > st.mx[1][k] {
-                st.mx[1][k] = dr;
-            }
-            if dl < st.mn[0][k] {
-                st.mn[0][k] = dl;
-            }
-            if dr < st.mn[1][k] {
-                st.mn[1][k] = dr;
-            }
-        }
+        st.frame_bins(c, alpha);
 
         // Measurements
         let manual = if p.manual_fund { Some(p.fund_hz) } else { None };
@@ -488,7 +578,13 @@ fn run(sh: Arc<Shared>) {
         if st.meas_t.elapsed() >= Duration::from_millis(120) {
             st.meas_t = Instant::now();
             let mut eng = st.meng.take().unwrap();
-            copy_last_chunked(&sh.ring, &mut eng.l, &mut eng.r);
+            if mn == n {
+                // the display frame holds the same last `n` samples already (a frame older at most): no second trip to the ring
+                eng.l.copy_from_slice(&st.l);
+                eng.r.copy_from_slice(&st.r);
+            } else {
+                copy_last_chunked(&sh.ring, &mut eng.l, &mut eng.r);
+            }
             let res = eng.run(srf, p.bw_lo, hi, p.harmonics.clamp(2, MAXH), manual);
             st.meng = Some(eng);
             for ch in 0..2 {
@@ -503,39 +599,8 @@ fn run(sh: Arc<Shared>) {
         if total >= last_col + col_interval.max(1) {
             last_col = total;
             let mut col = vec![0u8; ROWS];
-            for r in 0..ROWS {
-                let (b0, b1) = (st.rowlo[r], st.rowhi[r]);
-                let get = |s: &State, k: usize| -> f32 {
-                    let k = k.min(half);
-                    match p.spectro_src {
-                        0 => s.live[0][k],
-                        1 => s.live[1][k],
-                        // difference of the channels in dB, shown around the middle of the range (bins with no signal in either channel stay neutral)
-                        3 => {
-                            let (a, b) = (s.live[0][k], s.live[1][k]);
-                            if a.max(b) < -100.0 { -75.0 } else { -75.0 + (a - b).clamp(-75.0, 75.0) }
-                        }
-                        _ => s.live[0][k].max(s.live[1][k]),
-                    }
-                };
-                let v = if b1 - b0 < 1.0 {
-                    let mid = 0.5 * (b0 + b1);
-                    let k0 = mid.floor().max(0.0) as usize;
-                    let fr = mid - mid.floor();
-                    get(&st, k0) * (1.0 - fr) + get(&st, k0 + 1) * fr
-                } else {
-                    let a = b0.floor().max(0.0) as usize;
-                    let b = (b1.ceil() as usize).min(half);
-                    let mut m = -300.0f32;
-                    for k in a..=b {
-                        let v = get(&st, k);
-                        // a difference keeps the largest deviation from the middle, up or down
-                        m = if p.spectro_src == 3 && m > -299.0 { if (v + 75.0).abs() > (m + 75.0).abs() { v } else { m } } else { m.max(v) };
-                    }
-                    m
-                };
-                col[r] = (((v + HIST_DB_RANGE) / HIST_DB_RANGE) * 255.0).clamp(0.0, 255.0) as u8;
-            }
+            let State { live, rowlo, rowhi, spec_src, .. } = &mut st;
+            spectro_column([&live[0], &live[1]], p.spectro_src, rowlo, rowhi, half, spec_src, &mut col);
             let mut q = sh.columns.lock();
             q.push((st.epoch, col));
             if q.len() > 1024 {
@@ -564,6 +629,8 @@ fn run(sh: Arc<Shared>) {
         if pub_seq > sh.an_pulled.load(Relaxed) && pub_t.elapsed() < Duration::from_millis(30) {
             continue;
         }
+        // (the averages are kept as power: their dB values are only needed by whoever collects them)
+        st.avg_db(c);
         {
             let mut a = sh.analysis.lock();
             pub_seq += 1;
@@ -955,5 +1022,263 @@ mod tests {
             eprintln!("inv={inv}: corr at tone {c:.3}");
             assert!((c - expect).abs() < 0.02, "corr {c}");
         }
+    }
+
+    fn lcg(s: &mut u64) -> f32 {
+        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*s >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+    }
+
+    /// A state of size `n` as `run` has it after `rebuild` and the microphone step.
+    fn test_state(n: usize, log: bool) -> State {
+        let mut st = State::new();
+        let p = Params { fft_size: n, log_freq: log, ..Default::default() };
+        st.rebuild(&mut FftPlanner::<f32>::new(), &p, 48000);
+        for c in 0..2 {
+            st.mic_lin[c] = vec![1.0; n / 2 + 1];
+        }
+        st
+    }
+
+    /// The per bin loop as it was before the dB of the averages moved to the publish step (and before the slices were cut to length).
+    fn old_frame_bins(st: &mut State, c: f32, alpha: f32) {
+        let n = st.n;
+        let half = n / 2;
+        let mask = n - 1;
+        for k in 0..=half {
+            let zk = st.buf[k];
+            let zn = st.buf[(n - k) & mask].conj();
+            let xl = (zk + zn) * 0.5;
+            let d = zk - zn;
+            let xr = Complex32::new(d.im, -d.re) * 0.5;
+            let pl = xl.norm_sqr() * st.mic_lin[0][k];
+            let pr = xr.norm_sqr() * st.mic_lin[1][k];
+            st.plin[0][k] = pl;
+            st.plin[1][k] = pr;
+            let dl = DB_PER_LOG2 * fast_log2(pl * c + 1e-30);
+            let dr = DB_PER_LOG2 * fast_log2(pr * c + 1e-30);
+            st.live[0][k] = dl;
+            st.live[1][k] = dr;
+            st.avgp[0][k] += alpha * (pl - st.avgp[0][k]);
+            st.avgp[1][k] += alpha * (pr - st.avgp[1][k]);
+            st.avg[0][k] = DB_PER_LOG2 * fast_log2(st.avgp[0][k] * c + 1e-30);
+            st.avg[1][k] = DB_PER_LOG2 * fast_log2(st.avgp[1][k] * c + 1e-30);
+            if dl > st.mx[0][k] {
+                st.mx[0][k] = dl;
+            }
+            if dr > st.mx[1][k] {
+                st.mx[1][k] = dr;
+            }
+            if dl < st.mn[0][k] {
+                st.mn[0][k] = dl;
+            }
+            if dr < st.mn[1][k] {
+                st.mn[1][k] = dr;
+            }
+        }
+    }
+
+    /// Several frames (with a microphone curve, a changing weight and a stretch of silence): the new loop plus `avg_db` publishes
+    /// exactly what the old loop left in every array.
+    #[test]
+    fn frame_bins_and_avg_db_match_the_old_loop() {
+        let n = 2048;
+        let mut seed = 3u64;
+        let mut new = test_state(n, true);
+        for c in 0..2 {
+            new.mic_lin[c] = (0..=n / 2).map(|k| 0.5 + (k % 7) as f32 * 0.25 + c as f32).collect();
+        }
+        let mut old = test_state(n, true);
+        old.mic_lin = new.mic_lin.clone();
+        let c = ((2.0 / 700.0f64) * (2.0 / 700.0f64)) as f32;
+        for frame in 0..40 {
+            let silent = (20..28).contains(&frame);
+            for k in 0..n {
+                let v = if silent { Complex32::new(0.0, 0.0) } else { Complex32::new(lcg(&mut seed) * 300.0, lcg(&mut seed) * 300.0) };
+                new.buf[k] = v;
+                old.buf[k] = v;
+            }
+            let alpha = (1.0 / 16.0f32).max(1.0 / (frame as f32 + 1.0));
+            new.frame_bins(c, alpha);
+            old_frame_bins(&mut old, c, alpha);
+            // (publishing every third frame is enough: the averages are state, the dB values a function of it)
+            if frame % 3 == 0 {
+                new.avg_db(c);
+                for ch in 0..2 {
+                    assert!(new.avg[ch] == old.avg[ch], "avg dB, frame {frame}");
+                }
+            }
+            for ch in 0..2 {
+                assert!(new.plin[ch] == old.plin[ch], "plin, frame {frame}");
+                assert!(new.live[ch] == old.live[ch], "live, frame {frame}");
+                assert!(new.avgp[ch] == old.avgp[ch], "avgp, frame {frame}");
+                assert!(new.mx[ch] == old.mx[ch], "max, frame {frame}");
+                assert!(new.mn[ch] == old.mn[ch], "min, frame {frame}");
+            }
+        }
+    }
+
+    /// The spectrogram column as it was: the source is looked up (and the match taken) at every access.
+    fn old_spectro_column(live: [&[f32]; 2], src: u8, rowlo: &[f32], rowhi: &[f32], half: usize) -> Vec<u8> {
+        let mut col = vec![0u8; ROWS];
+        for r in 0..ROWS {
+            let (b0, b1) = (rowlo[r], rowhi[r]);
+            let get = |k: usize| -> f32 {
+                let k = k.min(half);
+                match src {
+                    0 => live[0][k],
+                    1 => live[1][k],
+                    3 => {
+                        let (a, b) = (live[0][k], live[1][k]);
+                        if a.max(b) < -100.0 { -75.0 } else { -75.0 + (a - b).clamp(-75.0, 75.0) }
+                    }
+                    _ => live[0][k].max(live[1][k]),
+                }
+            };
+            let v = if b1 - b0 < 1.0 {
+                let mid = 0.5 * (b0 + b1);
+                let k0 = mid.floor().max(0.0) as usize;
+                let fr = mid - mid.floor();
+                get(k0) * (1.0 - fr) + get(k0 + 1) * fr
+            } else {
+                let a = b0.floor().max(0.0) as usize;
+                let b = (b1.ceil() as usize).min(half);
+                let mut m = -300.0f32;
+                for k in a..=b {
+                    let v = get(k);
+                    m = if src == 3 && m > -299.0 { if (v + 75.0).abs() > (m + 75.0).abs() { v } else { m } } else { m.max(v) };
+                }
+                m
+            };
+            col[r] = (((v + HIST_DB_RANGE) / HIST_DB_RANGE) * 255.0).clamp(0.0, 255.0) as u8;
+        }
+        col
+    }
+
+    #[test]
+    fn spectro_column_matches_the_old_one() {
+        let mut seed = 11u64;
+        for (n, log) in [(2048usize, true), (2048, false), (16384, true), (16384, false)] {
+            let mut st = test_state(n, log);
+            let half = n / 2;
+            for ch in 0..2 {
+                // levels around the whole range, with silent stretches
+                st.live[ch] = (0..=half).map(|k| if k % 97 < 9 { -200.0 } else { lcg(&mut seed) * 90.0 - 50.0 }).collect();
+            }
+            for src in [0u8, 1, 2, 3] {
+                let want = old_spectro_column([&st.live[0], &st.live[1]], src, &st.rowlo, &st.rowhi, half);
+                let mut col = vec![0u8; ROWS];
+                let mut scratch = Vec::new();
+                spectro_column([&st.live[0], &st.live[1]], src, &st.rowlo, &st.rowhi, half, &mut scratch, &mut col);
+                assert!(col == want, "n {n} log {log} source {src}");
+            }
+        }
+    }
+
+    /// Another axis (log / linear) or rate does not recompute the main-lobe table and the scalloping loss; another window does.
+    #[test]
+    fn rebuild_keeps_the_window_tables_when_only_the_axis_changes() {
+        let mut planner = FftPlanner::<f32>::new();
+        let mut st = State::new();
+        let mut p = Params { fft_size: 1024, window: Window::Hann, log_freq: true, ..Default::default() };
+        st.rebuild(&mut planner, &p, 48000);
+        let (tab, scallop, lo) = (st.peak_tab.clone(), st.scallop_db, st.rowlo.clone());
+        assert_eq!(tab, peak_table(Window::Hann));
+        // poison the stored table: if the axis change recomputed it, the poison is gone
+        st.peak_tab[0] = [123.0, 456.0];
+        p.log_freq = false;
+        st.rebuild(&mut planner, &p, 48000);
+        assert_eq!(st.peak_tab[0], [123.0, 456.0]);
+        assert_eq!(st.scallop_db, scallop);
+        assert_ne!(st.rowlo, lo, "the rows follow the axis");
+        // another window: new tables
+        p.window = Window::Blackman;
+        st.rebuild(&mut planner, &p, 48000);
+        assert_eq!(st.peak_tab, peak_table(Window::Blackman));
+        assert_ne!(st.peak_tab, tab);
+        // another size: the scalloping loss is recomputed, the table (made for a fixed length) is not
+        st.scallop_db = 99.0;
+        st.peak_tab[0] = [123.0, 456.0];
+        p.fft_size = 2048;
+        st.rebuild(&mut planner, &p, 48000);
+        assert!(st.scallop_db < 5.0);
+        assert_eq!(st.peak_tab[0], [123.0, 456.0]);
+    }
+
+    /// Cost of the per bin loop and of the spectrogram column, old against new, and of the peak table (cargo test --locked dsp_frame_cost -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn dsp_frame_cost() {
+        let n = 16384;
+        let mut seed = 5u64;
+        let mut new = test_state(n, true);
+        let mut old = test_state(n, true);
+        for k in 0..n {
+            let v = Complex32::new(lcg(&mut seed) * 300.0, lcg(&mut seed) * 300.0);
+            new.buf[k] = v;
+            old.buf[k] = v;
+        }
+        let c = 1e-6f32;
+        let reps = 2000;
+        let t = Instant::now();
+        for _ in 0..reps {
+            old_frame_bins(&mut old, c, 0.0625);
+        }
+        println!("per bin loop, old (n={n}): {:?} per frame", t.elapsed() / reps);
+        let t = Instant::now();
+        for _ in 0..reps {
+            new.frame_bins(c, 0.0625);
+        }
+        let per_frame = t.elapsed() / reps;
+        let t = Instant::now();
+        for _ in 0..reps {
+            new.avg_db(c);
+        }
+        println!("per bin loop, new: {per_frame:?} per frame (+ avg_db {:?} only when published)", t.elapsed() / reps);
+        let half = n / 2;
+        let mut col = vec![0u8; ROWS];
+        let mut scratch = Vec::new();
+        for src in [0u8, 2, 3] {
+            let t = Instant::now();
+            for _ in 0..200 {
+                std::hint::black_box(old_spectro_column([&new.live[0], &new.live[1]], src, &new.rowlo, &new.rowhi, half));
+            }
+            let o = t.elapsed() / 200;
+            let t = Instant::now();
+            for _ in 0..200 {
+                spectro_column([&new.live[0], &new.live[1]], src, &new.rowlo, &new.rowhi, half, &mut scratch, &mut col);
+                std::hint::black_box(&col);
+            }
+            println!("spectrogram column, source {src}: old {o:?}, new {:?}", t.elapsed() / 200);
+        }
+        let t = Instant::now();
+        std::hint::black_box(peak_table(Window::BlackmanHarris));
+        println!("peak table (once per window change, no longer per axis change): {:?}", t.elapsed());
+    }
+
+    /// The power average of digital silence ends up in the denormal range; the DSP thread flushes those.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore]
+    fn denormal_cost_of_the_average() {
+        let run = |flush: bool| {
+            std::thread::spawn(move || {
+                if flush {
+                    crate::prof::flush_denormals();
+                }
+                let mut avgp = vec![1e-30f32; 8193];
+                let t = Instant::now();
+                for _ in 0..4000 {
+                    for a in avgp.iter_mut() {
+                        *a += 0.0625 * (0.0 - *a);
+                    }
+                }
+                std::hint::black_box(&avgp);
+                t.elapsed()
+            })
+            .join()
+            .unwrap()
+        };
+        println!("4000 frames of the average over 8193 bins, silence: denormals kept {:?}, flushed {:?}", run(false), run(true));
     }
 }

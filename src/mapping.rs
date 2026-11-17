@@ -360,7 +360,8 @@ pub struct Mapper {
     pub learning: Option<String>,
     /// the last input, for the editor
     pub last: String,
-    held: HashMap<usize, bool>,
+    /// per action: its button is down (by name, not by place in the list: the list changes while a button is held)
+    held: HashMap<String, bool>,
     /// what the control that is being learned is (a window's control, not one of the fixed actions)
     pub learn_meta: Option<LearnMeta>,
     pub open: bool,
@@ -451,11 +452,17 @@ impl Mapper {
 
     pub fn clear(&mut self, action: &str) {
         self.bindings.retain(|b| b.action != action);
+        self.held.remove(action);
         self.dirty = true;
     }
 
     /// Bind `src` to `action` (an input drives one action, an action has one input).
     pub fn assign(&mut self, action: &str, src: Src, range: (f32, f32)) {
+        // (the bindings that go take their state with them: a new one starts with its button up)
+        let gone: Vec<String> = self.bindings.iter().filter(|b| b.action == action || b.src == src).map(|b| b.action.clone()).collect();
+        for a in gone {
+            self.held.remove(&a);
+        }
         self.bindings.retain(|b| b.action != action && b.src != src);
         self.bindings.push(Binding { action: action.to_string(), src, min: range.0, max: range.1, invert: false, momentary: false, log: false, lim: range, label: String::new() });
         self.dirty = true;
@@ -519,7 +526,7 @@ impl Mapper {
                 }
                 continue;
             }
-            for (i, b) in self.bindings.iter().enumerate() {
+            for b in self.bindings.iter() {
                 // a key that is let go ends its binding whatever the modifiers are by then
                 let same = b.src == src || matches!((&b.src, &src), (Src::Key { key: a, .. }, Src::Key { key: c, .. }) if v < 0.5 && a == c);
                 if !same {
@@ -535,7 +542,7 @@ impl Mapper {
                     None => {
                         // a press: the moment the value passes one half (releases and the way back do nothing)
                         let down = v >= 0.5;
-                        let was = self.held.insert(i, down).unwrap_or(false);
+                        let was = self.held.insert(b.action.clone(), down).unwrap_or(false);
                         // (inverted, the held state is "off": only the switches of node settings are made so)
                         let flip = b.invert && b.momentary && b.action.starts_with("nodet:");
                         if down && !was {
@@ -563,6 +570,16 @@ pub fn parse_midi(status: u8, d1: u8, d2: u8) -> Option<(Src, f32)> {
     }
 }
 
+/// Which of the open MIDI inputs (index and name) have to be closed and which of the devices that are present (index and name) have
+/// to be opened: positions in the two lists. The index alone is not an identity: the multimedia API numbers the devices anew when
+/// one is unplugged, so the same index can be another device, and the same device another index.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn diff_inputs(open: &[(u32, String)], present: &[(u32, String)]) -> (Vec<usize>, Vec<usize>) {
+    let close = (0..open.len()).filter(|&i| !present.contains(&open[i])).collect();
+    let add = (0..present.len()).filter(|&i| !open.contains(&present[i])).collect();
+    (close, add)
+}
+
 // ---------------------------------------------------------------------- MIDI (Windows multimedia API)
 
 #[cfg(windows)]
@@ -582,12 +599,15 @@ mod midi {
         }
     }
 
-    /// Open every MIDI input that is not open yet. Returns the names of the open ones.
-    pub fn scan(open: &mut Vec<(u32, isize)>) -> Vec<String> {
+    /// An open input: the index and the name it had when it was opened, and the handle.
+    pub type Open = (u32, String, isize);
+
+    /// Open every MIDI input that is not open yet, close the ones that went away. Returns the names of the open ones.
+    pub fn scan(open: &mut Vec<Open>) -> Vec<String> {
         // SAFETY: plain calls of the multimedia API with valid pointers; the callback only reads its arguments
         unsafe {
             let n = midiInGetNumDevs();
-            let mut names = Vec::new();
+            let mut present: Vec<(u32, String)> = Vec::new();
             for id in 0..n {
                 let mut caps: MIDIINCAPSW = std::mem::zeroed();
                 if midiInGetDevCapsW(id as usize, &mut caps, std::mem::size_of::<MIDIINCAPSW>() as u32) != 0 {
@@ -596,27 +616,28 @@ mod midi {
                 // (a copy: the structure is packed)
                 let pname = caps.szPname;
                 let len = pname.iter().position(|c| *c == 0).unwrap_or(pname.len());
-                let name = String::from_utf16_lossy(&pname[..len]);
-                if !open.iter().any(|o| o.0 == id) {
+                present.push((id, String::from_utf16_lossy(&pname[..len])));
+            }
+            let keys: Vec<(u32, String)> = open.iter().map(|o| (o.0, o.1.clone())).collect();
+            let (close, add) = diff_inputs(&keys, &present);
+            // (from the back, so that the places of the others stay valid)
+            for &i in close.iter().rev() {
+                let o = open.remove(i);
+                midiInClose(o.2 as HMIDIIN);
+            }
+            let mut names: Vec<String> = Vec::new();
+            for (i, (id, name)) in present.iter().enumerate() {
+                if add.contains(&i) {
                     let mut h: HMIDIIN = std::ptr::null_mut();
-                    if midiInOpen(&mut h, id, callback as *const () as usize, 0, CALLBACK_FUNCTION) == 0 {
+                    if midiInOpen(&mut h, *id, callback as *const () as usize, 0, CALLBACK_FUNCTION) == 0 {
                         midiInStart(h);
-                        open.push((id, h as isize));
+                        open.push((*id, name.clone(), h as isize));
                     } else {
                         continue;
                     }
                 }
-                names.push(name);
+                names.push(name.clone());
             }
-            // devices that went away
-            open.retain(|o| {
-                if o.0 < n {
-                    true
-                } else {
-                    midiInClose(o.1 as HMIDIIN);
-                    false
-                }
-            });
             names
         }
     }
@@ -721,7 +742,7 @@ pub fn start_sources() {
     std::thread::Builder::new()
         .name("input-midi".into())
         .spawn(|| {
-            let mut open: Vec<(u32, isize)> = Vec::new();
+            let mut open: Vec<midi::Open> = Vec::new();
             loop {
                 let names = midi::scan(&mut open);
                 set_devices("MIDI", names);
@@ -737,6 +758,49 @@ mod tests {
 
     fn defs() -> Vec<ActionDef> {
         actions()
+    }
+
+    /// Unplugging a device in the middle renumbers the ones after it: the handle of the one that went is closed, the others stay open,
+    /// and one that now has another index is opened again under it.
+    #[test]
+    fn midi_inputs_are_followed_by_name_not_by_index() {
+        let d = |i: u32, n: &str| (i, n.to_string());
+        let open = vec![d(0, "Keys"), d(1, "Pads"), d(2, "Knobs")];
+        // nothing changed
+        assert_eq!(diff_inputs(&open, &open), (vec![], vec![]));
+        // "Pads" unplugged: "Knobs" is index 1 now
+        let present = vec![d(0, "Keys"), d(1, "Knobs")];
+        let (close, add) = diff_inputs(&open, &present);
+        assert_eq!(close, vec![1, 2], "the old handles of Pads and of Knobs (under index 2) are closed");
+        assert_eq!(add, vec![1], "Knobs is opened again as index 1");
+        // a device that appeared
+        let present = vec![d(0, "Keys"), d(1, "Pads"), d(2, "Knobs"), d(3, "New")];
+        assert_eq!(diff_inputs(&open, &present), (vec![], vec![3]));
+        // everything gone
+        assert_eq!(diff_inputs(&open, &[]), (vec![0, 1, 2], vec![]));
+        // two identical devices are told apart by their index
+        let twin = vec![d(0, "Same"), d(1, "Same")];
+        assert_eq!(diff_inputs(&twin, &[d(0, "Same")]), (vec![1], vec![]));
+    }
+
+    /// A button that is held while another binding is removed (the list shifts) still ends with its release.
+    #[test]
+    fn a_held_button_survives_changes_of_the_list() {
+        let d = defs();
+        let mut m = Mapper::default();
+        let (ka, kb) = (Src::Key { key: "A".into(), ctrl: false, shift: false, alt: false }, Src::Key { key: "B".into(), ctrl: false, shift: false, alt: false });
+        m.assign("freeze", ka, (0.0, 1.0));
+        m.assign("monitor", kb.clone(), (0.0, 1.0));
+        m.bindings.last_mut().unwrap().momentary = true;
+        assert_eq!(m.process(vec![(kb.clone(), 1.0)], &d).len(), 1);
+        // the first binding goes: "monitor" is the first one now
+        m.clear("freeze");
+        let f = m.process(vec![(kb.clone(), 0.0)], &d);
+        assert_eq!(f, vec![Fire { action: "monitor".into(), value: 0.0 }], "the release is not lost");
+        // a binding that is replaced starts with its button up
+        assert_eq!(m.process(vec![(kb.clone(), 1.0)], &d).len(), 1);
+        m.assign("monitor", kb.clone(), (0.0, 1.0));
+        assert_eq!(m.process(vec![(kb, 1.0)], &d).len(), 1, "a press of the new binding fires");
     }
 
     #[test]

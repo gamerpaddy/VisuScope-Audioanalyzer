@@ -199,6 +199,14 @@ impl UserPreset {
     }
 }
 
+/// The saved layouts of a settings file: `preset_0`, `preset_1` ... up to the first one that is missing or damaged. The menu lets the
+/// user save any number of them, so the count is not limited to the few the first versions had (the 33rd and later were dropped at
+/// the next start); the cap only keeps a damaged file from being walked through for ever.
+fn decode_presets(m: &std::collections::HashMap<&str, &str>) -> Vec<UserPreset> {
+    let old = m.get("layout_ver").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1) < 2;
+    (0..1000).map_while(|i| m.get(format!("preset_{i}").as_str()).and_then(|s| UserPreset::decode(s, old))).collect()
+}
+
 impl App {
     pub fn presets_save(&self, out: &mut String) {
         use std::fmt::Write;
@@ -208,14 +216,7 @@ impl App {
     }
 
     pub fn presets_load(&mut self, m: &std::collections::HashMap<&str, &str>) {
-        self.presets.clear();
-        let old = m.get("layout_ver").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(1) < 2;
-        for i in 0..32 {
-            match m.get(format!("preset_{i}").as_str()).and_then(|s| UserPreset::decode(s, old)) {
-                Some(p) => self.presets.push(p),
-                None => break,
-            }
-        }
+        self.presets = decode_presets(m);
     }
 
     fn apply_builtin(&mut self, k: usize) {
@@ -490,6 +491,23 @@ mod tests {
         assert!(q.open[0] && q.open[10] && !q.open[1]);
         assert_eq!(q.rects[0], Some([0.1, 0.2, 0.5, 0.6]));
         assert!(q.rects[1].is_none());
+    }
+
+    #[test]
+    fn more_than_32_saved_layouts_come_back() {
+        let mut open = vec![false; WIN_COUNT];
+        open[0] = true;
+        let texts: Vec<String> = (0..50).map(|i| UserPreset { name: format!("layout {i}"), open: open.clone(), rects: vec![None; WIN_COUNT] }.encode()).collect();
+        let keys: Vec<String> = (0..50).map(|i| format!("preset_{i}")).collect();
+        let mut m: std::collections::HashMap<&str, &str> = keys.iter().zip(&texts).map(|(k, t)| (k.as_str(), t.as_str())).collect();
+        m.insert("layout_ver", "2");
+        let got = decode_presets(&m);
+        assert_eq!(got.len(), 50);
+        assert_eq!(got[49].name, "layout 49");
+        // a gap ends the list, as it always did
+        let mut m2 = m.clone();
+        m2.remove("preset_3");
+        assert_eq!(decode_presets(&m2).len(), 3);
     }
 
     #[test]

@@ -98,7 +98,7 @@ fn decode(path: &std::path::Path, ext: &str) -> Result<(u32, Vec<Vec<f32>>), Str
                 }
                 for fr in b.samples().chunks_exact(chans) {
                     for (c, o) in out.iter_mut().enumerate() {
-                        o.push(fr[c]);
+                        o.push(wavio::finite(fr[c]));
                     }
                 }
                 if out.len() as u64 * out[0].len() as u64 > limit {

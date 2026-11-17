@@ -20,14 +20,31 @@ pub fn media_dir(path: &Path) -> PathBuf {
     path.with_file_name(format!("{stem}_media"))
 }
 
+/// Write a WAV file so that a crash, a full disk or a failing write leaves the previous file as it was: the audio goes into a
+/// temporary file next to it that replaces the target only when it is complete and on disk. `fill` writes the frames.
+pub fn write_wav_atomic(path: &Path, fmt: Format, ch: u16, sr: u32, fill: impl FnOnce(&mut WavWriter) -> std::io::Result<()>) -> std::io::Result<()> {
+    crate::fsutil::atomic_write_with(path, |tmp| {
+        let mut w = WavWriter::create(tmp, fmt, ch, sr)?;
+        fill(&mut w)?;
+        w.finish()?;
+        // (the writer has closed the file; the rename must not get ahead of the data)
+        // (best effort: a virus scanner holding the fresh file must not fail the whole save)
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(tmp) {
+            let _ = f.sync_all();
+        }
+        Ok(())
+    })
+}
+
 pub fn write_wav(path: &Path, src: &Source, sr: u32) -> std::io::Result<()> {
     let ch = src.ch.len().min(2) as u16;
-    let mut w = WavWriter::create(path, Format::Float32, ch, sr)?;
-    let r = if src.ch.len() > 1 { &src.ch[1] } else { &src.ch[0] };
-    for (a, b) in src.ch[0].chunks(1 << 16).zip(r.chunks(1 << 16)) {
-        w.write(a, b)?;
-    }
-    w.finish()
+    write_wav_atomic(path, Format::Float32, ch, sr, |w| {
+        let r = if src.ch.len() > 1 { &src.ch[1] } else { &src.ch[0] };
+        for (a, b) in src.ch[0].chunks(1 << 16).zip(r.chunks(1 << 16)) {
+            w.write(a, b)?;
+        }
+        Ok(())
+    })
 }
 
 fn mode_str(m: Mode) -> String {
@@ -61,10 +78,9 @@ pub fn save(proj: &Project, path: &Path) -> Result<(), String> {
         seen.push(c.src.id);
         let file = format!("src{}.wav", c.src.id);
         let target = media.join(&file);
-        let already = c.src.saved.lock().as_ref().is_some_and(|p| *p == target && p.exists());
-        if !already {
+        if !c.src.is_saved_at(&target) {
             write_wav(&target, &c.src, proj.sr).map_err(|e| format!("{}: {e}", target.display()))?;
-            *c.src.saved.lock() = Some(target);
+            c.src.mark_saved(target);
         }
         let _ = writeln!(out, "src {}|{}/{}|{}", c.src.id, media_name, file, esc(&c.src.name));
     }
@@ -228,6 +244,8 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
             proj.reserve_id(cid);
             let Some(ti) = proj.track_index(tid) else { continue };
             let sr = proj.sr;
+            // (a clip further away than a day is a damaged file: rendering up to it would never fit into memory)
+            let max_start = Project::max_start(sr);
             let src = srcs
                 .entry(sid)
                 .or_insert_with(|| {
@@ -235,7 +253,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
                     let (fsr, chans) = crate::tools::decode::read_all(p).ok()?;
                     let chans: Vec<Vec<f32>> = chans.into_iter().take(2).map(|c| resample(&c, fsr, sr)).collect();
                     let s = Source::new(sid, name.clone(), chans);
-                    *s.saved.lock() = Some(p.clone());
+                    s.mark_saved(p.clone());
                     Some(Arc::new(s))
                 })
                 .clone();
@@ -251,7 +269,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
             let mut c = Clip {
                 id: cid,
                 src,
-                start: f[3].parse::<i64>().unwrap_or(0).clamp(-1_000_000_000_000, 1_000_000_000_000),
+                start: f[3].parse::<i64>().unwrap_or(0).clamp(-max_start, max_start),
                 off,
                 len,
                 gain_db: num(f.get(6)).clamp(-90.0, 36.0),
@@ -426,6 +444,80 @@ mod tests {
             });
             assert!(r.is_ok(), "case {case} panicked");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failing_wav_write_leaves_the_previous_file_untouched() {
+        let dir = std::env::temp_dir().join(format!("visuscope_daw_wav_atomic_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("src1.wav");
+        let src = Source::new(1, "s".into(), vec![(0..5000).map(|i| (i as f32 * 0.01).sin()).collect()]);
+        write_wav(&path, &src, 48000).unwrap();
+        let good = std::fs::read(&path).unwrap();
+        // a write that breaks half way (disk full, crash): the file that was there stays as it was
+        let err = write_wav_atomic(&path, Format::Float32, 1, 48000, |w| {
+            w.write(&[0.5; 1000], &[0.5; 1000])?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(err.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), good);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temporary file stays behind");
+        // and a good write replaces it completely
+        let other = Source::new(2, "t".into(), vec![vec![0.25; 100]]);
+        write_wav(&path, &other, 48000).unwrap();
+        assert_eq!(crate::tools::decode::read_all(&path).unwrap().1[0].len(), 100);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clip_placed_years_away_is_pulled_back_on_load() {
+        let dir = std::env::temp_dir().join(format!("visuscope_daw_far_clip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.vsproj");
+        let mut p = Project::new(48000);
+        let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        p.add_clip(ti, Arc::new(Source::new(1, "s".into(), vec![vec![0.1; 500]])), 700);
+        save(&p, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let damaged: Vec<String> = text.lines().map(|l| if l.starts_with("clip ") { l.replacen("|700|", "|1000000000000|", 1) } else { l.to_string() }).collect();
+        assert_ne!(damaged.join("
+"), text.trim_end());
+        std::fs::write(&path, damaged.join("
+")).unwrap();
+        let q = load(&path).unwrap().proj;
+        let c = &q.tracks[0].clips[0];
+        assert_eq!(c.start, Project::max_start(48000));
+        // what a mixdown of that project would ask for is refused instead of allocated
+        assert!(Project::render_refusal(0, q.end_frame(), 150_000_000, 48000).is_some());
+        assert!(Project::render_refusal(0, 48000 * 600, 150_000_000, 48000).is_none());
+        assert!(Project::render_refusal(5, 3, 10, 48000).is_none(), "an empty or backwards range is not too long");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_to_the_autosave_and_the_project_in_turn_writes_each_source_once_per_folder() {
+        let dir = std::env::temp_dir().join(format!("visuscope_daw_two_targets_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (proj_file, auto_file) = (dir.join("mine.vsproj"), dir.join("auto").join("session.vsproj"));
+        let mut p = Project::new(48000);
+        let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+        p.add_clip(ti, Arc::new(Source::new(3, "s".into(), vec![vec![0.3; 2000]])), 0);
+        save(&p, &proj_file).unwrap();
+        save(&p, &auto_file).unwrap();
+        // the copy in the project's folder is marked: the next save to it must not write it again
+        let media = media_dir(&proj_file).join("src3.wav");
+        std::fs::write(&media, b"sentinel").unwrap();
+        save(&p, &proj_file).unwrap();
+        assert_eq!(std::fs::read(&media).unwrap(), b"sentinel", "an autosave in between made the project rewrite its media");
+        // a file that has gone is written again
+        std::fs::remove_file(&media).unwrap();
+        save(&p, &proj_file).unwrap();
+        assert!(media.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

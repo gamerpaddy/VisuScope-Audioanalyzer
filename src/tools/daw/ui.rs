@@ -40,6 +40,13 @@ impl View {
     }
 }
 
+/// How many tracks clips that came from tracks `lo..=hi` may move up or down (`want`) in a project of `n` tracks; `None` when those
+/// tracks are not all there any more.
+fn track_shift(want: isize, lo: isize, hi: isize, n: usize) -> Option<isize> {
+    let top = (n as isize - 1).saturating_sub(hi);
+    (lo >= 0 && lo <= hi && -lo <= top).then(|| want.clamp(-lo, top))
+}
+
 fn track_color(t: &Track) -> Color32 {
     let (r, g, b) = TRACK_COLORS[t.color % COLOR_COUNT];
     Color32::from_rgb(r, g, b)
@@ -196,14 +203,18 @@ fn hbar(p: &Painter, r: Rect, level: f32) {
 /// Min / max of a clip between clip-relative frames `[a, b)`; `ch` = one channel, `None` = all.
 fn wave_minmax(c: &Clip, ch: Option<usize>, a: usize, b: usize) -> (f32, f32) {
     let (s, e) = if c.reverse { (c.off + c.len - b, c.off + c.len - a) } else { (c.off + a, c.off + b) };
-    let chans: Vec<usize> = match ch {
-        Some(k) => vec![k.min(c.src.ch.len() - 1)],
-        None => (0..c.src.ch.len()).collect(),
+    // (called for every pixel column of every clip on every frame: the channels are a range, not a vector)
+    let chans = match ch {
+        Some(k) => {
+            let k = k.min(c.src.ch.len() - 1);
+            k..k + 1
+        }
+        None => 0..c.src.ch.len(),
     };
     let mut r = (0f32, 0f32);
     if e - s >= 2 * OV_BLOCK {
         let (b0, b1) = (s / OV_BLOCK, e.div_ceil(OV_BLOCK));
-        for &k in &chans {
+        for k in chans {
             let ov = &c.src.ov[k];
             for &(lo, hi) in &ov[b0..b1.min(ov.len())] {
                 r.0 = r.0.min(lo);
@@ -211,7 +222,7 @@ fn wave_minmax(c: &Clip, ch: Option<usize>, a: usize, b: usize) -> (f32, f32) {
             }
         }
     } else {
-        for &k in &chans {
+        for k in chans {
             for &v in &c.src.ch[k][s..e.min(c.src.len())] {
                 r.0 = r.0.min(v);
                 r.1 = r.1.max(v);
@@ -1495,9 +1506,9 @@ impl Daw {
                 let min_start = d.orig.iter().map(|o| o.0.start).min().unwrap_or(0);
                 dt = dt.max(-min_start);
                 let ti_now = Self::row_at(rows, ptr.y) as isize;
-                let mut dtr = ti_now - d.press_track as isize;
                 let (lo, hi) = d.orig.iter().fold((isize::MAX, isize::MIN), |(l, h), o| (l.min(o.1 as isize), h.max(o.1 as isize)));
-                dtr = dtr.clamp(-lo, p.tracks.len() as isize - 1 - hi);
+                // (tracks can be gone since the drag began, a merge that finished meanwhile: then there is nothing to move)
+                let Some(dtr) = track_shift(ti_now - d.press_track as isize, lo, hi, p.tracks.len()).filter(|_| d.press_track < p.tracks.len()) else { return };
                 for (c, ti) in &d.orig {
                     for t in p.tracks.iter_mut() {
                         t.clips.retain(|x| x.id != c.id);
@@ -1560,5 +1571,109 @@ impl Daw {
                 if ui.button(crate::lang::tr("Cancel")).clicked() { self.pending_replace = None; self.replace_after_save = false; }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `wave_minmax` was before it stopped allocating a vector of channels per call.
+    fn wave_minmax_ref(c: &Clip, ch: Option<usize>, a: usize, b: usize) -> (f32, f32) {
+        let (s, e) = if c.reverse { (c.off + c.len - b, c.off + c.len - a) } else { (c.off + a, c.off + b) };
+        let chans: Vec<usize> = match ch {
+            Some(k) => vec![k.min(c.src.ch.len() - 1)],
+            None => (0..c.src.ch.len()).collect(),
+        };
+        let mut r = (0f32, 0f32);
+        if e - s >= 2 * OV_BLOCK {
+            let (b0, b1) = (s / OV_BLOCK, e.div_ceil(OV_BLOCK));
+            for &k in &chans {
+                let ov = &c.src.ov[k];
+                for &(lo, hi) in &ov[b0..b1.min(ov.len())] {
+                    r.0 = r.0.min(lo);
+                    r.1 = r.1.max(hi);
+                }
+            }
+        } else {
+            for &k in &chans {
+                for &v in &c.src.ch[k][s..e.min(c.src.len())] {
+                    r.0 = r.0.min(v);
+                    r.1 = r.1.max(v);
+                }
+            }
+        }
+        r
+    }
+
+    fn noise_clip(n: usize, stereo: bool, reverse: bool) -> Clip {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+        };
+        let ch: Vec<Vec<f32>> = (0..if stereo { 2 } else { 1 }).map(|_| (0..n).map(|_| next()).collect()).collect();
+        let src = Arc::new(Source::new(1, "n".into(), ch));
+        Clip { id: 1, src, start: 0, off: 100, len: n - 300, gain_db: 0.0, fade_in: 0, fade_out: 0, reverse, muted: false, name: "n".into(), xf: 0 }
+    }
+
+    #[test]
+    fn the_waveform_extremes_are_what_they_were() {
+        for (stereo, reverse) in [(false, false), (true, false), (true, true), (false, true)] {
+            let c = noise_clip(20_000, stereo, reverse);
+            let mut seed = 12345u32;
+            for _ in 0..400 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let a = (seed >> 8) as usize % c.len;
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let span = [1usize, 7, 300, 511, 512, 513, 1500, 9000][(seed >> 12) as usize % 8];
+                let b = (a + span).min(c.len);
+                if b <= a {
+                    continue;
+                }
+                for ch in [None, Some(0), Some(1), Some(5)] {
+                    assert_eq!(wave_minmax(&c, ch, a, b), wave_minmax_ref(&c, ch, a, b), "a {a} b {b} ch {ch:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_wave_minmax() {
+        let c = noise_clip(2_000_000, true, false);
+        let cols = 1400usize;
+        let fpp = c.len / cols;
+        let run = |f: &dyn Fn(&Clip, Option<usize>, usize, usize) -> (f32, f32)| {
+            let t = std::time::Instant::now();
+            let mut acc = 0f32;
+            // 30 clips on screen, a frame each
+            for _ in 0..30 {
+                for x in 0..cols {
+                    for ch in [Some(0), Some(1)] {
+                        let (lo, hi) = f(&c, ch, x * fpp, (x + 1) * fpp);
+                        acc += lo + hi;
+                    }
+                }
+            }
+            (t.elapsed(), acc)
+        };
+        let (old, _) = run(&|c, ch, a, b| wave_minmax_ref(c, ch, a, b));
+        let (new, _) = run(&|c, ch, a, b| wave_minmax(c, ch, a, b));
+        println!("per frame, 30 clips x {cols} columns x 2 channels: old {old:?}, new {new:?}");
+    }
+
+    #[test]
+    fn clips_move_between_tracks_only_while_those_tracks_exist() {
+        // clips from tracks 1..=2 in a project of 5 tracks: up one, down two
+        assert_eq!(track_shift(-3, 1, 2, 5), Some(-1));
+        assert_eq!(track_shift(9, 1, 2, 5), Some(2));
+        assert_eq!(track_shift(0, 1, 2, 5), Some(0));
+        // a merge removed tracks while the drag was on: no panic, no move
+        assert_eq!(track_shift(1, 1, 4, 3), None);
+        assert_eq!(track_shift(0, 0, 0, 0), None);
+        assert_eq!(track_shift(0, isize::MAX, isize::MIN, 4), None);
     }
 }

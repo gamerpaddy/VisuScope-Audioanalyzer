@@ -49,7 +49,7 @@ impl Meas {
     /// dB at `freq`, interpolated on a log axis; NaN outside the stored range.
     pub fn at(&self, freq: f32) -> f32 {
         let f = &self.f;
-        if f.len() < 2 || freq < f[0] || freq > *f.last().unwrap() {
+        if f.len() < 2 || self.mag.len() < f.len() || freq < f[0] || freq > *f.last().unwrap() {
             return f32::NAN;
         }
         let j = f.partition_point(|&x| x < freq).clamp(1, f.len() - 1);
@@ -150,12 +150,13 @@ impl Library {
     }
 
     fn average_visible(&mut self) {
-        let vis: Vec<&Meas> = self.items.iter().filter(|m| m.visible).collect();
+        // (a trace needs a point above 0 Hz for the log grid: REW exports start with a 0 Hz row, and a trace without points has no range)
+        let vis: Vec<&Meas> = self.items.iter().filter(|m| m.visible && m.f.last().is_some_and(|&l| l > 0.0)).collect();
         if vis.len() < 2 {
             return;
         }
         // common grid: the widest log range, 900 points
-        let f0 = vis.iter().map(|m| m.f[0]).fold(f32::MAX, f32::min);
+        let f0 = vis.iter().filter_map(|m| m.f.iter().copied().find(|&x| x > 0.0)).fold(f32::MAX, f32::min);
         let f1 = vis.iter().map(|m| *m.f.last().unwrap()).fold(0.0, f32::max);
         let f: Vec<f32> = (0..900).map(|i| f0 * (f1 / f0).powf(i as f32 / 899.0)).collect();
         let mag: Vec<f32> = f
@@ -252,7 +253,7 @@ impl Library {
             && let Some(res) = d.take() {
                 self.save_dlg = None;
                 if let Some(path) = res {
-                    note = Some(match std::fs::write(&path, self.to_text()) {
+                    note = Some(match crate::fsutil::atomic_write(&path, self.to_text()) {
                         Ok(_) => format!("Saved {} traces to {}", self.items.len(), path.display()),
                         Err(e) => format!("save failed: {e}"),
                     });
@@ -406,5 +407,21 @@ mod tests {
         l.average_visible();
         let avg = &l.items[2];
         assert!((avg.at(1000.0) - (l.items[0].at(1000.0) + 3.96)).abs() < 0.2);
+    }
+
+    #[test]
+    fn the_average_of_traces_that_start_at_zero_hertz_has_a_grid() {
+        let mut l = Library::default();
+        // an export with a 0 Hz row first, and a trace that has no points at all
+        let f: Vec<f32> = std::iter::once(0.0).chain((1..50).map(|i| 20.0 * 1000f32.powf(i as f32 / 49.0))).collect();
+        l.add(Some("a".into()), f.clone(), vec![0.0; 50], vec![]);
+        l.add(Some("b".into()), f.clone(), vec![6.0; 50], vec![]);
+        l.add(Some("empty".into()), vec![], vec![], vec![]);
+        l.average_visible();
+        let avg = l.items.last().unwrap();
+        assert_eq!(avg.name, "Average of 2");
+        assert!(avg.f.iter().all(|x| x.is_finite() && *x >= 20.0 - 0.01), "{:?}", &avg.f[..3]);
+        assert!(avg.f.windows(2).all(|w| w[1] > w[0]));
+        assert!((avg.at(1000.0) - 3.96).abs() < 0.1);
     }
 }

@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// The fader values of a track header while they are being dragged.
+struct Fader {
+    vol_db: f32,
+    pan: f32,
+}
+
+/// The channel settings of a track that the sub-track rows edit.
+struct ChanRows {
+    chan: Chan,
+    pan: f32,
+    ch_db: [f32; 2],
+    ch_mute: [bool; 2],
+}
+
 impl Daw {
     /// A click on a track header: selects it; with Ctrl it joins or leaves the group of selected tracks.
     pub(super) fn click_track(&mut self, ui: &Ui, id: u32) {
@@ -274,7 +288,8 @@ impl Daw {
                 let minis = 1 + usize::from(p.tracks[ti].clips.iter().any(|c| c.src.stereo()));
                 let free = ui.available_width() - 2.0 * 12.0 - minis as f32 * 18.0 - (3 + minis) as f32 * ui.spacing().item_spacing.x;
                 ui.spacing_mut().slider_width = (free / 2.0).clamp(18.0, 60.0);
-                let mut t = p.tracks[ti].clone();
+                // (only the two values: a copy of the whole track would copy all its clips on every frame)
+                let mut t = Fader { vol_db: p.tracks[ti].vol_db, pan: p.tracks[ti].pan };
                 draw_icon(ui, SliderIcon::Volume);
                 let tip = format!("Volume {:+.1} dB", t.vol_db);
                 let ch1 = self.fader(ui, ("vol", id), &mut t.vol_db, -60.0..=12.0, 0.0, 1.0, &tip);
@@ -383,7 +398,9 @@ impl Daw {
     /// Left / right sub-track controls of a stereo track, plus mono conversion and splitting.
     pub(super) fn channel_rows(&mut self, ui: &mut Ui, p: &mut Project, ti: usize) {
         let id = p.tracks[ti].id;
-        let mut t = p.tracks[ti].clone();
+        let src = &p.tracks[ti];
+        // (only what the rows change: a copy of the whole track would copy all its clips on every frame)
+        let mut t = ChanRows { chan: src.chan, pan: src.pan, ch_db: src.ch_db, ch_mute: src.ch_mute };
         let (mut changed, mut ck) = (false, false);
         match t.chan {
             Chan::Stereo => {

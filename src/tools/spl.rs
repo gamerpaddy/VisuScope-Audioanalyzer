@@ -106,8 +106,9 @@ pub struct Spl {
     peak_c: f64,
     sum: [f64; 3],
     cnt: u64,
-    hist: Vec<f32>,
-    hist_total: f32,
+    // (f64: seconds added in small steps to an f32 total lose their weight after some hours)
+    hist: Vec<f64>,
+    hist_total: f64,
     history: Vec<f32>,
     hist_t: f32,
     frame_t: Option<std::time::Instant>,
@@ -238,7 +239,7 @@ impl Spl {
         if self.hist_total < 1.0 {
             return None;
         }
-        let target = self.hist_total * pct / 100.0;
+        let target = self.hist_total * pct as f64 / 100.0;
         let mut acc = 0.0;
         for i in (0..HIST_BINS).rev() {
             acc += self.hist[i];
@@ -264,8 +265,8 @@ impl Tool for Spl {
         // percentile statistics are kept on the displayed (calibrated) level in 0.1 dB bins from -60 dB
         let bin = ((self.lp + 60.0) * 10.0).round();
         if bin >= 0.0 && (bin as usize) < HIST_BINS && self.cnt > 0 {
-            self.hist[bin as usize] += dt;
-            self.hist_total += dt;
+            self.hist[bin as usize] += dt as f64;
+            self.hist_total += dt as f64;
         }
         self.hist_t += dt;
         if self.hist_t >= 0.1 {
@@ -469,5 +470,27 @@ mod tests {
         assert!((rms_through(&mut c, 100.0, sr) + 0.3).abs() < 0.3);
         let mut c = Weighting::new(false, sr);
         assert!((rms_through(&mut c, 31.5, sr) + 3.0).abs() < 0.4);
+    }
+
+    #[test]
+    fn percentile_levels_come_from_the_time_spent_in_each_bin() {
+        let mut s = Spl::new();
+        assert_eq!(s.percentile(50.0), None);
+        // 10 s at 60 dB (bin 1200), 80 s at 70 dB (bin 1300), 10 s at 80 dB (bin 1400)
+        for (bin, secs) in [(1200usize, 10.0f64), (1300, 80.0), (1400, 10.0)] {
+            s.hist[bin] += secs;
+            s.hist_total += secs;
+        }
+        let near = |v: Option<f32>, want: f32| v.is_some_and(|v| (v - want).abs() < 0.11);
+        assert!(near(s.percentile(5.0), 80.0), "{:?}", s.percentile(5.0));
+        assert!(near(s.percentile(50.0), 70.0));
+        assert!(near(s.percentile(95.0), 60.0));
+        // a day of 16 ms steps still counts every one of them (an f32 total of this size would round most of the steps away)
+        let mut s = Spl::new();
+        for _ in 0..(24 * 3600 * 1000 / 16) {
+            s.hist[1300] += 0.016;
+            s.hist_total += 0.016;
+        }
+        assert!((s.hist_total - 86_400.0).abs() < 1.0, "{}", s.hist_total);
     }
 }

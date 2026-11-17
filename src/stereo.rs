@@ -5,8 +5,30 @@ use crate::shared::*;
 use crate::views::{icon_btn, Ico, BG, GRID_MAJOR, TXT};
 use eframe::egui::{self, vec2, Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions, Ui};
 use std::collections::VecDeque;
+use std::sync::{Arc, OnceLock};
 
 const G: usize = 360;
+
+/// The colour of the phosphor for every brightness step 0..1023. The curve is a constant (the brightness control scales the index
+/// into it), so the table, a power per entry, is built once and not for every picture.
+fn phosphor_lut() -> &'static [Color32; 1024] {
+    static LUT: OnceLock<[Color32; 1024]> = OnceLock::new();
+    LUT.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let g = (i as f32 / 1023.0).powf(0.55);
+            Color32::from_rgb((g * g * 150.0) as u8, (g * 255.0) as u8, (g * g * 120.0) as u8)
+        })
+    })
+}
+
+/// The picture of the phosphor `buf` (0..1 per pixel) at display gain `bright`, into `out`.
+fn phosphor_pixels(buf: &[f32], bright: f32, out: &mut [Color32]) {
+    let lut = phosphor_lut();
+    let k = bright * 1023.0;
+    for (o, &v) in out.iter_mut().zip(buf) {
+        *o = lut[(v * k).clamp(0.0, 1023.0) as usize];
+    }
+}
 
 pub struct StereoState {
     cursor: u64,
@@ -44,6 +66,10 @@ pub struct StereoState {
     lit: bool,
     /// brightness the uploaded picture was built with
     built_bright: f32,
+    /// the window was not shown at the last `update`: nothing was consumed, so the picture and the meters start afresh when it is
+    parked: bool,
+    /// the picture that was handed to the texture last time; its buffer is built into again when the toolkit has let go of it
+    img: Option<Arc<ColorImage>>,
 }
 
 impl StereoState {
@@ -77,14 +103,37 @@ impl StereoState {
             dirty: true,
             lit: true,
             built_bright: -1.0,
+            parked: false,
+            img: None,
         }
     }
 
-    /// Consume samples that arrived since the last frame.
-    pub fn update(&mut self, sh: &Shared, dt: f32) {
+    /// Something of this window that needs the samples is on screen (the picture, the meter or its history).
+    pub fn wanted(&self) -> bool {
+        self.show[0] || self.show[1] || self.show[2]
+    }
+
+    /// Consume samples that arrived since the last frame. `shown`: the window is on screen. Nothing else reads the picture or the
+    /// meters, so a window that is closed costs nothing (the decay of the picture, the filters and the ring copy were paid every
+    /// frame); when it is opened again it starts afresh (the picture it had is gone anyway after a persistence time, except with
+    /// infinite persistence, which keeps it).
+    pub fn update(&mut self, sh: &Shared, dt: f32, shown: bool) {
+        if !shown {
+            self.parked = true;
+            return;
+        }
         let sr = sh.sr.load(std::sync::atomic::Ordering::Relaxed) as f64;
         if sr == 0.0 {
             return;
+        }
+        if self.parked {
+            self.parked = false;
+            if !self.hold {
+                self.buf.fill(0.0);
+                self.dirty = true;
+            }
+            (self.ll_f, self.rr_f, self.lr_f, self.ll_s, self.rr_s, self.lr_s) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            self.hist.clear();
         }
         let (from, n) = {
             // never block the UI thread on the audio / DSP threads
@@ -257,20 +306,15 @@ impl App {
         if rebuild {
             self.stereo.dirty = false;
             self.stereo.built_bright = self.stereo.brightness;
-            let s = &self.stereo;
-            // the colour curve is a table of 1024 steps (a power per pixel and frame was the most expensive part of this window)
-            let lut: Vec<Color32> = (0..1024)
-                .map(|i| {
-                    let g = (i as f32 / 1023.0).powf(0.55);
-                    Color32::from_rgb((g * g * 150.0) as u8, (g * 255.0) as u8, (g * g * 120.0) as u8)
-                })
-                .collect();
-            let k = s.brightness * 1023.0;
-            let px: Vec<Color32> = s.buf.iter().map(|&v| lut[(v * k).clamp(0.0, 1023.0) as usize]).collect();
-            let img = ColorImage::new([G, G], px);
-            match &mut self.stereo.tex {
+            let s = &mut self.stereo;
+            // the colour curve is a table of 1024 steps (a power per pixel and frame was the most expensive part of this window),
+            // built once; the picture is built into the buffer of the last one when the toolkit has let go of it
+            let mut img = s.img.take().filter(|i| i.size == [G, G]).unwrap_or_else(|| Arc::new(ColorImage::filled([G, G], Color32::BLACK)));
+            phosphor_pixels(&s.buf, s.brightness, &mut Arc::make_mut(&mut img).pixels);
+            s.img = Some(img.clone());
+            match &mut s.tex {
                 Some(t) => t.set(img, TextureOptions::LINEAR),
-                None => self.stereo.tex = Some(ui.ctx().load_texture("gonio", img, TextureOptions::LINEAR)),
+                None => s.tex = Some(ui.ctx().load_texture("gonio", img, TextureOptions::LINEAR)),
             }
         }
         if let Some(t) = &self.stereo.tex {
@@ -438,5 +482,130 @@ impl App {
             }
         }
         painter.text(plot.left_top() + vec2(3.0, 0.0), Align2::LEFT_TOP, "L/R correlation vs frequency", FontId::proportional(9.0), TXT);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    /// The picture as it was built before the table was kept: a table and a vector for every picture.
+    fn old_picture(buf: &[f32], bright: f32) -> Vec<Color32> {
+        let lut: Vec<Color32> = (0..1024)
+            .map(|i| {
+                let g = (i as f32 / 1023.0).powf(0.55);
+                Color32::from_rgb((g * g * 150.0) as u8, (g * 255.0) as u8, (g * g * 120.0) as u8)
+            })
+            .collect();
+        let k = bright * 1023.0;
+        buf.iter().map(|&v| lut[(v * k).clamp(0.0, 1023.0) as usize]).collect()
+    }
+
+    fn noise(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                // mostly dark, some lit, some above 1 and below 0 (the clamp), a few NaN
+                match s % 17 {
+                    0 => f32::NAN,
+                    1 => -0.3,
+                    2 => 1.7,
+                    _ => (s >> 11) as f32 / (1u64 << 53) as f32,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_picture_is_the_same_as_with_a_table_per_picture() {
+        let lut = phosphor_lut();
+        for i in 0..1024 {
+            let g = (i as f32 / 1023.0).powf(0.55);
+            assert_eq!(lut[i], Color32::from_rgb((g * g * 150.0) as u8, (g * 255.0) as u8, (g * g * 120.0) as u8), "{i}");
+        }
+        let buf = noise(G * G, 7);
+        let mut out = vec![Color32::BLACK; G * G];
+        for bright in [0.1f32, 1.0, 3.3, 8.0] {
+            phosphor_pixels(&buf, bright, &mut out);
+            assert!(out == old_picture(&buf, bright), "brightness {bright}");
+        }
+        // the table is built once
+        assert!(std::ptr::eq(phosphor_lut(), phosphor_lut()));
+    }
+
+    fn shared_with_mono(n: usize) -> Shared {
+        let sh = Shared::new();
+        sh.sr.store(48000, Relaxed);
+        {
+            let mut ring = sh.ring.lock();
+            for i in 0..n {
+                let v = 0.5 * (i as f32 * 0.05).sin();
+                ring.push(v, v);
+            }
+        }
+        sh
+    }
+
+    #[test]
+    fn a_window_that_is_not_shown_consumes_nothing_and_starts_afresh() {
+        let sh = shared_with_mono(1000);
+        let mut st = StereoState::new();
+        st.buf[0] = 0.8;
+        // closed: the picture does not decay, no sample is taken, the meters stay as they were
+        st.update(&sh, 0.05, false);
+        assert_eq!((st.buf[0], st.cursor, st.corr_f), (0.8, 0, 0.0));
+        // shown again: the old picture is gone (it would have decayed long ago), the new samples are in, a mono signal reads +1
+        st.update(&sh, 0.05, true);
+        assert_eq!(st.buf[0], 0.0);
+        assert_eq!(st.cursor, 1000);
+        assert!(st.corr_f > 0.99 && st.corr_s > 0.99, "{} {}", st.corr_f, st.corr_s);
+        assert!(st.buf[G / 2] > 0.0 || st.buf.iter().any(|v| *v > 0.0), "the mono signal is drawn");
+    }
+
+    #[test]
+    fn infinite_persistence_keeps_the_picture_through_a_closed_window() {
+        let sh = shared_with_mono(300);
+        let mut st = StereoState::new();
+        st.hold = true;
+        st.buf[0] = 0.8;
+        st.update(&sh, 0.05, false);
+        st.update(&sh, 0.05, true);
+        assert_eq!(st.buf[0], 0.8);
+    }
+
+    #[test]
+    fn only_a_picture_or_a_meter_wants_the_samples() {
+        let mut st = StereoState::new();
+        assert!(st.wanted());
+        st.show = [false, false, false, true, true];
+        assert!(!st.wanted(), "the frequency plot reads the analysis, the controls nothing");
+        st.show[2] = true;
+        assert!(st.wanted());
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_picture() {
+        let buf = noise(G * G, 11);
+        let mut keep = vec![Color32::BLACK; G * G];
+        let n = 300;
+        let t = std::time::Instant::now();
+        let mut acc = 0u32;
+        for i in 0..n {
+            let p = old_picture(&buf, 1.0 + (i % 3) as f32);
+            acc = acc.wrapping_add(p[i].r() as u32);
+        }
+        let old = t.elapsed().as_secs_f64() * 1e6 / n as f64;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            phosphor_pixels(&buf, 1.0 + (i % 3) as f32, &mut keep);
+            acc = acc.wrapping_add(keep[i].r() as u32);
+        }
+        let new = t.elapsed().as_secs_f64() * 1e6 / n as f64;
+        println!("picture: old {old:.1} us, new {new:.1} us per picture ({acc})");
     }
 }

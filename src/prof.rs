@@ -330,9 +330,26 @@ pub fn clear() {
     st.secs.iter_mut().for_each(|s| s.hiccup = false);
 }
 
-/// Raise the priority of the calling thread a little (audio work should win against the UI).
+/// Raise the priority of the calling thread a little (audio work should win against the UI). Also makes the thread flush
+/// denormal floats to zero (see `flush_denormals`): the engine and player threads are ours and are all about filters.
 pub fn raise_thread_priority() {
     sys::raise();
+    flush_denormals();
+}
+
+/// Makes the calling thread treat denormal floats as zero (x86-64: the FTZ and DAZ bits of MXCSR). A recursive average or a filter
+/// that decays towards digital silence ends up in the denormal range, and then every operation on it takes over a hundred cycles on
+/// many CPUs. Only for threads that are ours (the setting is per thread): never call it in a callback of cpal or of an ASIO driver.
+/// The numbers it changes are smaller than 1e-38 (-760 dB), far below anything that is displayed or measured.
+pub fn flush_denormals() {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: reads and writes the MXCSR register of this thread through a local; sets two mode bits, nothing else
+    unsafe {
+        let mut csr = 0u32;
+        std::arch::asm!("stmxcsr [{p}]", p = in(reg) &mut csr, options(nostack, preserves_flags));
+        csr |= 0x8040;
+        std::arch::asm!("ldmxcsr [{p}]", p = in(reg) &csr, options(nostack, preserves_flags, readonly));
+    }
 }
 
 // ---------------------------------------------------------------------- Windows performance counters
@@ -384,6 +401,18 @@ mod sys {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// Closes the query when `open` leaves early (a counter that does not exist on this machine).
+    struct Query(H);
+
+    impl Drop for Query {
+        fn drop(&mut self) {
+            // SAFETY: a query from PdhOpenQueryW that nothing else closes
+            unsafe {
+                PdhCloseQuery(self.0);
+            }
+        }
+    }
+
     impl Counters {
         pub fn open() -> Option<Counters> {
             // SAFETY: documented PDH calls with valid pointers; handles are only used by this thread
@@ -392,6 +421,7 @@ mod sys {
                 if PdhOpenQueryW(std::ptr::null(), 0, &mut q) != 0 {
                     return None;
                 }
+                let guard = Query(q);
                 let add = |path: &str| -> Option<H> {
                     let mut h: H = std::ptr::null_mut();
                     let p = wide(path);
@@ -410,6 +440,8 @@ mod sys {
                     primed: false,
                 };
                 PdhCollectQueryData(q);
+                // (`Counters` closes it from here on)
+                std::mem::forget(guard);
                 Some(c)
             }
         }
@@ -436,7 +468,8 @@ mod sys {
             if r != PDH_MORE_DATA || bytes == 0 {
                 return None;
             }
-            let mut buf = vec![0u8; bytes as usize + 64];
+            // (the items hold f64 and pointers: the buffer must be 8-byte aligned, which a Vec<u8> does not promise)
+            let mut buf = vec![0u64; (bytes as usize + 64).div_ceil(8)];
             let items = buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
             if unsafe { PdhGetFormattedCounterArrayW(h, PDH_FMT_DOUBLE, &mut bytes, &mut count, items) } != 0 {
                 return None;
@@ -522,6 +555,38 @@ mod tests {
         assert!(diagnose(&Sec { cpu: 97.0, ..base }, true).0.contains("CPU"));
         let idle = diagnose(&Sec { wake_max_ms: 30.0, ..base }, false);
         assert!(idle.0.contains("power") && !idle.1);
+    }
+
+    /// Denormals read as zero in a thread that asked for it, and the setting does not leak into other threads (x86-64 only).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn flush_denormals_makes_denormals_zero() {
+        use std::hint::black_box;
+        let tiny = f32::MIN_POSITIVE / 2.0;
+        let h = std::thread::spawn(move || {
+            let before = black_box(tiny) * black_box(1.0f32);
+            flush_denormals();
+            let after = black_box(tiny) * black_box(1.0f32);
+            let sum = black_box(tiny) + black_box(0.0f32);
+            (before, after, sum)
+        });
+        let (before, after, sum) = h.join().unwrap();
+        assert!(before > 0.0, "a fresh thread keeps denormals");
+        assert_eq!(after, 0.0);
+        assert_eq!(sum, 0.0);
+        // another thread is not affected
+        assert!(std::thread::spawn(move || black_box(tiny) * black_box(1.0f32)).join().unwrap() > 0.0);
+    }
+
+    /// Asking twice (and ending the thread) is harmless.
+    #[test]
+    fn raising_the_priority_twice_is_harmless() {
+        std::thread::spawn(|| {
+            raise_thread_priority();
+            raise_thread_priority();
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

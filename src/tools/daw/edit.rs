@@ -27,14 +27,17 @@ pub struct Region {
     pub gain_db: f32,
 }
 
-/// Weight (0..1) of a region at frame time `tc` and bin `k`: the edges are soft (a few frames, a few bins), so nothing clicks.
-fn weight(r: &Region, tc: f32, k: usize, bin_hz: f32) -> f32 {
+/// How much of a region reaches frame time `tc` (0..1): the edges are soft (a few frames), so nothing clicks.
+fn time_weight(r: &Region, tc: f32) -> f32 {
     let ft = 3.0 * HOP as f32;
-    let wt = ((tc - r.t0 as f32) / ft + 0.5).clamp(0.0, 1.0).min(((r.t1 as f32 - tc) / ft + 0.5).clamp(0.0, 1.0));
+    ((tc - r.t0 as f32) / ft + 0.5).clamp(0.0, 1.0).min(((r.t1 as f32 - tc) / ft + 0.5).clamp(0.0, 1.0))
+}
+
+/// How much of a region reaches bin `k` (0..1): soft edges of a few bins.
+fn freq_weight(r: &Region, k: usize, bin_hz: f32) -> f32 {
     let f = k as f32 * bin_hz;
     let fw = 3.0 * bin_hz;
-    let wf = ((f - r.f0) / fw + 0.5).clamp(0.0, 1.0).min(((r.f1 - f) / fw + 0.5).clamp(0.0, 1.0));
-    wt * wf
+    ((f - r.f0) / fw + 0.5).clamp(0.0, 1.0).min(((r.f1 - f) / fw + 0.5).clamp(0.0, 1.0))
 }
 
 /// Apply the regions to one channel. Only the frames that a region touches are processed; the rest of the signal is untouched.
@@ -49,6 +52,10 @@ pub fn apply_regions(x: &[f32], sr: u32, regs: &[Region]) -> Vec<f32> {
     let bin_hz = sr as f32 / N as f32;
     let mut buf = vec![Complex32::new(0.0, 0.0); N];
     let mut diff = vec![Complex32::new(0.0, 0.0); N];
+    // the level change of each region as a factor, worked out once (it was a `powf` for every bin of every frame)
+    let gains: Vec<f32> = regs.iter().map(|r| 10f32.powf(r.gain_db / 20.0)).collect();
+    // the regions that reach the frame: (region, time weight, level factor)
+    let mut active: Vec<(&Region, f32, f32)> = Vec::with_capacity(regs.len());
     // frames start one window before the signal and go on to one after it (the padding is zeros)
     let frames = (x.len() + N) / HOP + 1;
     for k in 0..frames {
@@ -63,14 +70,16 @@ pub fn apply_regions(x: &[f32], sr: u32, regs: &[Region]) -> Vec<f32> {
             buf[i] = Complex32::new(v * w[i], 0.0);
         }
         fwd.process(&mut buf);
+        // (the time part of a weight is the same for every bin: a region that does not reach this frame does nothing to any bin)
+        active.clear();
+        active.extend(regs.iter().zip(&gains).map(|(r, &rg)| (r, time_weight(r, tc), rg)).filter(|a| a.1 > 0.0));
         let mut any = false;
         for kk in 0..=N / 2 {
             // product of what the regions do to this bin
             let mut g = 1.0f32;
-            for r in regs {
-                let wt = weight(r, tc, kk, bin_hz);
+            for &(r, wt_t, rg) in &active {
+                let wt = wt_t * freq_weight(r, kk, bin_hz);
                 if wt > 0.0 {
-                    let rg = 10f32.powf(r.gain_db / 20.0);
                     g *= 1.0 - wt * (1.0 - rg);
                 }
             }
@@ -290,20 +299,36 @@ pub fn pitch_shift(x: &[f32], semitones: f32) -> Vec<f32> {
 pub fn resample_ratio(x: &[f32], speed: f64, n: usize) -> Vec<f32> {
     const TAPS: isize = 16;
     let cutoff = (1.0 / speed).min(1.0);
+    let pi = std::f64::consts::PI;
+    // The sine of the kernel and the cosine of its window at a tap are those at the fraction of the position, moved on by whole
+    // steps: the angle-sum formulas turn 64 `sin` / `cos` calls for every output sample into two pairs, with the steps in a table.
+    // Tap j = c - k runs from -TAPS to TAPS - 1; entries: (sin, cos) of j * pi * cutoff and of j * pi / TAPS.
+    let theta = pi * cutoff;
+    let steps: Vec<(f64, f64, f64, f64)> = (-TAPS..TAPS)
+        .map(|j| {
+            let (s1, c1) = (theta * j as f64).sin_cos();
+            let (s2, c2) = (pi * j as f64 / TAPS as f64).sin_cos();
+            (s1, c1, s2, c2)
+        })
+        .collect();
     (0..n)
         .map(|i| {
             let t = i as f64 * speed;
             let c = t.floor() as isize;
+            let frac = t - c as f64;
+            let (ks, kc) = (theta * frac).sin_cos();
+            let (ws, wc) = (pi * frac / TAPS as f64).sin_cos();
             let mut acc = 0f64;
             let mut norm = 0f64;
             for k in (c - TAPS + 1)..=(c + TAPS) {
                 if k < 0 || k as usize >= x.len() {
                     continue;
                 }
+                let (s1, c1, s2, c2) = steps[(c - k + TAPS) as usize];
                 let d = t - k as f64;
                 let a = d * cutoff;
-                let sinc = if a.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * a).sin() / (std::f64::consts::PI * a) };
-                let win = 0.5 + 0.5 * (std::f64::consts::PI * d / TAPS as f64).cos();
+                let sinc = if a.abs() < 1e-9 { 1.0 } else { (ks * c1 + kc * s1) / (pi * a) };
+                let win = 0.5 + 0.5 * (wc * c2 - ws * s2);
                 let wgt = sinc * win * cutoff;
                 acc += x[k as usize] as f64 * wgt;
                 norm += wgt;
@@ -459,6 +484,156 @@ mod tests {
             assert!(l > 0.4 && l < 0.6, "{st} semitones: level at {f} Hz is {l}");
             assert!(level(mid, 440.0, sr) < 0.1, "{st} semitones: still at 440 Hz");
         }
+    }
+
+    fn noise(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                (s >> 8) as f32 / 8388608.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// `apply_regions` as it was: the weight of a region worked out for every bin and the gain with a `powf` for every one of them.
+    fn apply_regions_ref(x: &[f32], sr: u32, regs: &[Region]) -> Vec<f32> {
+        fn weight(r: &Region, tc: f32, k: usize, bin_hz: f32) -> f32 {
+            let ft = 3.0 * HOP as f32;
+            let wt = ((tc - r.t0 as f32) / ft + 0.5).clamp(0.0, 1.0).min(((r.t1 as f32 - tc) / ft + 0.5).clamp(0.0, 1.0));
+            let f = k as f32 * bin_hz;
+            let fw = 3.0 * bin_hz;
+            let wf = ((f - r.f0) / fw + 0.5).clamp(0.0, 1.0).min(((r.f1 - f) / fw + 0.5).clamp(0.0, 1.0));
+            wt * wf
+        }
+        let mut out = x.to_vec();
+        if regs.is_empty() || x.is_empty() {
+            return out;
+        }
+        let w = sqrt_hann();
+        let mut pl = FftPlanner::<f32>::new();
+        let (fwd, inv) = (pl.plan_fft_forward(N), pl.plan_fft_inverse(N));
+        let bin_hz = sr as f32 / N as f32;
+        let mut buf = vec![Complex32::new(0.0, 0.0); N];
+        let mut diff = vec![Complex32::new(0.0, 0.0); N];
+        let frames = (x.len() + N) / HOP + 1;
+        for k in 0..frames {
+            let pos = k as isize * HOP as isize - N as isize;
+            let tc = pos as f32 + N as f32 * 0.5;
+            if !regs.iter().any(|r| tc >= r.t0 as f32 - 3.0 * HOP as f32 && tc <= r.t1 as f32 + 3.0 * HOP as f32) {
+                continue;
+            }
+            for i in 0..N {
+                let j = pos + i as isize;
+                let v = if j >= 0 && (j as usize) < x.len() { x[j as usize] } else { 0.0 };
+                buf[i] = Complex32::new(v * w[i], 0.0);
+            }
+            fwd.process(&mut buf);
+            let mut any = false;
+            for kk in 0..=N / 2 {
+                let mut g = 1.0f32;
+                for r in regs {
+                    let wt = weight(r, tc, kk, bin_hz);
+                    if wt > 0.0 {
+                        let rg = 10f32.powf(r.gain_db / 20.0);
+                        g *= 1.0 - wt * (1.0 - rg);
+                    }
+                }
+                let d = buf[kk] * (g - 1.0);
+                any |= g != 1.0;
+                diff[kk] = d;
+                if kk > 0 && kk < N / 2 {
+                    diff[N - kk] = d.conj();
+                }
+            }
+            if !any {
+                continue;
+            }
+            inv.process(&mut diff);
+            for i in 0..N {
+                let j = pos + i as isize;
+                if j >= 0 && (j as usize) < out.len() {
+                    out[j as usize] += diff[i].re / N as f32 * w[i] * 0.5;
+                }
+            }
+        }
+        out
+    }
+
+    /// `resample_ratio` as it was: a `sin` and a `cos` for every tap of every output sample.
+    fn resample_ratio_ref(x: &[f32], speed: f64, n: usize) -> Vec<f32> {
+        const TAPS: isize = 16;
+        let cutoff = (1.0 / speed).min(1.0);
+        (0..n)
+            .map(|i| {
+                let t = i as f64 * speed;
+                let c = t.floor() as isize;
+                let mut acc = 0f64;
+                let mut norm = 0f64;
+                for k in (c - TAPS + 1)..=(c + TAPS) {
+                    if k < 0 || k as usize >= x.len() {
+                        continue;
+                    }
+                    let d = t - k as f64;
+                    let a = d * cutoff;
+                    let sinc = if a.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * a).sin() / (std::f64::consts::PI * a) };
+                    let win = 0.5 + 0.5 * (std::f64::consts::PI * d / TAPS as f64).cos();
+                    let wgt = sinc * win * cutoff;
+                    acc += x[k as usize] as f64 * wgt;
+                    norm += wgt;
+                }
+                if norm.abs() > 1e-9 { (acc / norm.max(0.5)) as f32 } else { 0.0 }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn regions_come_out_as_before() {
+        let sr = 44100;
+        let x = noise(30_000, 7);
+        let regs = [
+            Region { t0: 2000, t1: 20_000, f0: 500.0, f1: 4000.0, gain_db: -80.0 },
+            Region { t0: 9000, t1: 29_000, f0: 100.0, f1: 9000.0, gain_db: -6.0 },
+            Region { t0: 15_000, t1: 15_500, f0: 3000.0, f1: 3100.0, gain_db: 9.0 },
+        ];
+        for r in [&regs[..1], &regs[..2], &regs[..]] {
+            assert_eq!(apply_regions(&x, sr, r), apply_regions_ref(&x, sr, r));
+        }
+    }
+
+    #[test]
+    fn resampling_by_ratio_comes_out_as_before() {
+        let x = noise(6000, 3);
+        for speed in [0.5f64, 0.7937, 1.0, 1.2599, 2.0, 3.3] {
+            let n = (x.len() as f64 / speed) as usize;
+            let (a, b) = (resample_ratio(&x, speed, n), resample_ratio_ref(&x, speed, n));
+            assert_eq!(a.len(), b.len());
+            let worst = a.iter().zip(&b).map(|(p, q)| (p - q).abs()).fold(0f32, f32::max);
+            assert!(worst < 1e-6, "speed {speed}: worst difference {worst}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_edit_kernels() {
+        let x = noise(48_000 * 20, 11);
+        let t = std::time::Instant::now();
+        let a = resample_ratio_ref(&x, 1.2599, x.len());
+        let old_r = t.elapsed();
+        let t = std::time::Instant::now();
+        let b = resample_ratio(&x, 1.2599, x.len());
+        println!("resample_ratio, 20 s at 48 kHz: old {old_r:?}, new {:?} (first samples {} {})", t.elapsed(), a[1000], b[1000]);
+        let regs = [
+            Region { t0: 0, t1: x.len(), f0: 500.0, f1: 4000.0, gain_db: -80.0 },
+            Region { t0: 10_000, t1: x.len() - 10_000, f0: 100.0, f1: 9000.0, gain_db: -6.0 },
+            Region { t0: 50_000, t1: 600_000, f0: 3000.0, f1: 6000.0, gain_db: 9.0 },
+        ];
+        let t = std::time::Instant::now();
+        let a = apply_regions_ref(&x, 48000, &regs);
+        let old_a = t.elapsed();
+        let t = std::time::Instant::now();
+        let b = apply_regions(&x, 48000, &regs);
+        println!("apply_regions, 20 s, 3 regions: old {old_a:?}, new {:?} (first samples {} {})", t.elapsed(), a[1000], b[1000]);
     }
 
     #[test]

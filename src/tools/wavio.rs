@@ -154,6 +154,12 @@ pub fn too_large_msg() -> String {
 pub const MAX_CHANNELS: u16 = 64;
 pub const SR_RANGE: std::ops::RangeInclusive<u32> = 2000..=768_000;
 
+/// A sample that is a number, or silence.
+#[inline]
+pub fn finite(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
 /// Every channel of the file as its own vector.
 pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -227,8 +233,10 @@ pub fn read_all(path: &std::path::Path) -> Result<(u32, Vec<Vec<f32>>), String> 
                                 (1, 16) => i16::from_le_bytes([o[0], o[1]]) as f32 / 32768.0,
                                 (1, 24) => (i32::from_le_bytes([0, o[0], o[1], o[2]]) >> 8) as f32 / 8_388_608.0,
                                 (1, 32) => i32::from_le_bytes([o[0], o[1], o[2], o[3]]) as f32 / 2_147_483_648.0,
-                                (3, 32) => f32::from_le_bytes([o[0], o[1], o[2], o[3]]),
-                                _ => f64::from_le_bytes([o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7]]) as f32,
+                                // (a float file can hold values that are not numbers: they would spread through every filter and
+                                // transform they meet and stay in the recursive ones for good)
+                                (3, 32) => finite(f32::from_le_bytes([o[0], o[1], o[2], o[3]])),
+                                _ => finite(f64::from_le_bytes([o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7]]) as f32),
                             }
                         };
                         for (c, o) in out.iter_mut().enumerate() {
@@ -264,6 +272,45 @@ mod tests {
         }
         let msg = too_large_msg();
         assert!(msg.contains("million samples") && msg.contains("free now"));
+    }
+
+    #[test]
+    fn samples_that_are_not_numbers_in_a_float_file_read_as_silence() {
+        let path = std::env::temp_dir().join(format!("visuscope_wav_nan_f32_{}.wav", std::process::id()));
+        let l = vec![0.25, f32::NAN, f32::INFINITY, -0.5, f32::NEG_INFINITY, 0.125];
+        let mut w = WavWriter::create(&path, Format::Float32, 2, 48000).unwrap();
+        w.write(&l, &l).unwrap();
+        w.finish().unwrap();
+        let (sr, ch) = read_all(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(sr, 48000);
+        assert_eq!(ch[0], vec![0.25, 0.0, 0.0, -0.5, 0.0, 0.125]);
+        assert_eq!(ch[1], ch[0]);
+        // and a 64 bit one, by hand: a header, then 3 frames of one channel
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36u32 + 24).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        for v in [3u16, 1] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&48000u32.to_le_bytes());
+        b.extend_from_slice(&(48000u32 * 8).to_le_bytes());
+        for v in [8u16, 64] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&24u32.to_le_bytes());
+        for v in [0.5f64, f64::NAN, 1e300] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        let path = std::env::temp_dir().join(format!("visuscope_wav_nan_f64_{}.wav", std::process::id()));
+        std::fs::write(&path, &b).unwrap();
+        let (_, ch) = read_all(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        // (1e300 does not fit into a single precision number: infinity, so silence)
+        assert_eq!(ch[0], vec![0.5, 0.0, 0.0]);
     }
 
     #[test]

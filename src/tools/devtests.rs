@@ -35,6 +35,30 @@ fn wf_weight(f: f32) -> f32 {
     10f32.powf((WF_W[j - 1].1 + t * (WF_W[j].1 - WF_W[j - 1].1)) / 20.0)
 }
 
+/// The signal mixed down by the angle `w` (radians per sample) and averaged over `d` samples: one complex value for each block.
+/// The oscillator is turned from sample to sample (the angle is worked out exactly at each block start): a sine and a cosine for
+/// every sample of the nine seconds this runs on, five times a second, were most of its time.
+fn mix_down(x: &[f32], d: usize, w: f64) -> Vec<C> {
+    let (step_s, step_c) = (-w).sin_cos();
+    x.chunks_exact(d)
+        .enumerate()
+        .map(|(m, c)| {
+            let (s0, c0) = (-w * (m * d) as f64).sin_cos();
+            let (mut zr, mut zi) = (c0, s0);
+            let (mut sr, mut si) = (0f64, 0f64);
+            for &v in c {
+                let v = v as f64;
+                sr += v * zr;
+                si += v * zi;
+                let t = zr * step_c - zi * step_s;
+                zi = zr * step_s + zi * step_c;
+                zr = t;
+            }
+            C::new((sr / d as f64) as f32, (si / d as f64) as f32)
+        })
+        .collect()
+}
+
 pub struct WfOut {
     /// mean frequency of the tone
     pub f_mean: f32,
@@ -56,7 +80,7 @@ pub fn wow_flutter(x: &[f32], sr: f32, f0: f32) -> Option<WfOut> {
     let d = ((sr / 2000.0).round() as usize).max(1);
     let fs = sr / d as f32;
     let w = std::f64::consts::TAU * f0 as f64 / sr as f64;
-    let z: Vec<C> = x.chunks_exact(d).enumerate().map(|(m, c)| c.iter().enumerate().map(|(i, v)| { let a = -w * (m * d + i) as f64; C::new(*v * a.cos() as f32, *v * a.sin() as f32) }).sum::<C>() / d as f32).collect();
+    let z = mix_down(x, d, w);
     let amp = z.iter().map(|c| c.norm()).sum::<f32>() / z.len().max(1) as f32;
     if z.len() < 1100 || amp < 1e-5 || z.iter().any(|c| c.norm() < amp * 0.1) {
         return None;
@@ -106,11 +130,21 @@ pub fn mt_freqs(p: &crate::tonegen::GenParams) -> Vec<f32> {
         .collect()
 }
 
+/// Blackman-Harris window, sample `i` of `n`. One cosine: the second and third harmonic come from the double and triple angle
+/// formulas (three cosines for each of the 131072 samples, every 0.4 s, were most of the time of the window).
+fn bh_window(i: usize, n: usize) -> f32 {
+    let a = std::f32::consts::TAU * i as f32 / n as f32;
+    let c = a.cos();
+    let c2 = 2.0 * c * c - 1.0;
+    let c3 = c * (4.0 * c * c - 3.0);
+    0.35875 - 0.48829 * c + 0.14128 * c2 - 0.01168 * c3
+}
+
 /// Power between the tones against the power of the tones, from 20 Hz to 20 kHz (or the top of the sample rate).
 pub fn multitone(x: &[f32], sr: f32, tones: &[f32]) -> MtOut {
     let n = x.len();
     // Blackman-Harris: the skirts of the tones are 92 dB down, so they do not count as distortion
-    let bh = |i: usize| { let a = std::f32::consts::TAU * i as f32 / n as f32; 0.35875 - 0.48829 * a.cos() + 0.14128 * (2.0 * a).cos() - 0.01168 * (3.0 * a).cos() };
+    let bh = |i: usize| bh_window(i, n);
     let mut buf: Vec<C> = x.iter().enumerate().map(|(i, v)| C::new(v * bh(i), 0.0)).collect();
     rustfft::FftPlanner::new().plan_fft_forward(n).process(&mut buf);
     let df = sr / n as f32;
@@ -486,6 +520,77 @@ mod tests {
         assert!((o.f_mean - 3150.0).abs() < 0.2, "{}", o.f_mean);
         assert!((o.w_rms - 0.0707).abs() < 0.008, "{}", o.w_rms);
         assert!((o.w_peak - 0.1).abs() < 0.015, "{}", o.w_peak);
+    }
+
+    /// The version with a sine and a cosine for every sample, as the reference.
+    fn mix_down_old(x: &[f32], d: usize, w: f64) -> Vec<C> {
+        x.chunks_exact(d).enumerate().map(|(m, c)| c.iter().enumerate().map(|(i, v)| { let a = -w * (m * d + i) as f64; C::new(*v * a.cos() as f32, *v * a.sin() as f32) }).sum::<C>() / d as f32).collect()
+    }
+
+    fn noise(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                s as f32 / u32::MAX as f32 - 0.5
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_turned_oscillator_gives_the_same_mix_as_a_sine_and_cosine_per_sample() {
+        for (sr, f0) in [(48000.0f32, 3150.0f32), (44100.0, 3000.0), (96000.0, 3148.0), (192000.0, 9000.0)] {
+            let d = ((sr / 2000.0).round() as usize).max(1);
+            // a tone with noise: the blocks are not all alike
+            let x: Vec<f32> = noise((sr * 2.0) as usize, 5).iter().enumerate().map(|(i, n)| 0.3 * (std::f32::consts::TAU * f0 * i as f32 / sr).sin() + 0.1 * n).collect();
+            let w = std::f64::consts::TAU * f0 as f64 / sr as f64;
+            let (a, b) = (mix_down(&x, d, w), mix_down_old(&x, d, w));
+            assert_eq!(a.len(), b.len());
+            let worst = a.iter().zip(&b).map(|(p, q)| (p - q).norm()).fold(0f32, f32::max);
+            assert!(worst < 2e-4, "sr {sr}: worst difference {worst}");
+        }
+        // short input and a block size larger than the input
+        assert!(mix_down(&[0.5; 10], 24, 0.1).is_empty());
+        assert!(mix_down(&[], 1, 0.1).is_empty());
+    }
+
+    #[test]
+    fn the_window_by_the_angle_formulas_is_the_blackman_harris_window() {
+        for n in [1024usize, 65536, 131072] {
+            let worst = (0..n)
+                .map(|i| {
+                    let a = std::f32::consts::TAU * i as f32 / n as f32;
+                    let direct = 0.35875 - 0.48829 * a.cos() + 0.14128 * (2.0 * a).cos() - 0.01168 * (3.0 * a).cos();
+                    (bh_window(i, n) - direct).abs()
+                })
+                .fold(0f32, f32::max);
+            assert!(worst < 1e-6, "n {n}: {worst}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_wow_flutter_and_window() {
+        let sr = 48000.0f32;
+        let x: Vec<f32> = (0..(sr as usize * 9)).map(|i| 0.3 * (std::f32::consts::TAU * 3150.0 * i as f32 / sr).sin()).collect();
+        let w = std::f64::consts::TAU * 3150.0 / sr as f64;
+        let t = Instant::now();
+        let a = mix_down_old(&x, 24, w);
+        let old = t.elapsed();
+        let t = Instant::now();
+        let b = mix_down(&x, 24, w);
+        println!("mix down, 9 s at 48 kHz: old {:?}, new {:?} ({} {})", old, t.elapsed(), a.len(), b.len());
+        let t = Instant::now();
+        let old: f32 = (0..131072usize).map(|i| { let a = std::f32::consts::TAU * i as f32 / 131072.0; 0.35875 - 0.48829 * a.cos() + 0.14128 * (2.0 * a).cos() - 0.01168 * (3.0 * a).cos() }).sum();
+        let old_t = t.elapsed();
+        let t = Instant::now();
+        let new: f32 = (0..131072usize).map(|i| bh_window(i, 131072)).sum();
+        println!("window of 131072: old {:?}, new {:?} ({old} {new})", old_t, t.elapsed());
+        let t = Instant::now();
+        let _ = wow_flutter(&x, sr, 3148.0);
+        println!("wow_flutter, 9 s at 48 kHz, whole: {:?}", t.elapsed());
     }
 
     #[test]

@@ -124,7 +124,8 @@ impl Daw {
     }
 
     pub(super) fn act_trim_to_range(&mut self, p: &mut Project) {
-        let Some((a, b)) = self.range else { return };
+        // (an empty range overlaps no clip: trimming to it would delete every clip)
+        let Some((a, b)) = self.range.filter(|r| r.1 > r.0) else { return };
         self.checkpoint(p);
         let ids: Vec<u32> = if self.sel.is_empty() { p.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id)).collect() } else { self.sel_vec() };
         for id in ids {
@@ -200,6 +201,10 @@ impl Daw {
         if b <= a {
             return;
         }
+        if let Some(m) = Project::render_refusal(a, b, Project::render_limit(), p.sr) {
+            self.note = m;
+            return;
+        }
         let only = if track_only { self.sel_track } else { None };
         let (pc, id) = (p.clone(), self.new_src_id());
         let name = match only.and_then(|t| p.track_index(t)) {
@@ -237,7 +242,13 @@ impl Daw {
             self.note = "The selected tracks have no clips".into();
             return;
         }
+        if let Some(m) = Project::render_refusal(a, b, Project::render_limit(), p.sr) {
+            self.note = m;
+            return;
+        }
         let first = ids.iter().filter_map(|id| p.track_index(*id)).min().unwrap_or(0);
+        // what the tracks are now: when they differ at the end, they were edited meanwhile and must not be removed
+        let fingerprint = p.mix_fingerprint(&ids);
         let mut q = p.clone();
         q.tracks.retain(|t| ids.contains(&t.id) && !t.mute);
         q.tracks.iter_mut().for_each(|t| t.solo = false);
@@ -247,9 +258,8 @@ impl Daw {
         let remove = if replace { ids } else { Vec::new() };
         self.spawn_job("daw-merge", move |jobs| {
             let src = q.bounce(a, b, None, sid, name);
-            // the new track goes below the first merged track when the originals stay
-            let index = if remove.is_empty() { first + 1 } else { first };
-            jobs.lock().push(Job::Merged(src, a, remove, index));
+            // (where the new track goes, below the first merged track when the originals stay, is worked out by `merge_plan`)
+            jobs.lock().push(Job::Merged(src, a, remove, first, fingerprint));
         });
     }
 
@@ -296,16 +306,26 @@ impl Daw {
         self.an_running = true;
         let jobs = self.jobs.clone();
         // not counted as "busy": analysis runs quietly in the background
-        std::thread::Builder::new()
+        let started = std::thread::Builder::new()
             .name("daw-analysis".into())
             .spawn(move || {
-                let max = (ANALYSIS_MAX_SECS * sr as usize) as i64;
-                let b2 = key.b.min(key.a + max);
-                let (l, r) = pc.render(key.a, b2, key.track);
-                let out = analysis::analyze(l, r, sr, b2 < key.b);
-                jobs.lock().push(Job::Analysis(key, Arc::new(out)));
-            })
-            .ok();
+                // (a panic must not leave the panel "analysing" for good)
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let max = (ANALYSIS_MAX_SECS * sr as usize) as i64;
+                    let b2 = key.b.min(key.a + max);
+                    let (l, r) = pc.render(key.a, b2, key.track);
+                    analysis::analyze(l, r, sr, b2 < key.b)
+                }));
+                jobs.lock().push(match r {
+                    Ok(out) => Job::Analysis(key, Arc::new(out)),
+                    Err(_) => Job::AnalysisFailed(key),
+                });
+            });
+        if started.is_err() {
+            // (no thread: do not wait for a result that will never come)
+            self.an_running = false;
+            self.an_done = Some(key);
+        }
     }
 
     // ------------------------------------------------------------------ project files and export
@@ -393,11 +413,24 @@ impl Daw {
         fn write(path: &std::path::Path, l: &[f32], r: &[f32], sr: u32) -> Result<(), String> {
             let peak = l.iter().chain(r).fold(0f32, |m, v| m.max(v.abs()));
             let fmt = if peak > 1.0 { Format::Float32 } else { Format::Pcm24 };
-            let mut w = WavWriter::create(path, fmt, 2, sr).map_err(|e| e.to_string())?;
-            for (a, b) in l.chunks(1 << 16).zip(r.chunks(1 << 16)) {
-                w.write(a, b).map_err(|e| e.to_string())?;
-            }
-            w.finish().map_err(|e| e.to_string())
+            // (through a temporary file: an export over an older one that fails half way must not destroy it)
+            file::write_wav_atomic(path, fmt, 2, sr, |w| {
+                for (a, b) in l.chunks(1 << 16).zip(r.chunks(1 << 16)) {
+                    w.write(a, b)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| e.to_string())
+        }
+        // a damaged project (a clip years away) must not make the render ask for terabytes
+        let (ra, rb) = match &kind {
+            Export::Mix(range) => range.unwrap_or((0, p.end_frame())),
+            Export::Clip(id) => p.find_clip(*id).map_or((0, 0), |(ti, ci)| (p.tracks[ti].clips[ci].start, p.tracks[ti].clips[ci].end())),
+            Export::StemsDir => (0, p.end_frame()),
+        };
+        if let Some(m) = Project::render_refusal(ra, rb, Project::render_limit(), sr) {
+            self.note = format!("Export failed: {m}");
+            return;
         }
         match kind {
             Export::Mix(range) => {
@@ -431,17 +464,23 @@ impl Daw {
                 self.spawn_job("daw-export", move |jobs| {
                     let end = p.end_frame();
                     let mut n = 0;
+                    let mut failed: Vec<String> = Vec::new();
                     for (i, t) in p.tracks.iter().enumerate() {
                         if t.clips.is_empty() {
                             continue;
                         }
                         let (l, r) = p.render(0, end, Some(t.id));
                         let name: String = t.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
-                        if write(&path.join(format!("{:02}_{name}.wav", i + 1)), &l, &r, sr).is_ok() {
-                            n += 1;
+                        match write(&path.join(format!("{:02}_{name}.wav", i + 1)), &l, &r, sr) {
+                            Ok(()) => n += 1,
+                            Err(e) => failed.push(format!("{} ({e})", t.name)),
                         }
                     }
-                    jobs.lock().push(Job::Done(format!("Exported {n} track files to {}", path.display())));
+                    let mut m = format!("Exported {n} track files to {}", path.display());
+                    if !failed.is_empty() {
+                        m += &format!("; failed: {}", failed.join(", "));
+                    }
+                    jobs.lock().push(Job::Done(m));
                 });
             }
         }

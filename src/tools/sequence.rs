@@ -90,8 +90,38 @@ struct Outcome {
     status: Status,
 }
 
+/// A number with an optional unit: the unit decides what the number means ("1kHz" is 1000, "500ms" is 0.5), the harmless ones
+/// (Hz, dB, dBFS, s, V ...) are ignored as before, and anything else is an error (a trailing "kHz" used to be dropped, so that
+/// "tone 1kHz -20" played 1 Hz and "wait 500ms" waited 500 s).
 fn num(s: &str) -> Option<f32> {
-    s.trim().trim_end_matches(|c: char| c.is_alphabetic() || c == '%').parse().ok()
+    let s = s.trim();
+    // the number ends at the first letter or % that does not belong to an exponent ("1e3")
+    let mut end = s.len();
+    for (i, c) in s.char_indices() {
+        if c.is_alphabetic() || c == '%' {
+            let mut after = s[i + c.len_utf8()..].chars();
+            let exp = matches!(c, 'e' | 'E') && i > 0 && match after.next() {
+                Some(d) if d.is_ascii_digit() => true,
+                Some('+' | '-') => after.next().is_some_and(|d| d.is_ascii_digit()),
+                _ => false,
+            };
+            if !exp {
+                end = i;
+                break;
+            }
+        }
+    }
+    let (digits, unit) = s.split_at(end);
+    let v: f32 = digits.parse().ok()?;
+    // (a division for the milli: 500 / 1000 is exactly 0.5, 500 * 0.001 is not)
+    let v = match unit.to_lowercase().as_str() {
+        "" | "hz" | "db" | "dbfs" | "dbu" | "dbv" | "dbc" | "dbr" | "dba" | "dbm" | "dbspl" | "dbtp" | "lufs" | "lu" | "ohm" | "s" | "sec" | "v" | "bit" | "bits" | "%" | "%thd" => v,
+        "min" => v * 60.0,
+        "k" | "khz" => v * 1e3,
+        "ms" | "mv" => v / 1e3,
+        _ => return None,
+    };
+    Some(v).filter(|v| v.is_finite())
 }
 
 fn range(s: &str) -> Option<(f32, f32)> {
@@ -108,10 +138,23 @@ fn cond(w: &[&str]) -> Result<Cond, String> {
     }
 }
 
+/// The line without its comment: a # starts one at the beginning of the line or after white space. A # inside a word stays
+/// ("report C:\runs\#12\out.html", "serial send AT#RST").
+fn strip_comment(line: &str) -> &str {
+    let mut prev_space = true;
+    for (i, c) in line.char_indices() {
+        if c == '#' && prev_space {
+            return &line[..i];
+        }
+        prev_space = c.is_whitespace();
+    }
+    line
+}
+
 fn parse(text: &str) -> Result<Vec<Step>, String> {
     let mut out = Vec::new();
     for (i, raw) in text.lines().enumerate() {
-        let line = raw.split('#').next().unwrap_or("").trim();
+        let line = strip_comment(raw).trim();
         if line.is_empty() {
             continue;
         }
@@ -135,7 +178,8 @@ fn parse(text: &str) -> Result<Vec<Step>, String> {
                     Some("abs") => None,
                     _ => return Err(err("expected abs or norm <Hz>")),
                 };
-                Kind::Response { f: range(w[1]).ok_or_else(|| err("expected frequency range a..b"))?, db: range(w[2]).ok_or_else(|| err("expected dB range a..b"))?, norm }
+                let f = range(w[1]).filter(|f| f.0 > 0.0 && f.1 > f.0).ok_or_else(|| err("expected frequency range a..b (0 < a < b)"))?;
+                Kind::Response { f, db: range(w[2]).ok_or_else(|| err("expected dB range a..b"))?, norm }
             }
             "report" if w.len() >= 2 => Kind::Report(line[w[0].len()..].trim().to_string()),
             "rt60" if w.len() >= 2 => Kind::Rt60(cond(&w[1..]).map_err(|e| err(&e))?),
@@ -269,7 +313,7 @@ impl Sequence {
         }
         self.run = Run::Idle;
         if let Some(rep) = self.report.take()
-            && let Err(e) = std::fs::write(&rep, self.report_text(cx)) {
+            && let Err(e) = crate::fsutil::atomic_write(&rep, self.report_text(cx)) {
                 self.results.push(Outcome { line: 0, text: "report".into(), value: format!("{rep}: {e}"), status: Status::Error });
             }
         let verdict = self.verdict();
@@ -557,7 +601,7 @@ impl Tool for Sequence {
                 self.save = None;
                 if let Some(p) = res {
                     let body = if p.extension().is_some_and(|e| e == "txt" || e == "csv") && !self.results.is_empty() { self.report_text(cx) } else { self.text.clone() };
-                    cx.req.note = Some(match std::fs::write(&p, body) {
+                    cx.req.note = Some(match crate::fsutil::atomic_write(&p, body) {
                         Ok(_) => format!("Saved {}", p.display()),
                         Err(e) => format!("save failed: {e}"),
                     });
@@ -726,6 +770,47 @@ mod tests {
         assert!(parse("tone abc -20").is_err());
         assert!(parse("# nothing").is_err());
         assert!(Cond::In(-1.0, 1.0).ok(0.5) && !Cond::Lt(-80.0).ok(-70.0) && !Cond::Gt(0.0).ok(f32::NAN));
+    }
+
+    #[test]
+    fn units_scale_the_numbers_and_unknown_ones_are_errors() {
+        let one = |t: &str| parse(t).unwrap().remove(0).kind;
+        // (a trailing kHz / ms used to be dropped: 1 Hz and 500 s)
+        assert_eq!(one("wait 500ms"), Kind::Wait(0.5));
+        assert_eq!(one("tone 1kHz -20"), Kind::Tone(1000.0, -20.0));
+        assert_eq!(one("tone 1.5K -20dBFS"), Kind::Tone(1500.0, -20.0));
+        assert_eq!(one("wait 2s"), Kind::Wait(2.0));
+        assert_eq!(one("set avg 1500ms"), Kind::Avg(1.5));
+        assert_eq!(one("measure thd < -80dB"), Kind::Measure(2, Cond::Lt(-80.0)));
+        assert_eq!(one("measure freq in 990Hz..1.01kHz"), Kind::Measure(1, Cond::In(990.0, 1010.0)));
+        assert_eq!(one("response 100Hz..10kHz -3..3dB abs"), Kind::Response { f: (100.0, 10000.0), db: (-3.0, 3.0), norm: None });
+        assert_eq!(num("1e3"), Some(1000.0));
+        assert_eq!(num("2.5e-1s"), Some(0.25));
+        assert_eq!(num("50%"), Some(50.0));
+        // what the unit does not allow
+        assert!(parse("wait 5parsecs").is_err());
+        assert!(parse("tone 1kHzz -20").is_err());
+        assert!(parse("tone 1000 -20 loud").is_err());
+        assert_eq!(num("nan"), None);
+        assert_eq!(num("inf"), None);
+        assert_eq!(num("1e"), None);
+        assert_eq!(num(""), None);
+        // a frequency range has to rise
+        assert!(parse("response 1000..100 -3..3").is_err());
+        assert!(parse("response 0..100 -3..3").is_err());
+    }
+
+    #[test]
+    fn a_hash_inside_a_word_is_not_a_comment() {
+        let s = parse("report C:\\runs\\#12\\out.html\nserial send AT#RST\ntone 1000 -20 # level\n# whole line\noff #x\n").unwrap();
+        assert_eq!(s.len(), 4);
+        assert_eq!(s[0].kind, Kind::Report("C:\\runs\\#12\\out.html".into()));
+        assert_eq!(s[1].kind, Kind::Serial("send AT#RST".into()));
+        assert_eq!(s[2].kind, Kind::Tone(1000.0, -20.0));
+        assert_eq!(s[3].kind, Kind::Off);
+        assert_eq!(strip_comment("a#b #c"), "a#b ");
+        assert_eq!(strip_comment("#a"), "");
+        assert_eq!(strip_comment("a\t#b"), "a\t");
     }
 }
 

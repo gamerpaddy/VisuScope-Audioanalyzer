@@ -2,6 +2,7 @@
 name = "visuscope"
 version = "1.14.0"
 edition = "2024"
+rust-version = "1.95"
 description = "Real-time audio analyzer"
 license = "Unlicense"
 repository = "https://github.com/gamerpaddy/VisuScope-Audioanalyzer"

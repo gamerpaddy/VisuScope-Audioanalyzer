@@ -47,7 +47,9 @@ impl Ring {
         self.copy_abs(start, &mut l[pad..], &mut r[pad..]);
     }
 
-    /// Like `copy_last`, but each channel looks `sl` / `sr` samples further back (zero padded before the start).
+    /// Like `copy_last`, but each channel looks `sl` / `sr` samples further back (zero padded before the start). Only the
+    /// reference for the tests now: the program uses `copy_last_shifted_chunked`.
+    #[cfg(test)]
     pub fn copy_last_shifted(&self, l: &mut [f32], r: &mut [f32], sl: usize, sr: usize) {
         let n = l.len() as isize;
         let tot = self.total as isize;
@@ -57,6 +59,18 @@ impl Ring {
                 let idx = start + i as isize;
                 *o = if idx < 0 || tot - idx > RING_CAP as isize { 0.0 } else { src[(idx as usize) & RING_MASK] };
             }
+        }
+    }
+
+    /// Copy `out.len()` samples of one channel starting at absolute sample index `start`.
+    fn copy_abs_one(&self, right: bool, start: usize, out: &mut [f32]) {
+        let src = if right { &self.r } else { &self.l };
+        let len = out.len();
+        let s = start & RING_MASK;
+        let first = (RING_CAP - s).min(len);
+        out[..first].copy_from_slice(&src[s..s + first]);
+        if first < len {
+            out[first..].copy_from_slice(&src[..len - first]);
         }
     }
 
@@ -93,6 +107,29 @@ pub fn copy_last_chunked(ring: &Mutex<Ring>, l: &mut [f32], r: &mut [f32]) {
         let m = PIECE.min(avail - done);
         ring.lock().copy_abs(start + done, &mut l[pad + done..pad + done + m], &mut r[pad + done..pad + done + m]);
         done += m;
+    }
+}
+
+/// Like `Ring::copy_last_shifted`, but the lock is taken for short pieces only (see `copy_last_chunked`) and the per-sample range
+/// test is hoisted: each channel is one run of zeros followed by contiguous copies. Samples older than half the ring (as seen at
+/// the start) read as zero, as in `copy_last_chunked`; the transfer function never looks that far back (window + delay < 1.5 n).
+pub fn copy_last_shifted_chunked(ring: &Mutex<Ring>, l: &mut [f32], r: &mut [f32], sl: usize, sr: usize) {
+    const PIECE: usize = 8192;
+    let n = l.len();
+    let total = ring.lock().total as usize;
+    let lo = total.saturating_sub(RING_CAP / 2);
+    for (out, back, right) in [(l, sl, false), (r, sr, true)] {
+        // absolute index of out[0] (negative: before the first sample ever)
+        let start = total as i64 - back as i64 - n as i64;
+        // out[..skip] has no data: before the first sample, or too old to be read safely
+        let skip = ((lo as i64 - start).clamp(0, n as i64)) as usize;
+        out[..skip].fill(0.0);
+        let mut done = skip;
+        while done < n {
+            let m = PIECE.min(n - done);
+            ring.lock().copy_abs_one(right, (start + done as i64) as usize, &mut out[done..done + m]);
+            done += m;
+        }
     }
 }
 
@@ -332,5 +369,75 @@ impl BandListen {
         self.lo.store(lo.to_bits(), Relaxed);
         self.hi.store(hi.to_bits(), Relaxed);
         self.on.store(on, Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lcg(s: &mut u64) -> u64 {
+        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s >> 33
+    }
+
+    fn filled(total: usize) -> Mutex<Ring> {
+        let mut ring = Ring::new();
+        let mut seed = 5u64;
+        for _ in 0..total {
+            let (a, b) = (lcg(&mut seed) as f32 / 1e9 - 1.0, lcg(&mut seed) as f32 / 1e9 - 1.0);
+            ring.push(a, b);
+        }
+        Mutex::new(ring)
+    }
+
+    /// The chunked, branch-free copy gives exactly what the per-sample `copy_last_shifted` gives (also before the first sample
+    /// and after the ring has wrapped).
+    #[test]
+    fn chunked_shifted_copy_matches_the_per_sample_one() {
+        let mut seed = 9u64;
+        for total in [1000usize, 20_000, 300_000, RING_CAP / 2 + 1234, RING_CAP + 777, 3 * RING_CAP / 2] {
+            let ring = filled(total);
+            for n in [64usize, 8192, 16384, 40_000] {
+                for _ in 0..6 {
+                    let (sl, sr) = (lcg(&mut seed) as usize % 60_000, lcg(&mut seed) as usize % 60_000);
+                    let (mut a, mut b) = (vec![1.0f32; n], vec![1.0f32; n]);
+                    ring.lock().copy_last_shifted(&mut a, &mut b, sl, sr);
+                    let (mut c, mut d) = (vec![2.0f32; n], vec![2.0f32; n]);
+                    copy_last_shifted_chunked(&ring, &mut c, &mut d, sl, sr);
+                    assert!(a == c && b == d, "total {total} n {n} shifts {sl} {sr}");
+                }
+            }
+        }
+    }
+
+    /// What lies further back than half the ring reads as zero (it could be overwritten while the pieces are copied).
+    #[test]
+    fn chunked_shifted_copy_ignores_the_oldest_half_of_the_ring() {
+        let ring = filled(RING_CAP + 5);
+        let n = 4096;
+        let (mut l, mut r) = (vec![1.0f32; n], vec![1.0f32; n]);
+        copy_last_shifted_chunked(&ring, &mut l, &mut r, RING_CAP / 2 + 10, 0);
+        assert!(l.iter().all(|v| *v == 0.0));
+        assert!(r.iter().any(|v| *v != 0.0));
+    }
+
+    /// Hold time and total time of the old and the new copy (cargo test --locked shifted_copy_cost -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn shifted_copy_cost() {
+        let ring = filled(RING_CAP);
+        let n = 262_144;
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            ring.lock().copy_last_shifted(&mut l, &mut r, 1000, 0);
+        }
+        println!("per-sample, one lock: {:?} per copy (the lock is held that long)", t.elapsed() / 50);
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            copy_last_shifted_chunked(&ring, &mut l, &mut r, 1000, 0);
+        }
+        println!("chunked: {:?} per copy in total, the lock is held for pieces of 8192 samples", t.elapsed() / 50);
     }
 }

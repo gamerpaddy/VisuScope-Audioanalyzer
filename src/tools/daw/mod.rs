@@ -15,7 +15,7 @@ mod ui;
 
 use super::dialogs::{self, Pending, PendingMany};
 use super::monitor::{self, Queue};
-use super::wavio::{Format, WavWriter};
+use super::wavio::Format;
 use super::*;
 use analysis::AnalysisOut;
 use capture::{Capture, DevEx};
@@ -75,7 +75,18 @@ impl PlayCtl {
 /// Options: imported audio is placed at the start of the timeline instead of at the cursor.
 pub static IMPORT_AT_START: AtomicBool = AtomicBool::new(false);
 
+/// Tells the UI that the player thread is over, also when it panics (a bug, a damaged project): otherwise the timeline would stay
+/// "playing" for good, silent, with the transport buttons stuck.
+struct EndFlag(Arc<PlayCtl>);
+
+impl Drop for EndFlag {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Relaxed);
+    }
+}
+
 fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mon: Arc<Mutex<Queue>>) {
+    let _end = EndFlag(ctl.clone());
     let feed = ctl.feed.load(Relaxed);
     let sr = proj.lock().sr;
     if feed {
@@ -182,7 +193,6 @@ fn play_thread(sh: Arc<Shared>, ctl: Arc<PlayCtl>, proj: Arc<Mutex<Project>>, mo
             break;
         }
     }
-    ctl.ended.store(true, Relaxed);
 }
 
 // ---------------------------------------------------------------------- jobs
@@ -193,12 +203,14 @@ enum Job {
     /// the takes (track, audio, where it starts), whether a gap was possible, and the punch range
     Recorded(Vec<(u32, Arc<Source>, i64)>, bool, Option<(i64, i64)>),
     Analysis(AnKey, Arc<AnalysisOut>),
+    /// the analysis of this range panicked: nothing to show, but the next one may start
+    AnalysisFailed(AnKey),
     Saved(Result<PathBuf, String>, bool, u64),
     Loaded(Result<file::Loaded, String>, bool, PathBuf),
     Bounced(Arc<Source>, i64),
-    /// the mix of several tracks: the new source, where it starts, the tracks it replaces (may be empty), and where
-    /// the new track goes (index of the first track that was merged)
-    Merged(Arc<Source>, i64, Vec<u32>, usize),
+    /// the mix of several tracks: the new source, where it starts, the tracks it replaces (may be empty), the index of the first
+    /// track that was merged, and `Project::mix_fingerprint` of the replaced tracks from when the mix began
+    Merged(Arc<Source>, i64, Vec<u32>, usize, u64),
     /// the audio of clips was processed: (clip, new source, its length, length ratio), and what to say about it
     Edited(Vec<(u32, Arc<Source>, usize, f64)>, String),
     Done(String),
@@ -377,6 +389,33 @@ pub struct Daw {
     startup: u8,
 }
 
+/// A file for a recorded take in `dir`: `take_<time>_<track>.wav`, with `_2`, `_3` ... after it when the track has a take of that same second
+/// already (punching in and out quickly): two takes must never share a file, the first clip would then play the audio of the second.
+/// The name is claimed by creating the (empty) file, so two takes that finish together cannot pick the same one either.
+fn new_take_path(dir: &std::path::Path, stamp: &str, track: u32) -> PathBuf {
+    let mut path = dir.join(format!("take_{stamp}_{track}.wav"));
+    for n in 2..10_000 {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => path = dir.join(format!("take_{stamp}_{track}_{n}.wav")),
+            // (claimed, or the folder cannot be written to: the write that follows reports that)
+            _ => break,
+        }
+    }
+    path
+}
+
+/// What a finished merge does: the tracks that are replaced (none when they changed while it ran: their edits would be lost) and
+/// the index the new track goes to, and whether the replacement was given up for that reason.
+fn merge_plan(p: &Project, remove: Vec<u32>, first: usize, fingerprint: u64) -> (Vec<u32>, usize, bool) {
+    if remove.is_empty() {
+        (remove, first + 1, false)
+    } else if p.mix_fingerprint(&remove) != fingerprint {
+        (Vec::new(), first + 1, true)
+    } else {
+        (remove, first, false)
+    }
+}
+
 /// The routing graph is running: tracks record from graph nodes and playback goes to the graph.
 fn graph_on() -> bool {
     crate::graph::bus().on.load(Relaxed)
@@ -519,12 +558,26 @@ impl Daw {
 
     /// Remember the project before an edit (one undo step per call).
     fn checkpoint(&mut self, p: &Project) {
-        self.undo.push(p.clone());
+        self.push_undo(p.clone());
+        self.redo.clear();
+        self.touch();
+    }
+
+    /// An undo step, the oldest goes when there are too many (they hold on to the audio that the projects used).
+    fn push_undo(&mut self, p: Project) {
+        self.undo.push(p);
         if self.undo.len() > 100 {
             self.undo.remove(0);
         }
-        self.redo.clear();
-        self.touch();
+    }
+
+    /// Give up the mouse drags that refer to tracks by their position: after the tracks were replaced or removed under them they would
+    /// point at tracks that are not there.
+    fn cancel_drags(&mut self) {
+        self.drag = None;
+        self.auto_drag = None;
+        self.draw_drag = None;
+        self.range_anchor = None;
     }
 
     fn touch(&mut self) {
@@ -541,7 +594,7 @@ impl Daw {
 
     fn redo(&mut self, p: &mut Project) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(p, next));
+            self.push_undo(std::mem::replace(p, next));
             self.after_history(p);
         }
     }
@@ -565,7 +618,7 @@ impl Daw {
         let before = p.clone();
         let r = f(&mut p);
         drop(p);
-        self.undo.push(before);
+        self.push_undo(before);
         self.redo.clear();
         self.rev += 1;
         self.last_edit = Instant::now();
@@ -615,7 +668,7 @@ impl Daw {
             let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "audio".into());
             let name2 = name.clone();
             self.spawn_job("daw-import", move |jobs| {
-                let res = super::decode::read_all(&path).map(|(fsr, chans)| {
+                let res = super::decode::read_all(&path).and_then(|(fsr, chans)| {
                     // the first file into an empty project decides the project rate (no conversion then)
                     let sr = {
                         let mut p = proj.lock();
@@ -624,6 +677,10 @@ impl Daw {
                         }
                         p.sr
                     };
+                    // (a long file of a low rate, converted up to a high project rate, can be many times its size: it was checked as it was read)
+                    if resampled_len(chans.iter().map(|c| c.len()).sum(), fsr, sr) > super::wavio::max_samples() {
+                        return Err(format!("it would not fit into memory at the project rate of {sr} Hz ({fsr} Hz in the file)"));
+                    }
                     let chans: Vec<Vec<f32>> = chans.iter().map(|c| resample(c, fsr, sr)).collect();
                     let mk = |n: String, c: Vec<Vec<f32>>| {
                         let s = Source::new(file::next_src_id(&ids), n, c);
@@ -634,7 +691,7 @@ impl Daw {
                     } else {
                         chans.into_iter().enumerate().map(|(i, c)| mk(format!("{name2} ch{}", i + 1), vec![c])).collect()
                     };
-                    srcs
+                    Ok(srcs)
                 });
                 jobs.lock().push(Job::Imported { name, res, at, target });
             });
@@ -845,10 +902,14 @@ impl Daw {
                     continue;
                 }
                 let s = Source::new(file::next_src_id(&ids), format!("{} {}", r.name, &stamp[9..]), chans);
-                let path = dir.join(format!("take_{stamp}_{}.wav", r.track_id));
+                let path = new_take_path(&dir, &stamp, r.track_id);
                 match file::write_wav(&path, &s, sr) {
-                    Ok(()) => *s.saved.lock() = Some(path),
-                    Err(e) => errors.push(format!("{}: {e}", path.display())),
+                    Ok(()) => s.mark_saved(path),
+                    Err(e) => {
+                        errors.push(format!("{}: {e}", path.display()));
+                        // (the name was claimed with an empty file)
+                        let _ = std::fs::remove_file(&path);
+                    }
                 }
                 out.push((r.track_id, Arc::new(s), place));
             }
@@ -1052,6 +1113,14 @@ impl Daw {
                     self.an_running = false;
                     self.an_done = Some(key);
                     self.an_out = Some(out);
+                    // (the picture is made again: a new result can lie at the address of an older one)
+                    self.spg_ptr = 0;
+                }
+                Job::AnalysisFailed(key) => {
+                    self.an_running = false;
+                    self.an_done = Some(key);
+                    self.an_out = None;
+                    self.note = "The analysis failed (see the log)".into();
                 }
                 Job::Saved(res, auto, revision) => match res {
                     Ok(p) => {
@@ -1060,7 +1129,7 @@ impl Daw {
                             self.named_rev = revision;
                             if self.replace_after_save && revision == self.rev { self.replace_ready = true; }
                             self.path = Some(p.clone());
-                            let _ = std::fs::write(autosave_path().with_extension("origin"), p.to_string_lossy().as_bytes());
+                            let _ = crate::fsutil::atomic_write(autosave_path().with_extension("origin"), p.to_string_lossy().as_bytes());
                             self.note = format!("Project saved: {}", p.display());
                         }
                     }
@@ -1077,8 +1146,9 @@ impl Daw {
                         if restore && !fresh {
                             continue;
                         }
-                        self.src_ids.fetch_max(l.max_src_id + 1, Relaxed);
+                        self.src_ids.fetch_max(l.max_src_id.saturating_add(1), Relaxed);
                         *self.proj.lock() = l.proj;
+                        self.cancel_drags();
                         self.undo.clear();
                         self.redo.clear();
                         self.sel.clear();
@@ -1090,7 +1160,7 @@ impl Daw {
                             self.note = "Recovered timeline; save to update your project file".into();
                         }
                         if !restore {
-                            let _ = std::fs::write(autosave_path().with_extension("origin"), path.to_string_lossy().as_bytes());
+                            let _ = crate::fsutil::atomic_write(autosave_path().with_extension("origin"), path.to_string_lossy().as_bytes());
                             self.path = Some(path.clone());
                             self.note = if l.missing > 0 { format!("Opened {} ({} clips lost: audio files missing)", path.display(), l.missing) } else { format!("Opened {}", path.display()) };
                         }
@@ -1104,8 +1174,10 @@ impl Daw {
                     });
                     self.note = "Bounced to a new track".into();
                 }
-                Job::Merged(src, at, remove, index) => {
+                Job::Merged(src, at, remove, first, fingerprint) => {
+                    let (remove, index, kept) = merge_plan(&self.proj.lock(), remove, first, fingerprint);
                     let n = remove.len();
+                    self.cancel_drags();
                     self.with_proj(|p| {
                         // the merged track is shown like the tracks it replaces (expanded into its channels, with their mono and split buttons)
                         let h = p.tracks.iter().find(|t| remove.contains(&t.id)).map_or(1, |t| t.h);
@@ -1118,7 +1190,13 @@ impl Daw {
                         p.tracks.insert(index.min(p.tracks.len()), t);
                     });
                     self.sel_tracks.clear();
-                    self.note = if n > 0 { format!("Merged {n} tracks into one") } else { "Mixed the tracks to a new track".into() };
+                    self.note = if n > 0 {
+                        format!("Merged {n} tracks into one")
+                    } else if kept {
+                        "The tracks were edited while they were merged: they are kept, the merged track is below them".into()
+                    } else {
+                        "Mixed the tracks to a new track".into()
+                    };
                 }
                 Job::Edited(items, note) => self.finish_edit(items, note),
                 Job::Done(m) => self.note = m,
@@ -1129,5 +1207,68 @@ impl Daw {
             cx.req.note = Some(format!("Timeline: {}", self.note));
             self.note.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_takes_of_one_second_get_their_own_files() {
+        let dir = std::env::temp_dir().join(format!("visuscope_daw_takes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, c) = (new_take_path(&dir, "20260101_120000", 3), new_take_path(&dir, "20260101_120000", 3), new_take_path(&dir, "20260101_120000", 4));
+        assert!(a != b && a != c && b != c);
+        // each name is claimed already, also before the audio is written
+        assert!(a.exists() && b.exists() && c.exists());
+        // and writing a take over its claim keeps the other one as it is
+        let s1 = Source::new(1, "x".into(), vec![vec![0.5; 100]]);
+        file::write_wav(&a, &s1, 48000).unwrap();
+        let first = std::fs::read(&a).unwrap();
+        let s2 = Source::new(2, "y".into(), vec![vec![0.25; 300]]);
+        file::write_wav(&b, &s2, 48000).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn two_tracks() -> (Project, Vec<u32>) {
+        let mut p = Project::new(48000);
+        for k in 0..3u32 {
+            let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+            p.add_clip(ti, Arc::new(Source::new(k + 1, "s".into(), vec![vec![0.1; 1000]])), 0);
+        }
+        let ids = vec![p.tracks[0].id, p.tracks[1].id];
+        (p, ids)
+    }
+
+    #[test]
+    fn a_merge_replaces_the_tracks_only_when_they_were_not_edited_meanwhile() {
+        let (mut p, ids) = two_tracks();
+        let fp = p.mix_fingerprint(&ids);
+        // untouched (a change to another track does not count)
+        p.tracks[2].vol_db = -6.0;
+        assert_eq!(merge_plan(&p, ids.clone(), 0, fp), (ids.clone(), 0, false));
+        // each kind of edit of a merged track
+        let edits: [fn(&mut Project); 6] = [
+            |p| p.tracks[1].vol_db = -3.0,
+            |p| p.tracks[0].pan = 0.5,
+            |p| p.tracks[0].clips[0].gain_db = 2.0,
+            |p| p.tracks[1].clips[0].start = 10,
+            |p| {
+                p.tracks[0].clips.remove(0);
+            },
+            |p| {
+                p.tracks[0].auto_set(5, -3.0);
+            },
+        ];
+        for (i, e) in edits.iter().enumerate() {
+            let mut q = p.clone();
+            e(&mut q);
+            assert_eq!(merge_plan(&q, ids.clone(), 0, fp), (Vec::new(), 1, true), "edit {i}");
+        }
+        // a merge that replaces nothing has nothing to protect
+        assert_eq!(merge_plan(&p, Vec::new(), 2, fp), (Vec::new(), 3, false));
     }
 }

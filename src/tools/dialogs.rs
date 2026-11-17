@@ -52,7 +52,8 @@ fn remember(path: &Path) {
     if let Some(p) = f.parent() {
         std::fs::create_dir_all(p).ok();
     }
-    std::fs::write(f, dir.to_string_lossy().as_bytes()).ok();
+    // (two dialogs can end at the same moment: each writes the whole file, and a half-written one would read back as a wrong folder)
+    crate::fsutil::atomic_write(f, dir.to_string_lossy().as_bytes()).ok();
 }
 
 fn spawn(f: impl FnOnce() -> Option<PathBuf> + Send + 'static) -> Pending {

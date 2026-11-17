@@ -292,3 +292,15 @@ fn sweep_a_speaker_with_the_dats() {
     }
     println!("peak {:.2} ohm at {:.1} Hz; lowest {:.2} ohm; written to {path}", c.ohm(ip), c.f[ip], 10f32.powf(lo / 20.0));
 }
+
+#[test]
+fn a_sweep_that_failed_or_was_stopped_cancels_the_wish_for_its_result() {
+    // asked for, running: kept
+    assert!(!arm_lost(true, true, 4, 4));
+    // asked for, nothing running, no new result: lost (stopped, or "nothing was captured")
+    assert!(arm_lost(true, false, 4, 4));
+    // a new result: not lost (the normal path takes it)
+    assert!(!arm_lost(true, false, 5, 4));
+    // not asked for: nothing to cancel
+    assert!(!arm_lost(false, false, 4, 4));
+}

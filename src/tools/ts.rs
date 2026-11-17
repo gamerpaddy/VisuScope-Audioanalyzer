@@ -131,9 +131,16 @@ pub fn free_air(f: &[f32], ohm: &[f32], phase_deg: &[f32]) -> Result<FreeAir, St
     let f1 = cross(f, ohm, lo - 1, lo, level);
     let hi = (ip..n - 1).find(|&i| ohm[i] > level && ohm[i + 1] <= level).ok_or("the upper flank of the peak is not in the measured range")?;
     let f2 = cross(f, ohm, hi, hi + 1, level);
+    // (a flank that is not beyond the other, or numbers that are not finite, mean the peak could not be read)
+    if !(f2 > f1) || !f1.is_finite() || !f2.is_finite() {
+        return Err("the width of the resonance peak could not be read from this curve".into());
+    }
     let qms = fs * r0.sqrt() / (f2 - f1);
     let qes = qms / (r0 - 1.0);
     let qts = qms * qes / (qms + qes);
+    if ![qms, qes, qts, fs, zmax, re].iter().all(|v| v.is_finite() && *v > 0.0) {
+        return Err("the parameters of this curve are not finite: is this a driver in free air?".into());
+    }
     // the inductance from the reactance
     let le = |at: f32| -> f32 {
         let k = f.partition_point(|&x| x < at).min(n - 1);
@@ -157,8 +164,16 @@ pub fn air_load(d_m: f32) -> f32 {
 /// added mass method the resonance of the second measurement (`fs2`).
 pub fn mechanics(fa: &FreeAir, d_m: f32, method: VasMethod, fs2: Option<f32>) -> Result<Mech, String> {
     let sd = piston_area(d_m);
-    if sd <= 0.0 {
+    if !(sd > 0.0) || !sd.is_finite() {
         return Err("give the diameter of the piston".into());
+    }
+    // (a mass, a volume or a sensitivity that is not a number or not positive gave NaN or negative masses)
+    let given = match method {
+        VasMethod::TestBox(v) | VasMethod::AddedMass(v) | VasMethod::Mmd(v) => v > 0.0 && v.is_finite(),
+        VasMethod::Spl(v) => v.is_finite(),
+    };
+    if !given {
+        return Err("give a positive value for the volume, the mass or a valid sensitivity".into());
     }
     let w = 2.0 * PI * fa.fs;
     let rc2 = RHO * C_AIR * C_AIR;
@@ -270,5 +285,23 @@ mod tests {
         assert!(mechanics(&fa, d, VasMethod::TestBox(20.0), None).is_err());
         // Bl is in a believable range for this driver
         assert!(a.bl > 1.0 && a.bl < 30.0, "Bl {}", a.bl);
+    }
+
+    #[test]
+    fn numbers_that_make_no_sense_are_refused_instead_of_giving_nan() {
+        let (f, z, p) = driver(6.2, 0.4e-3, 62.0, 3.0, 0.66);
+        let fa = free_air(&f, &z, &p).unwrap();
+        let d = 0.12;
+        for m in [VasMethod::AddedMass(-5.0), VasMethod::AddedMass(0.0), VasMethod::TestBox(-1.0), VasMethod::Mmd(f32::NAN), VasMethod::Spl(f32::NAN), VasMethod::Spl(f32::INFINITY)] {
+            assert!(mechanics(&fa, d, m, Some(fa.fs * 0.8)).is_err(), "{m:?}");
+        }
+        assert!(mechanics(&fa, 0.0, VasMethod::Mmd(10.0), None).is_err());
+        assert!(mechanics(&fa, f32::NAN, VasMethod::Mmd(10.0), None).is_err());
+        let ok = mechanics(&fa, d, VasMethod::Mmd(10.0), None).unwrap();
+        assert!(ok.vas.is_finite() && ok.bl.is_finite() && ok.mms > 0.0);
+        // a curve with a NaN in it is not read as a driver
+        let mut bad = z.clone();
+        bad[300] = f32::NAN;
+        assert!(free_air(&f, &bad, &p).map_or(true, |a| a.qms.is_finite() && a.fs.is_finite()));
     }
 }

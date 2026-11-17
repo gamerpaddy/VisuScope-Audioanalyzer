@@ -87,7 +87,10 @@ impl Plot {
         let step = nice_step(self.y1 - self.y0, (self.r.height() / 34.0).clamp(3.0, 10.0));
         let mut v = (self.y0 / step).ceil() * step;
         let clip = p.with_clip_rect(self.r.expand(1.0));
-        while v <= self.y1 {
+        // (a step too small for the size of the numbers would never get past the same line: the count is capped)
+        let mut left = 400;
+        while v <= self.y1 && left > 0 {
+            left -= 1;
             let y = self.ty(v);
             clip.line_segment([Pos2::new(self.r.left(), y), Pos2::new(self.r.right(), y)], Stroke::new(1.0, if v.abs() < 1e-6 { GRID_MAJOR } else { GRID }));
             p.text(Pos2::new(self.r.left() - 4.0, y), Align2::RIGHT_CENTER, fmt(v), FontId::proportional(10.0), TXT);
@@ -120,7 +123,9 @@ impl Plot {
         } else {
             let step = nice_step(self.x1 - self.x0, (self.r.width() / 70.0).clamp(3.0, 12.0));
             let mut x = (self.x0 / step).ceil() * step;
-            while x <= self.x1 {
+            let mut left = 400;
+            while x <= self.x1 && left > 0 {
+                left -= 1;
                 line(x, true, true);
                 x += step;
             }
@@ -204,4 +209,42 @@ pub fn readout_sized(ui: &mut Ui, caption: &str, value: &str, col: Color32, size
         ui.add(egui::Label::new(egui::RichText::new(value).size(size).strong().color(col).monospace()).wrap_mode(egui::TextWrapMode::Extend));
         ui.add(egui::Label::new(egui::RichText::new(crate::lang::tr_s(caption)).small().weak()).wrap_mode(egui::TextWrapMode::Extend));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_grid_whose_step_is_lost_in_the_numbers_ends() {
+        // 1e9 and 1e9 + 1 are the same f32: the step (0.1) added to the line never gets it past itself
+        let ctx = egui::Context::default();
+        let labels = std::cell::Cell::new(0);
+        let mut out = ctx.run_pass(egui::RawInput::default(), |ctx| {
+            let p = ctx.layer_painter(egui::LayerId::background());
+            let r = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(300.0, 200.0));
+            let plot = Plot::new(r, 1e9, 1e9 + 1000.0, 1e9, 1e9 + 1.0, false);
+            plot.grid_y(&p, &|_| {
+                labels.set(labels.get() + 1);
+                String::new()
+            });
+            plot.grid_x(&p, &|_| {
+                labels.set(labels.get() + 1);
+                String::new()
+            });
+        });
+        out.textures_delta.clear();
+        assert!(labels.get() <= 800, "{}", labels.get());
+        // an ordinary range still gets its lines
+        let n = std::cell::Cell::new(0);
+        let mut out = ctx.run_pass(egui::RawInput::default(), |ctx| {
+            let p = ctx.layer_painter(egui::LayerId::background());
+            Plot::new(Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(300.0, 200.0)), 0.0, 1.0, -60.0, 0.0, false).grid_y(&p, &|_| {
+                n.set(n.get() + 1);
+                String::new()
+            });
+        });
+        out.textures_delta.clear();
+        assert!((3..=12).contains(&n.get()), "{}", n.get());
+    }
 }

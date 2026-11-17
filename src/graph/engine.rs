@@ -4,7 +4,7 @@
 //! frames); without one the engine follows the wall clock.
 
 use super::dsp::*;
-use super::fx::{ConvUnit, NoiseRedUnit, PhaseUnit, ShiftUnit};
+use super::fx::{ConvUnit, IrParts, NoiseRedUnit, PhaseUnit, ShiftUnit};
 use super::model::*;
 use crate::prof;
 use crate::shared::Shared;
@@ -207,8 +207,9 @@ impl Drop for Engine {
 
 // ---------------------------------------------------------------------- runtime
 
-/// An impulse response that is being read on a worker thread (a long file must not stall the audio thread).
-type IrLoad = Arc<Mutex<Option<Result<(u32, Vec<Vec<f32>>), String>>>>;
+/// An impulse response that is being read on a worker thread (a long file must not stall the audio thread), with its resampling
+/// and its transforms: the engine thread only takes the result over.
+type IrLoad = Arc<Mutex<Option<Result<IrParts, String>>>>;
 
 enum Rt {
     None,
@@ -480,9 +481,10 @@ impl Run {
 
     fn apply_with(rate: u32, e: &Arc<Engine>, rn: &mut RtNode, n: &Node) {
         let fs = rate as f32;
-        let default_in = e.default_in.lock().clone();
+        // (this runs again for every step of a parameter that follows a signal: no copies that the node does not need)
+        let default_in = if matches!(rn.rt, Rt::Input { .. }) { e.default_in.lock().clone() } else { String::new() };
         // parameters are limited to their ranges before they reach a filter
-        let pv = n.clamped();
+        let pv = if matches!(rn.rt, Rt::None | Rt::Input { .. } | Rt::Gen { .. } | Rt::Tl { .. } | Rt::Gain(_) | Rt::Width { .. } | Rt::Util(_) | Rt::Mix { .. } | Rt::Split | Rt::Merge | Rt::Dual | Rt::Out { .. } | Rt::Rec { .. }) { Vec::new() } else { n.clamped() };
         match &mut rn.rt {
             Rt::Input { dev, rs, li, ri, gain, delay, primed } => {
                 let want = if n.s.is_empty() { default_in } else { n.s.clone() };
@@ -534,7 +536,11 @@ impl Run {
                         let slot: IrLoad = Arc::new(Mutex::new(None));
                         let (s2, p2) = (slot.clone(), path.clone());
                         std::thread::spawn(move || {
-                            let r = std::panic::catch_unwind(|| crate::tools::decode::read_all(std::path::Path::new(p2.as_str()))).unwrap_or_else(|_| Err("the decoder failed on this file".into()));
+                            let r = std::panic::catch_unwind(|| {
+                                let (sr, ch) = crate::tools::decode::read_all(std::path::Path::new(p2.as_str()))?;
+                                ConvUnit::prepare_ir(&ch, sr, rate).ok_or_else(|| "the file holds no audio".to_string())
+                            })
+                            .unwrap_or_else(|_| Err("the decoder failed on this file".into()));
                             *s2.lock() = Some(r);
                         });
                         *loading = Some(slot);
@@ -624,32 +630,7 @@ impl Run {
         drop(old);
         self.nodes = nodes;
         self.mods = g.mods.iter().filter_map(|m| Some(RtMod { dst: *idx.get(&m.node)?, src: *idx.get(&m.src)?, node: g.node(m.node)?.clone(), m: *m, last: f32::NAN, on: None, sw: g.node(m.node)?.kind.info().params.get(m.param).is_some_and(|d| d.choices.len() == 2) })).collect();
-        // the longest delay the nodes add between an input and an output (for the display of the total delay)
-        {
-            let fs = self.rate as f32;
-            let mut dp = vec![0f32; self.nodes.len()];
-            let mut total = 0f32;
-            for i in 0..self.nodes.len() {
-                let rn = &self.nodes[i];
-                let own = if rn.bypass {
-                    0.0
-                } else {
-                    match &rn.rt {
-                        Rt::Input { .. } => g.node(rn.id).map_or(0.0, |n| n.param(3).max(0.0)),
-                        Rt::Shift(u) => u.latency() as f32 * 1000.0 / fs,
-                        Rt::Phase(u) => u.latency() as f32 * 1000.0 / fs,
-                        Rt::Nr(u) => u.latency() as f32 * 1000.0 / fs,
-                        _ => 0.0,
-                    }
-                };
-                let up = rn.src.iter().flatten().map(|&(s, _)| dp[s]).fold(0.0, f32::max);
-                dp[i] = up + own;
-                if matches!(rn.rt, Rt::Out { .. }) {
-                    total = total.max(dp[i]);
-                }
-            }
-            prof::C.path_ms.store(total.to_bits(), Relaxed);
-        }
+        prof::C.path_ms.store(self.path_delay_ms(g).to_bits(), Relaxed);
         self.master = self.nodes.iter().position(|n| n.kind == Kind::Input);
         self.sync_devices(g);
         // record nodes that are fed from the timeline (directly or through effects): internal loopbacks
@@ -669,6 +650,40 @@ impl Run {
         }
         let (a, b) = (self.nodes.iter().filter(|n| n.kind == Kind::Input).count(), self.nodes.len());
         *self.e.status.lock() = format!("{} Hz, {b} nodes, {a} inputs", self.rate);
+    }
+
+    /// The delay one node adds to the signal, in ms.
+    fn node_delay_ms(&self, rn: &RtNode, g: &Graph) -> f32 {
+        let fs = self.rate as f32;
+        if rn.bypass {
+            return 0.0;
+        }
+        match &rn.rt {
+            Rt::Input { .. } => g.node(rn.id).map_or(0.0, |n| n.param(3).max(0.0)),
+            Rt::Shift(u) => u.latency() as f32 * 1000.0 / fs,
+            Rt::Phase(u) => u.latency() as f32 * 1000.0 / fs,
+            Rt::Nr(u) => u.latency() as f32 * 1000.0 / fs,
+            // (a convolution without a file passes the signal on at once; with one it is a block late)
+            Rt::Conv { u, .. } if u.loaded => u.latency() as f32 * 1000.0 / fs,
+            Rt::Lim(u) => u.latency() as f32 * 1000.0 / fs,
+            _ => 0.0,
+        }
+    }
+
+    /// The longest delay the nodes add between an input and an output, in ms (for the display of the total delay).
+    fn path_delay_ms(&self, g: &Graph) -> f32 {
+        let mut dp = vec![0f32; self.nodes.len()];
+        let mut total = 0f32;
+        for i in 0..self.nodes.len() {
+            let rn = &self.nodes[i];
+            let own = self.node_delay_ms(rn, g);
+            let up = rn.src.iter().flatten().map(|&(s, _)| dp[s]).fold(0.0, f32::max);
+            dp[i] = up + own;
+            if matches!(rn.rt, Rt::Out { .. }) {
+                total = total.max(dp[i]);
+            }
+        }
+        total
     }
 
     /// Take over the analysers (the fixed input path is switched off while the graph is on).
@@ -762,15 +777,17 @@ impl Run {
             }
         }
         // impulse responses that finished loading
+        let mut installed = false;
         for n in self.nodes.iter_mut() {
             if let Rt::Conv { u, loading, .. } = &mut n.rt {
                 let done = loading.as_ref().and_then(|l| l.lock().take());
                 if let Some(res) = done {
                     *loading = None;
                     let st = match res {
-                        Ok((sr, ch)) => {
-                            u.set_ir(&ch, sr, self.rate);
-                            if u.loaded { format!("{:.2} s impulse response, delays by {:.1} ms", u.ir_secs, u.latency() as f32 * 1000.0 / self.rate as f32) } else { "the file holds no audio".to_string() }
+                        Ok(ir) => {
+                            u.install(ir);
+                            installed = true;
+                            format!("{:.2} s impulse response, delays by {:.1} ms", u.ir_secs, u.latency() as f32 * 1000.0 / self.rate as f32)
                         }
                         Err(e) => {
                             u.loaded = false;
@@ -780,6 +797,11 @@ impl Run {
                     self.e.node_status.lock().insert(n.id, st);
                 }
             }
+        }
+        if installed {
+            // (a convolution with its file is a block late: the total delay counts it from now on)
+            let g = self.e.graph_clone();
+            prof::C.path_ms.store(self.path_delay_ms(&g).to_bits(), Relaxed);
         }
         let now = Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f64().min(0.25);

@@ -105,7 +105,7 @@ impl Logger {
             Ok(f) => {
                 let mut w = std::io::BufWriter::new(f);
                 let _ = writeln!(w, "utc,t_s,freq_hz,fund_dbfs,rms_l_dbfs,rms_r_dbfs,peak_l_dbfs,peak_r_dbfs,thd_db,thdn_db,snr_db,sinad_db,enob,sfdr_db,noise_floor_dbfs,alarms");
-                self.log = Some(LogFile { w, path, rows: 0, start: Instant::now(), last: Instant::now() - std::time::Duration::from_secs(3600) });
+                self.log = Some(LogFile { w, path, rows: 0, start: Instant::now(), last: Instant::now() });
                 self.err.clear();
             }
             Err(e) => self.err = format!("cannot create log: {e}"),
@@ -159,7 +159,8 @@ impl Tool for Logger {
         self.eval(cx);
         let alarms = self.active_names().join("+");
         let Some(lf) = &mut self.log else { return };
-        if lf.last.elapsed().as_secs_f32() < self.interval || cx.an.n == 0 {
+        // (the first row goes out at once; `Instant::now() - 1 h` would panic on a PC that was started less than an hour ago)
+        if !row_due(lf.rows, lf.last.elapsed().as_secs_f32(), self.interval) || cx.an.n == 0 {
             return;
         }
         lf.last = Instant::now();
@@ -274,5 +275,23 @@ impl Tool for Logger {
                 }
             }
         }
+    }
+}
+
+/// Whether the next row of the log is due: the first one is written at once, the others every `interval` seconds.
+fn row_due(rows: u64, since_last: f32, interval: f32) -> bool {
+    rows == 0 || since_last >= interval
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_row_is_due_at_once_and_the_others_after_the_interval() {
+        assert!(row_due(0, 0.0, 60.0));
+        assert!(!row_due(1, 0.5, 1.0));
+        assert!(row_due(1, 1.0, 1.0));
+        assert!(row_due(7, 100.0, 1.0));
     }
 }

@@ -77,6 +77,11 @@ pub fn analyse(ir: &[f32], sr: f32) -> Option<(usize, Vec<f32>, Vec<f32>, Metric
     let pk = h.iter().enumerate().fold((0, 0f32), |m, (i, v)| if v.abs() > m.1 { (i, v.abs()) } else { m }).0;
     let e: Vec<f64> = h[pk..].iter().map(|v| (*v as f64).powi(2)).collect();
     let n = e.len();
+    // the clarity windows (50 and 80 ms) need that much behind the peak: with a peak near the end of the data (a sweep whose
+    // pre-roll was longer than the stored response, or noise) there is nothing to evaluate
+    if n <= (0.08 * sr) as usize {
+        return None;
+    }
     let noise = e[n - n / 10..].iter().sum::<f64>() / (n / 10).max(1) as f64;
     // truncation: where a 10 ms moving average meets the noise floor (+3 dB)
     let w = ((0.01 * sr) as usize).max(8);
@@ -322,7 +327,7 @@ impl Tool for Impulse {
                     for (i, v) in r.ir.iter().enumerate() {
                         s += &format!("{:.4},{:.8}\n", (i as f32 - r.pre as f32) / r.sr * 1000.0, v);
                     }
-                    cx.req.note = Some(match std::fs::write(&path, s) {
+                    cx.req.note = Some(match crate::fsutil::atomic_write(&path, s) {
                         Ok(_) => format!("Saved {}", path.display()),
                         Err(e) => format!("save failed: {e}"),
                     });
@@ -558,5 +563,29 @@ mod tests {
         let t20 = m.t20.expect("t20");
         assert!((t30 - 0.8).abs() < 0.08, "T30 {t30}");
         assert!((t20 - 0.8).abs() < 0.1, "T20 {t20}");
+    }
+
+    #[test]
+    fn a_peak_near_the_end_of_a_short_response_is_refused_instead_of_slicing_out_of_bounds() {
+        let sr = 48000.0;
+        // the peak at 1000 of 1024: 24 samples behind it, the clarity windows need 50 and 80 ms
+        let mut ir = vec![0.001f32; 1024];
+        ir[1000] = 1.0;
+        assert!(analyse(&ir, sr).is_none());
+        // the same at every position of the peak up to the last sample, and a length where the 50 ms window would fit but the 80 ms one not
+        for pk in [0usize, 511, 1023] {
+            let mut v = vec![0.0f32; 1024];
+            v[pk] = 1.0;
+            let _ = analyse(&v, sr);
+        }
+        let mut v = vec![0.001f32; (0.07 * sr) as usize + 1000];
+        v[1000] = 1.0;
+        assert!(analyse(&v, sr).is_none());
+        // enough behind the peak: evaluated
+        let mut v: Vec<f32> = (0..(0.5 * sr) as usize).map(|i| 0.9f32.powf(i as f32 / 100.0)).collect();
+        v[0] = 2.0;
+        let (pk, _, _, m) = analyse(&v, sr).expect("long enough");
+        assert_eq!(pk, 0);
+        assert!(m.c50.is_finite() && m.c80.is_finite());
     }
 }

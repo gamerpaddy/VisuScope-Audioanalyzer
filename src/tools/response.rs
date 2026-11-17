@@ -236,9 +236,11 @@ impl Response {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut p.full, crate::lang::tr("Full")).on_hover_text(crate::lang::tr("From 5 Hz to the top of the sample rate (the graph rate with the routing graph: 96 kHz at 192 kHz). Outside the sweep nothing is measured: the curve falls off there."));
                         ui.add_enabled_ui(!p.full, |ui| {
-                            ui.add(egui::DragValue::new(&mut p.f0).range(5.0..=2000.0).speed(1.0).suffix(crate::lang::tr(" Hz")));
+                            // (the end stays above the start: a sweep that does not rise cannot be analysed)
+                            let f1 = p.f1;
+                            ui.add(egui::DragValue::new(&mut p.f0).range(5.0..=(f1 / 1.2).clamp(5.0, 2000.0)).speed(1.0).suffix(crate::lang::tr(" Hz")));
                             ui.label(crate::lang::tr("to"));
-                            ui.add(egui::DragValue::new(&mut p.f1).range(1000.0..=96000.0).speed(10.0).suffix(crate::lang::tr(" Hz")));
+                            ui.add(egui::DragValue::new(&mut p.f1).range((p.f0 * 1.2).max(1000.0)..=96000.0).speed(10.0).suffix(crate::lang::tr(" Hz")));
                         });
                     });
                     ui.end_row();
@@ -318,7 +320,7 @@ impl Tool for Response {
                     for i in 0..c.f.len() {
                         s += &format!("{:.3},{:.3},{:.2},{:.4},{}\n", c.f[i], c.mag[i], c.phase_deg[i], c.gd_ms[i], c.coh.as_ref().map(|v| format!("{:.4}", v[i])).unwrap_or_default());
                     }
-                    cx.req.note = Some(match std::fs::write(&path, s) {
+                    cx.req.note = Some(match crate::fsutil::atomic_write(&path, s) {
                         Ok(_) => format!("Saved {}", path.display()),
                         Err(e) => format!("save failed: {e}"),
                     });

@@ -266,11 +266,41 @@ fn poly_blep(t: f32, dt: f32) -> f32 {
     }
 }
 
+/// The factors that bring every noise colour to unit RMS (measured once: it takes tens of milliseconds).
+fn norms() -> [f32; 6] {
+    static NORM: std::sync::OnceLock<[f32; 6]> = std::sync::OnceLock::new();
+    *NORM.get_or_init(|| {
+        let mut norm = [1.0f32; 6];
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for k in NoiseKind::ALL {
+            let mut st = NoiseState::default();
+            let mut sum = 0.0f64;
+            let n = 300_000;
+            for i in 0..n {
+                let v = raw_noise(k, &mut st, &mut rng) as f64;
+                if i > 20_000 {
+                    sum += v * v;
+                }
+            }
+            norm[k.index()] = (1.0 / (sum / (n - 20_001) as f64).sqrt()) as f32;
+        }
+        norm
+    })
+}
+
+/// Does the one-time measurement of the noise levels now, on the calling thread. A generator that is made inside the open call of
+/// an ASIO driver would otherwise do it while the session is locked.
+pub fn warm_up() {
+    let _ = norms();
+}
+
 pub struct GenState {
     sr: f64,
     n: u64,
     acc: f64,
     mt_acc: Vec<f64>,
+    /// scratch of `render`: the frequencies of the multitone
+    mt_f: Vec<f64>,
     sweep_t: f64,
     gain: f32,
     rng: Rng,
@@ -282,31 +312,14 @@ pub struct GenState {
 
 impl GenState {
     pub fn new(sr: f64) -> Self {
-        // normalise every noise colour to unit RMS (measured once: it takes tens of milliseconds, and
-        // generators are created on audio threads)
-        static NORM: std::sync::OnceLock<[f32; 6]> = std::sync::OnceLock::new();
-        let norm = *NORM.get_or_init(|| {
-            let mut norm = [1.0f32; 6];
-            let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-            for k in NoiseKind::ALL {
-                let mut st = NoiseState::default();
-                let mut sum = 0.0f64;
-                let n = 300_000;
-                for i in 0..n {
-                    let v = raw_noise(k, &mut st, &mut rng) as f64;
-                    if i > 20_000 {
-                        sum += v * v;
-                    }
-                }
-                norm[k.index()] = (1.0 / (sum / (n - 20_001) as f64).sqrt()) as f32;
-            }
-            norm
-        });
+        // normalise every noise colour to unit RMS (measured once: generators are created on audio threads)
+        let norm = norms();
         Self {
             sr,
             n: 0,
             acc: 0.0,
             mt_acc: vec![0.0; 64],
+            mt_f: Vec::with_capacity(64),
             sweep_t: 0.0,
             gain: 0.0,
             rng: Rng(0xD1B5_4A32_D192_ED03),
@@ -348,19 +361,22 @@ impl GenState {
             if p.mute[0] { 0.0 } else { 10f32.powf(p.level_db[0] / 20.0) },
             if p.mute[1] { 0.0 } else { 10f32.powf(p.level_db[1] / 20.0) },
         ];
-        let hamp: Vec<f32> = p.harm_db.iter().map(|d| 10f32.powf(d / 20.0)).collect();
+        let hamp: [f32; 5] = p.harm_db.map(|d| 10f32.powf(d / 20.0));
         let dphase = p.phase_deg as f64 / 360.0;
         let mt_n = p.mt_count.clamp(1, 64);
-        let mt_f: Vec<f64> = (0..mt_n)
-            .map(|k| {
+        // (a scratch of the generator: this runs in the audio callback, which should not allocate; only the multitone needs it)
+        let mut mt_f = std::mem::take(&mut self.mt_f);
+        mt_f.clear();
+        if p.wave == Wave::Multitone {
+            mt_f.extend((0..mt_n).map(|k| {
                 let x = if mt_n > 1 { k as f64 / (mt_n - 1) as f64 } else { 0.0 };
                 if p.mt_log {
                     p.mt_f0 as f64 * (p.mt_f1 as f64 / p.mt_f0 as f64).powf(x)
                 } else {
                     p.mt_f0 as f64 + (p.mt_f1 as f64 - p.mt_f0 as f64) * x
                 }
-            })
-            .collect();
+            }));
+        }
         let mt_amp = 0.7 / (mt_n as f32).sqrt();
         let q = if p.quant_on { 2f32.powi(p.bits.clamp(2, 24) as i32 - 1) } else { 0.0 };
 
@@ -372,6 +388,11 @@ impl GenState {
                 None => 0.0,
             };
             self.gain += ((if p.on { 1.0 } else { 0.0 }) - self.gain) * fade;
+            // (switched off, the gain would sink into the denormal range and stay there: every sample would be slow for ever;
+            // far below the 1e-5 at which the output is silent anyway)
+            if !p.on && self.gain < 1e-9 {
+                self.gain = 0.0;
+            }
             if self.gain < 1e-5 && !p.on {
                 frame.fill(0.0);
                 frame[0] = sw;
@@ -499,6 +520,7 @@ impl GenState {
             }
             self.n += 1;
         }
+        self.mt_f = mt_f;
     }
 }
 
@@ -622,6 +644,8 @@ fn current_key(id: &str) -> Option<(u32, u16, SampleFormat)> {
 fn build(params: &Arc<Mutex<GenParams>>, id: &str, dead: Arc<AtomicBool>) -> Result<(crate::asio::Held, String, (u32, u16, SampleFormat)), String> {
     if crate::asio::is_asio(id) {
         let (p, d2) = (params.clone(), dead.clone());
+        // (the generator is made while the driver session is locked: have its one-time measurement done before)
+        warm_up();
         let (port, info) = crate::asio::open_output(crate::asio::name_of(id), dead.clone(), move |i| Box::new(out_body::<f32>(p, i.sr, i.n_out, d2)))?;
         return Ok((crate::asio::Held::Asio(port), format!("ASIO {} Hz, {} ch, {} frames", info.sr, info.n_out, info.buf), (info.sr, info.n_out as u16, SampleFormat::F32)));
     }
@@ -701,6 +725,64 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The multitone as the formula says (the frequencies come from a scratch that is reused between blocks, also when the settings change).
+    #[test]
+    fn multitone_matches_the_formula_across_blocks_and_settings() {
+        let sr = 48000.0f64;
+        let mut g = GenState::new(sr);
+        let mut p = GenParams { on: true, wave: Wave::Multitone, level_db: [-6.0, -6.0], mt_schroeder: false, ..GenParams::default() };
+        for (count, log, f0, f1) in [(10usize, true, 100.0f32, 10000.0f32), (3, false, 500.0, 2500.0), (64, true, 50.0, 18000.0), (1, true, 440.0, 441.0)] {
+            (p.mt_count, p.mt_log, p.mt_f0, p.mt_f1) = (count, log, f0, f1);
+            // the phases start over for the formula (the scratch of the frequencies is what is kept); the gain ramps up while it is
+            // on: let it settle first
+            g.mt_acc.iter_mut().for_each(|a| *a = 0.0);
+            g.n = 0;
+            let mut warm = vec![0.0f32; 2 * 4800];
+            g.render(&p, &mut warm, 2);
+            let start = g.n;
+            let mut buf = vec![0.0f32; 2 * 256];
+            g.render(&p, &mut buf, 2);
+            let fq: Vec<f64> = (0..count)
+                .map(|k| {
+                    let x = if count > 1 { k as f64 / (count - 1) as f64 } else { 0.0 };
+                    if log { f0 as f64 * (f1 as f64 / f0 as f64).powf(x) } else { f0 as f64 + (f1 as f64 - f0 as f64) * x }
+                })
+                .collect();
+            let amp = 10f32.powf(-6.0 / 20.0) * 0.7 / (count as f32).sqrt();
+            for i in [0usize, 100, 255] {
+                let t = (start + i as u64) as f64 / sr;
+                let want: f32 = (0..count).map(|k| (std::f64::consts::TAU * (fq[k] * t + (k as f64 * 0.618_033_988_75).fract())).sin() as f32).sum::<f32>() * amp;
+                // (the phase accumulators wrap and are in f64: a few 1e-5 of difference come from f32 sums)
+                assert!((buf[2 * i] - want).abs() < 2e-3 * (1.0 + want.abs()), "{count} tones, sample {i}: {} vs {want}", buf[2 * i]);
+            }
+        }
+        // other waves leave the scratch empty and still work
+        p.wave = Wave::Sine;
+        let mut buf = vec![0.0f32; 2 * 64];
+        g.render(&p, &mut buf, 2);
+        assert!(buf.iter().any(|v| *v != 0.0));
+    }
+
+    /// A generator that was switched off ends up with a gain of exactly zero (no denormal that every sample would drag along).
+    #[test]
+    fn switched_off_the_gain_reaches_zero() {
+        let mut g = GenState::new(48000.0);
+        let mut p = GenParams { on: true, ..GenParams::default() };
+        let mut buf = vec![0.0f32; 2 * 4800];
+        g.render(&p, &mut buf, 2);
+        assert!(g.gain > 0.99);
+        p.on = false;
+        for _ in 0..40 {
+            g.render(&p, &mut buf, 2);
+        }
+        assert_eq!(g.gain, 0.0);
+        assert!(buf.iter().all(|v| *v == 0.0));
+        // and it comes back
+        p.on = true;
+        g.render(&p, &mut buf, 2);
+        assert!(g.gain > 0.5);
+    }
 
     #[test]
     fn sine_level_and_noise_rms() {

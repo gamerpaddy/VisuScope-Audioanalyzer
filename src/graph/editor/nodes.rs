@@ -5,15 +5,19 @@ use super::*;
 impl Routing {
     pub(super) fn device_combo(&self, ui: &mut Ui, n: &mut Node, id_salt: &str) -> bool {
         let Some(e) = &self.eng else { return false };
-        let devs: Vec<DevEx> = e.devs.lock().clone();
-        let cur = if n.s.is_empty() {
-            let d = e.default_in.lock().clone();
-            devs.iter().find(|x| x.id == d).map(|x| format!("{} (default)", short_label(&x.label))).unwrap_or_else(|| "default input".into())
-        } else {
-            devs.iter().find(|x| x.id == n.s).map(|x| short_label(&x.label)).unwrap_or_else(|| "device missing".into())
+        // (every frame only the name of the chosen device is needed: the list is copied when the drop-down is open)
+        let cur = {
+            let devs = e.devs.lock();
+            if n.s.is_empty() {
+                let d = e.default_in.lock().clone();
+                devs.iter().find(|x| x.id == d).map(|x| format!("{} (default)", short_label(&x.label))).unwrap_or_else(|| "default input".into())
+            } else {
+                devs.iter().find(|x| x.id == n.s).map(|x| short_label(&x.label)).unwrap_or_else(|| "device missing".into())
+            }
         };
         let mut changed = false;
         egui::ComboBox::from_id_salt((id_salt, n.id)).width(ui.available_width() - 6.0).truncate().selected_text(cur).show_ui(ui, |ui| {
+            let devs: Vec<DevEx> = e.devs.lock().clone();
             for d in &devs {
                 if ui.selectable_label(n.s == d.id, format!("{}  ({} ch, {} Hz)", short_label(&d.label), d.ch, d.sr)).clicked() {
                     n.s = d.id.clone();

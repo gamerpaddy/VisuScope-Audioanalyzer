@@ -43,6 +43,7 @@ impl App {
             self.shutdown_tools();
             self.save_settings(true);
             self.lib.save_auto();
+            self.stop_for_exit();
             std::process::exit(code);
         }
         if let Some(c) = req.gen_cmd {
@@ -227,7 +228,7 @@ impl App {
         meta.push(("Software".into(), format!("VisuScope {}", env!("CARGO_PKG_VERSION"))));
         let html = render_html(&r.title, &r.notes, &meta, &sections);
         let path = r.path.clone().unwrap_or_else(|| tools::docs_dir().join(format!("report_{stamp}.html")));
-        match std::fs::write(&path, html) {
+        match crate::fsutil::atomic_write(&path, html) {
             Ok(_) => {
                 if r.open {
                     tools::reportui::open_path(&path);
@@ -257,7 +258,7 @@ impl App {
 
     /// Per-frame work of every tool (also those whose window is closed).
     pub fn tools_update(&mut self) {
-        if std::env::var_os("VISUSCOPE_AUTO_SWEEP").is_some() && !self.test_sweep_started && self.sh.t0.elapsed().as_secs() >= 6 {
+        if crate::app::env_hooks().auto_sweep && !self.test_sweep_started && self.sh.t0.elapsed().as_secs() >= 6 {
             self.test_sweep_started = true;
             self.sweep.start();
         }
@@ -268,10 +269,11 @@ impl App {
                 println!("{msg}");
                 crate::log::log(&msg);
                 if let Some(r) = report.filter(|r| !r.is_empty()) {
-                    let _ = std::fs::write(r, format!("ERROR
+                    let _ = crate::fsutil::atomic_write(r, format!("ERROR
 {msg}
 "));
                 }
+                crate::asio::shutdown(std::time::Duration::from_millis(1500));
                 std::process::exit(2);
             }
             if self.sh.t0.elapsed().as_secs() >= 4 && self.sh.sr.load(std::sync::atomic::Ordering::Relaxed) > 0 {

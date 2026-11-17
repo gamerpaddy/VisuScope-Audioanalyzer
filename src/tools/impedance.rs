@@ -182,6 +182,12 @@ pub fn two_point_calibration(open: f32, with_r: f32, known: f32) -> Option<(f32,
     (h1 > 1e-6 && h1 < 0.99999).then(|| (gain, known * (1.0 / h1 - 1.0)))
 }
 
+/// Whether the sweep this window asked for has ended without a result (stopped, or failed): nothing is running and the newest
+/// result is still the one from before the request.
+fn arm_lost(armed: bool, busy: bool, id: u64, start_id: u64) -> bool {
+    armed && !busy && id == start_id
+}
+
 fn cal_path() -> std::path::PathBuf {
     let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
     base.join("visuscope").join("impedance_cal.txt")
@@ -443,6 +449,12 @@ impl Tool for Impedance {
         }
         // a result of the sweep that was started here
         let id = cx.sweep.result.as_ref().map_or(0, |r| r.id);
+        // (a sweep that failed or was stopped leaves no result: the wish for one must not stay, or the next sweep of any window would
+        // be taken for it, with an old intent such as the calibration with the terminals open)
+        if arm_lost(self.armed, cx.sweep.busy(), id, self.start_id) {
+            self.armed = false;
+            self.intent = 0;
+        }
         if self.armed && id != self.start_id && !cx.sweep.busy() {
             self.armed = false;
             self.seen_id = id;
@@ -485,7 +497,7 @@ impl Tool for Impedance {
                         let (z, p) = (c.ohm(i), c.phase_deg[i].to_radians());
                         s += &format!("{:.3},{:.4},{:.2},{:.4},{:.4}\n", c.f[i], z, c.phase_deg[i], z * p.cos(), z * p.sin());
                     }
-                    cx.req.note = Some(match std::fs::write(&path, s) {
+                    cx.req.note = Some(match crate::fsutil::atomic_write(&path, s) {
                         Ok(_) => format!("Saved {}", path.display()),
                         Err(e) => format!("save failed: {e}"),
                     });

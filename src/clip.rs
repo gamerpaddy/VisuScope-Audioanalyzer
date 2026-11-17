@@ -3,6 +3,7 @@
 #[cfg(windows)]
 pub fn copy(text: &str) -> bool {
     use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     const CF_UNICODETEXT: u32 = 13;
     let w: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
@@ -19,6 +20,10 @@ pub fn copy(text: &str) -> bool {
                 std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
                 GlobalUnlock(h);
                 ok = !SetClipboardData(CF_UNICODETEXT, h as _).is_null();
+            }
+            // the clipboard owns the memory only once it took it: otherwise it is ours to free
+            if !ok {
+                GlobalFree(h);
             }
         }
         CloseClipboard();

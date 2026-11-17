@@ -407,7 +407,7 @@ impl Tool for Distortion {
             && let Some(res) = d.take() {
                 self.save = None;
                 if let Some(path) = res {
-                    cx.req.note = Some(match std::fs::write(&path, self.csv(cx)) {
+                    cx.req.note = Some(match crate::fsutil::atomic_write(&path, self.csv(cx)) {
                         Ok(_) => format!("Saved {}", path.display()),
                         Err(e) => format!("save failed: {e}"),
                     });

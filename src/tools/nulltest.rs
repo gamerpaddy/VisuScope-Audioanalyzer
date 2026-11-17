@@ -44,6 +44,15 @@ struct Sig {
     name: String,
     sr: u32,
     x: Arc<Vec<f32>>,
+    /// largest absolute sample (the scale of the waveforms: worked out once, not for every frame)
+    peak: f32,
+}
+
+impl Sig {
+    fn new(name: String, sr: u32, x: Arc<Vec<f32>>) -> Self {
+        let peak = x.iter().fold(0f32, |m, v| m.max(v.abs()));
+        Self { name, sr, x, peak }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -87,6 +96,26 @@ impl Drop for Player {
     }
 }
 
+/// The next `need` samples of what is played (the signal of the chosen mode, looped), boosted and limited to full scale.
+fn render_play(s: &mut PlayShared, need: usize, out: &mut Vec<f32>) {
+    out.clear();
+    let sig = s.sigs[s.mode.min(2)].clone();
+    if sig.is_empty() {
+        return;
+    }
+    let boost = if s.mode == 2 { s.boost } else { 1.0 };
+    out.reserve(need);
+    let mut pos = s.pos % sig.len();
+    for _ in 0..need {
+        out.push((sig[pos] * boost).clamp(-1.0, 1.0));
+        pos += 1;
+        if pos == sig.len() {
+            pos = 0;
+        }
+    }
+    s.pos = pos;
+}
+
 impl Player {
     fn start(dev: &str, sh: PlayShared) -> Player {
         let q = Arc::new(Mutex::new(Queue { buf: Default::default(), src_sr: sh.sr, ..Default::default() }));
@@ -99,24 +128,23 @@ impl Player {
         std::thread::Builder::new()
             .name("nulltest-play".into())
             .spawn(move || {
-                let mut l = vec![0f32; 512];
+                let mut buf: Vec<f32> = Vec::new();
                 while !stop2.load(Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(8));
-                    let mut q = q.lock();
-                    let mut s = sh2.lock();
-                    q.src_sr = s.sr;
-                    let target = s.sr as usize / 4;
-                    while q.buf.len() < target {
-                        let sig = s.sigs[s.mode.min(2)].clone();
-                        if sig.is_empty() {
-                            break;
-                        }
-                        let boost = if s.mode == 2 { s.boost } else { 1.0 };
-                        for v in l.iter_mut() {
-                            *v = (sig[s.pos % sig.len()] * boost).clamp(-1.0, 1.0);
-                            s.pos = (s.pos + 1) % sig.len();
-                        }
-                        q.push(&l, &l);
+                    // the queue is locked for a look at its fill and for the append only: the output callback gives up after 800 us,
+                    // and rendering a quarter second of samples under that lock made it skip
+                    let need = {
+                        let mut q = q.lock();
+                        let s = sh2.lock();
+                        q.src_sr = s.sr;
+                        (s.sr as usize / 4).saturating_sub(q.buf.len())
+                    };
+                    if need == 0 {
+                        continue;
+                    }
+                    render_play(&mut sh2.lock(), need, &mut buf);
+                    if !buf.is_empty() {
+                        q.lock().push(&buf, &buf);
                     }
                 }
             })
@@ -140,6 +168,8 @@ pub struct NullTest {
     invert: bool,
     adj: Arc<Vec<f32>>,
     res: Arc<Vec<f32>>,
+    /// B resampled to the rate of A: (the signal of B, its rate, the rate of A, the result)
+    b_rs: Option<(Arc<Vec<f32>>, u32, u32, Arc<Vec<f32>>)>,
     /// length of B on A's sample rate
     b_len: usize,
     sr: u32,
@@ -175,6 +205,7 @@ impl NullTest {
             adj: Arc::new(Vec::new()),
             res: Arc::new(Vec::new()),
             b_len: 0,
+            b_rs: None,
             sr: 48000,
             stats: None,
             curves: None,
@@ -199,10 +230,10 @@ impl NullTest {
         let (l, r) = (Arc::new(l), Arc::new(r));
         let name = |s: &Src| if *s == Src::InL { "input left" } else { "input right" };
         if self.sa != Src::File {
-            self.a = Some(Sig { name: name(&self.sa).into(), sr, x: if self.sa == Src::InL { l.clone() } else { r.clone() } });
+            self.a = Some(Sig::new(name(&self.sa).into(), sr, if self.sa == Src::InL { l.clone() } else { r.clone() }));
         }
         if self.sb != Src::File {
-            self.b = Some(Sig { name: name(&self.sb).into(), sr, x: if self.sb == Src::InL { l } else { r } });
+            self.b = Some(Sig::new(name(&self.sb).into(), sr, if self.sb == Src::InL { l } else { r }));
         }
         self.after_new_data();
     }
@@ -220,18 +251,19 @@ impl NullTest {
     }
 
     /// B on A's sample rate.
-    fn b_at_rate(&self) -> Option<Arc<Vec<f32>>> {
+    fn b_at_rate(&mut self) -> Option<Arc<Vec<f32>>> {
         let (a, b) = (self.a.as_ref()?, self.b.as_ref()?);
         if a.sr == b.sr {
             return Some(b.x.clone());
         }
-        let mut rs = Rs::new(b.sr, a.sr);
-        rs.push(&b.x, &b.x);
-        let n = rs.available();
-        let (mut l, mut r) = (vec![0f32; n], vec![0f32; n]);
-        let k = rs.pull(&mut l, &mut r);
-        l.truncate(k);
-        Some(Arc::new(l))
+        // (the delay, level and polarity controls call this for every change: a file of a minute is not resampled again each time)
+        if let Some((src, from, to, out)) = &self.b_rs
+            && Arc::ptr_eq(src, &b.x) && *from == b.sr && *to == a.sr {
+                return Some(out.clone());
+            }
+        let out = resample_to(&b.x, b.sr, a.sr);
+        self.b_rs = Some((b.x.clone(), b.sr, a.sr, out.clone()));
+        Some(out)
     }
 
     /// Find the delay (cross-correlation), the polarity and the level match.
@@ -332,12 +364,8 @@ impl NullTest {
         let s2 = slot.clone();
         std::thread::spawn(move || {
             let name = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-            let res = std::panic::catch_unwind(|| super::decode::read_all(&path)).unwrap_or_else(|_| Err("the decoder failed on this file".into())).map(|(sr, ch)| {
-                // channels are mixed to one
-                let len = ch.iter().map(|c| c.len()).max().unwrap_or(0).min(sr as usize * 60);
-                let mono: Vec<f32> = (0..len).map(|i| ch.iter().map(|c| c.get(i).copied().unwrap_or(0.0)).sum::<f32>() / ch.len().max(1) as f32).collect();
-                (name, sr, mono)
-            });
+            // (the mixing is inside the guard too: whatever happens, the slot is filled and the window does not wait for ever)
+            let res = std::panic::catch_unwind(|| super::decode::read_all(&path).map(|(sr, ch)| (sr, mix_to_mono(sr, &ch)))).unwrap_or_else(|_| Err("the decoder failed on this file".into())).map(|(sr, mono)| (name, sr, mono));
             *s2.lock() = Some(res);
         });
         self.loading = Some((is_b, slot));
@@ -393,6 +421,23 @@ impl NullTest {
             ui.label(RichText::new(crate::lang::tr("press Capture")).small().weak());
         }
     }
+}
+
+/// The channels of a file mixed to one (at most a minute: the rest is not used).
+fn mix_to_mono(sr: u32, ch: &[Vec<f32>]) -> Vec<f32> {
+    let len = ch.iter().map(|c| c.len()).max().unwrap_or(0).min(sr as usize * 60);
+    (0..len).map(|i| ch.iter().map(|c| c.get(i).copied().unwrap_or(0.0)).sum::<f32>() / ch.len().max(1) as f32).collect()
+}
+
+/// `x` (one channel at `from` Hz) at the rate `to`.
+fn resample_to(x: &[f32], from: u32, to: u32) -> Arc<Vec<f32>> {
+    let mut rs = Rs::new(from, to);
+    rs.push(x, x);
+    let n = rs.available();
+    let (mut l, mut r) = (vec![0f32; n], vec![0f32; n]);
+    let k = rs.pull(&mut l, &mut r);
+    l.truncate(k);
+    Arc::new(l)
 }
 
 /// Samples of A where the delayed B has real data (the edges are left out of the readouts).
@@ -581,7 +626,7 @@ impl Tool for NullTest {
                     _ if !still_wanted => {}
                     Ok((_, _, x)) if x.is_empty() => self.msg = "that file holds no audio".into(),
                     Ok((name, sr, x)) => {
-                        let sig = Some(Sig { name, sr, x: Arc::new(x) });
+                        let sig = Some(Sig::new(name, sr, Arc::new(x)));
                         if is_b {
                             self.b = sig;
                         } else {
@@ -735,7 +780,7 @@ impl Tool for NullTest {
             if pr.width() < 40.0 || pr.height() < 20.0 {
                 continue;
             }
-            let peak = a.x.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-4);
+            let peak = a.peak.max(1e-4);
             let scale = (peak * 1.1).min(1.5);
             let plot = Plot::new(pr, self.view_start, self.view_start + span, -scale, scale, false);
             plot.grid_y(&painter, &|v| format!("{v:.2}"));
@@ -920,6 +965,67 @@ mod tests {
         let other = noise(20000, 5);
         let (l, c) = xcorr_lag(&a, &other, 1000).unwrap();
         assert!(l.abs() <= 1000.0 && c.is_finite());
+    }
+
+    fn shared(sigs: [Vec<f32>; 3], mode: usize, boost: f32, pos: usize) -> PlayShared {
+        let [a, b, c] = sigs;
+        PlayShared { sigs: [Arc::new(a), Arc::new(b), Arc::new(c)], mode, boost, pos, sr: 48000 }
+    }
+
+    #[test]
+    fn the_player_renders_a_looped_block_with_boost_and_limit_and_keeps_its_position() {
+        // the old per-sample version, as the reference
+        fn old(s: &mut PlayShared, n: usize) -> Vec<f32> {
+            let sig = s.sigs[s.mode.min(2)].clone();
+            let boost = if s.mode == 2 { s.boost } else { 1.0 };
+            (0..n)
+                .map(|_| {
+                    let v = (sig[s.pos % sig.len()] * boost).clamp(-1.0, 1.0);
+                    s.pos = (s.pos + 1) % sig.len();
+                    v
+                })
+                .collect()
+        }
+        let x = noise(1000, 4);
+        for (mode, boost, pos) in [(0usize, 1.0f32, 0usize), (1, 1.0, 999), (2, 8.0, 5), (2, 1.0, 5000)] {
+            let (mut a, mut b) = (shared([x.clone(), x.iter().map(|v| v * 0.5).collect(), x.clone()], mode, boost, pos), shared([x.clone(), x.iter().map(|v| v * 0.5).collect(), x.clone()], mode, boost, pos));
+            let mut out = Vec::new();
+            // three blocks: the loop wraps and the position carries on
+            for n in [700usize, 1300, 11] {
+                render_play(&mut a, n, &mut out);
+                assert_eq!(out, old(&mut b, n), "mode {mode} boost {boost} pos {pos}");
+                assert_eq!(a.pos, b.pos);
+            }
+        }
+        // the boosted difference stops at full scale
+        let mut s = shared([vec![0.0; 4], vec![0.0; 4], vec![0.4, -0.4, 0.05, 0.0]], 2, 10.0, 0);
+        let mut out = Vec::new();
+        render_play(&mut s, 4, &mut out);
+        assert_eq!(out, vec![1.0, -1.0, 0.5, 0.0]);
+        // nothing to play: nothing rendered (and no division by zero)
+        let mut s = shared([Vec::new(), Vec::new(), Vec::new()], 0, 1.0, 3);
+        render_play(&mut s, 100, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn b_is_resampled_once_and_the_result_is_reused() {
+        let mut nt = NullTest::new();
+        let x = Arc::new(smooth(44100));
+        nt.a = Some(Sig::new("a".into(), 48000, Arc::new(smooth(48000))));
+        nt.b = Some(Sig::new("b".into(), 44100, x.clone()));
+        let r1 = nt.b_at_rate().unwrap();
+        assert!(r1.len() > 40000 && r1.len() < 52000, "{}", r1.len());
+        let r2 = nt.b_at_rate().unwrap();
+        assert!(Arc::ptr_eq(&r1, &r2), "the second call resampled again");
+        // a new signal for B: a new result
+        nt.b = Some(Sig::new("b".into(), 44100, Arc::new(smooth(22050))));
+        let r3 = nt.b_at_rate().unwrap();
+        assert!(!Arc::ptr_eq(&r1, &r3) && r3.len() < 30000);
+        // the same rate: no copy at all
+        nt.b = Some(Sig::new("b".into(), 48000, x.clone()));
+        assert!(Arc::ptr_eq(&nt.b_at_rate().unwrap(), &x));
+        assert_eq!(mix_to_mono(8000, &[vec![1.0, 0.0], vec![0.0, 1.0, 1.0]]), vec![0.5, 0.5, 0.5]);
     }
 
     #[test]

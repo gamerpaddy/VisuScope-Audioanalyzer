@@ -435,3 +435,309 @@ fn filter_slopes_of_6_and_18_db() {
     // two 6 dB sections are a Linkwitz-Riley 12: 6 dB down at the corner
     assert!((2.0 * db(3.0, 1.0, 1000.0) + 6.02).abs() < 0.1);
 }
+
+#[test]
+fn downsampling_by_a_ratio_that_is_not_a_whole_number_does_not_read_past_the_kernel_table() {
+    // 48 kHz material into a 44.1 kHz graph: the kernel is wider than 48 input samples there and its far end must not index past
+    // the table (this used to panic and the engine restarted forever)
+    for (from, to) in [(48000u32, 44100u32), (96000, 44100), (88200, 48000), (192000, 44100), (47999, 44100)] {
+        let x = sine(1000.0, from as f32, from as usize / 2, 0.5);
+        let mut rs = Rs::new(from, to);
+        rs.push(&x, &x);
+        let (mut l, mut r) = (vec![0f32; to as usize], vec![0f32; to as usize]);
+        let n = rs.pull(&mut l, &mut r);
+        assert!(n > to as usize / 2 - 2000, "{from}->{to}: {n}");
+        let want = sine(1000.0, to as f32, n, 0.5);
+        let err = (2000..n - 2000).map(|i| (l[i] - want[i]).abs()).fold(0f32, f32::max);
+        assert!(err < 0.01, "{from}->{to}: error {err}");
+    }
+}
+
+// ---------------------------------------------------------------------- faster forms against the ones they replaced
+
+fn noise(seed: u32, n: usize) -> Vec<f32> {
+    let mut s = seed;
+    (0..n)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s as f32 / u32::MAX as f32 - 0.5
+        })
+        .collect()
+}
+
+/// `Rs::pull` as it was: per tap the position in the table from the distance to the output position, a branch for the taps
+/// before the start (only the lookup is limited to the table: it used to run past the end of it).
+fn old_pull(rs: &mut Rs, l: &mut [f32], r: &mut [f32]) -> usize {
+    let n = l.len().min(r.len());
+    let k = n.min(rs.available());
+    let half = rs.half() as isize;
+    let scale = (1.0 / rs.ratio).min(1.0);
+    let tab = rs_table();
+    let buf = rs.buf.make_contiguous();
+    let mut pos = rs.pos;
+    for i in 0..k {
+        let base = pos.floor() as isize;
+        let (mut al, mut ar) = (0f64, 0f64);
+        for j in (base - half + 1)..=(base + half) {
+            if j < 0 {
+                continue;
+            }
+            let x = (j as f64 - pos) * scale;
+            let u = (x + RS_T) * RS_RES as f64;
+            if u < 0.0 || u >= (tab.len() - 1) as f64 {
+                continue;
+            }
+            let (ui, t) = (u.floor() as usize, (u - u.floor()) as f32);
+            let h = tab[ui] + (tab[ui + 1] - tab[ui]) * t;
+            let f = buf[j as usize];
+            al += (f[0] * h) as f64;
+            ar += (f[1] * h) as f64;
+        }
+        l[i] = (al * scale) as f32;
+        r[i] = (ar * scale) as f32;
+        pos += rs.ratio;
+    }
+    rs.pos = pos;
+    let drop = (rs.pos.floor() as usize).saturating_sub(rs.half() + 1).min(rs.buf.len());
+    rs.buf.drain(..drop);
+    rs.pos -= drop as f64;
+    k
+}
+
+#[test]
+fn the_strided_and_the_polyphase_resampler_match_the_table_lookup_they_replaced() {
+    // upwards, downwards, by a whole number and by a ratio that is not (47999 to 48000 has too many positions for a table of
+    // weights and keeps the lookup per tap): the stream is pulled in blocks of odd sizes
+    for (from, to, generic) in [(44100u32, 48000u32, false), (48000, 44100, false), (96000, 48000, false), (48000, 96000, false), (22050, 48000, false), (48000, 32000, false), (192000, 44100, false), (8000, 48000, false), (47999, 48000, false), (44100, 48000, true), (48000, 44100, true), (192000, 44100, true)] {
+        let (mut a, mut b) = (Rs::new(from, to), Rs::new(from, to));
+        assert_eq!(a.poly.is_some(), from != 47999, "{from}->{to}");
+        if generic {
+            a.poly = None;
+        }
+        let (x, y) = (noise(3, 20000), noise(4, 20000));
+        a.push(&x, &y);
+        b.push(&x, &y);
+        let mut worst = 0f32;
+        let mut total = 0;
+        for blk in [1usize, 480, 333, 1000, 5000, 77, 2000, 4096] {
+            let (mut l1, mut r1, mut l2, mut r2) = (vec![0f32; blk], vec![0f32; blk], vec![0f32; blk], vec![0f32; blk]);
+            let (n1, n2) = (a.pull(&mut l1, &mut r1), old_pull(&mut b, &mut l2, &mut r2));
+            assert_eq!(n1, n2, "{from}->{to}: the same number of frames");
+            total += n1;
+            worst = (0..n1).map(|i| (l1[i] - l2[i]).abs().max((r1[i] - r2[i]).abs())).fold(worst, f32::max);
+        }
+        assert!(total > 100, "{from}->{to}: only {total} frames");
+        // (the weights are summed in single precision, four sums at a time)
+        assert!(worst < if generic { 1e-6 } else { 3e-6 }, "{from}->{to} (lookup per tap: {generic}): differs by {worst}");
+        assert_eq!(a.buf.len(), b.buf.len());
+    }
+}
+
+/// `CompUnit::process` as it was: a logarithm and a power for every sample.
+fn old_comp(u: &mut CompUnit, l: &mut [f32], r: &mut [f32]) {
+    let mut worst = 0f32;
+    for i in 0..l.len() {
+        let level = l[i].abs().max(r[i].abs());
+        let target = if level < 1e-6 { 0.0 } else { u.curve(lin_to_db(level)) };
+        let c = if target < u.g { u.att } else { u.rel };
+        u.g = c * u.g + (1.0 - c) * target;
+        let gain = db_to_lin(u.g + u.makeup);
+        l[i] *= gain;
+        r[i] *= gain;
+        worst = worst.min(u.g);
+    }
+    u.gr_db = worst;
+}
+
+#[test]
+fn the_compressor_without_a_logarithm_for_quiet_samples_matches_the_old_one() {
+    let fs = 48000.0;
+    // a signal that sweeps from -100 dB to +6 dB with bursts, silence and noise
+    let n = 96000;
+    let nz = noise(8, n);
+    let x: Vec<f32> = (0..n)
+        .map(|i| {
+            let db = -100.0 + 106.0 * (i as f32 / n as f32);
+            let burst = if (i / 4000) % 3 == 1 { 0.0 } else { 1.0 };
+            (nz[i] * 2.0 * burst * db_to_lin(db)).clamp(-2.0, 2.0)
+        })
+        .collect();
+    let y: Vec<f32> = x.iter().rev().copied().collect();
+    for p in [[-30.0f32, 4.0, 10.0, 100.0, 6.0, 3.0], [-18.0, 20.0, 0.1, 5.0, 0.0, 0.0], [-60.0, 2.0, 50.0, 2000.0, 24.0, 12.0], [0.0, 1.0, 10.0, 120.0, 6.0, 0.0]] {
+        let mut a = CompUnit::default();
+        a.set(&p, fs);
+        let mut b = a.clone();
+        let (mut l1, mut r1, mut l2, mut r2) = (x.clone(), y.clone(), x.clone(), y.clone());
+        for ((c1, c2), (d1, d2)) in l1.chunks_mut(480).zip(r1.chunks_mut(480)).zip(l2.chunks_mut(480).zip(r2.chunks_mut(480))) {
+            a.process(c1, c2);
+            old_comp(&mut b, d1, d2);
+        }
+        let err = l1.iter().zip(&l2).chain(r1.iter().zip(&r2)).map(|(p, q)| (p - q).abs()).fold(0f32, f32::max);
+        assert!(err < 1e-5, "{p:?}: the output differs by {err}");
+        assert!((a.gr_db - b.gr_db).abs() < 1e-3, "{p:?}: gain reduction {} against {}", a.gr_db, b.gr_db);
+        // (the static curve is the same function: it is exactly 0 dB under the knee, which is what the shortcut relies on)
+        let edge = a.thr - a.knee * 0.5;
+        for db in [edge - 40.0, edge - 1.0, edge] {
+            assert_eq!(a.curve(db), 0.0, "{p:?}: curve at {db} dB");
+        }
+    }
+}
+
+#[test]
+fn an_infinite_sample_does_not_leave_the_compressor_with_a_gain_that_is_not_a_number() {
+    let mut c = CompUnit::default();
+    c.set(&[-20.0, 4.0, 10.0, 120.0, 6.0, 0.0], 48000.0);
+    let (mut l, mut r) = (vec![0.5f32; 480], vec![0.5f32; 480]);
+    l[100] = f32::INFINITY;
+    c.process(&mut l, &mut r);
+    let (mut l, mut r) = (vec![0.1f32; 4800], vec![0.1f32; 4800]);
+    c.process(&mut l, &mut r);
+    assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()), "the gain recovers");
+    assert!(c.gr_db.is_finite());
+}
+
+#[test]
+fn the_compressor_recovery_ends_at_exactly_no_reduction() {
+    let mut c = CompUnit::default();
+    c.set(&[-30.0, 8.0, 0.1, 5.0, 0.0, 0.0], 48000.0);
+    let (mut l, mut r) = (vec![0.9f32; 2000], vec![0.9f32; 2000]);
+    c.process(&mut l, &mut r);
+    assert!(c.gr_db < -5.0);
+    // the release is an exponential: after enough silence nothing of it is left (no denormal numbers that are slow to compute)
+    let (mut l, mut r) = (vec![0.0f32; 48000], vec![0.0f32; 48000]);
+    c.process(&mut l, &mut r);
+    assert_eq!(c.g, 0.0);
+    let (mut l, mut r) = (vec![0.01f32; 100], vec![0.01f32; 100]);
+    c.process(&mut l, &mut r);
+    assert!(l.iter().all(|v| *v == 0.01), "below the threshold the signal passes unchanged");
+}
+
+#[test]
+fn the_eight_sums_of_the_dot_product_match_one_sum() {
+    for n in (0..70).chain([255, 256, 257, 801]) {
+        let (a, b) = (noise(1, n), noise(2, n + 3));
+        let want: f64 = a.iter().zip(&b).map(|(x, y)| *x as f64 * *y as f64).sum();
+        assert!((dot(&a, &b) as f64 - want).abs() < 1e-5, "length {n}");
+    }
+}
+
+#[test]
+fn the_anti_alias_filter_matches_a_plain_convolution_in_blocks_of_any_size() {
+    let mut f = FirLowpass::default();
+    f.design(96000.0, 44100.0);
+    let nt = f.taps.len();
+    assert!(nt > 31);
+    let (x, y) = (noise(5, 6000), noise(6, 6000));
+    let (mut l, mut r) = (x.clone(), y.clone());
+    let mut at = 0;
+    for blk in [480usize, 1, 333, 1024, 7, 2048, 100] {
+        let e = (at + blk).min(l.len());
+        f.process(&mut l[at..e], &mut r[at..e]);
+        at = e;
+        if at >= l.len() {
+            break;
+        }
+    }
+    f.process(&mut l[at..], &mut r[at..]);
+    for (inp, out) in [(&x, &l), (&y, &r)] {
+        let mut worst = 0f64;
+        for i in (0..inp.len()).step_by(7) {
+            let d: f64 = (0..nt).filter(|k| i + k + 1 >= nt).map(|k| f.taps[k] as f64 * inp[i + k + 1 - nt] as f64).sum();
+            worst = worst.max((d - out[i] as f64).abs());
+        }
+        assert!(worst < 1e-5, "differs by {worst}");
+    }
+}
+
+#[test]
+fn the_harmonics_constants_are_worked_out_again_only_when_the_richness_changes() {
+    let fs = 48000.0;
+    let mut u = HarmUnit::default();
+    u.set(&[40.0, 10.0, 30.0, 0.0], fs);
+    let (pe, k_odd, mean_e, f1, ge, go) = (u.pe, u.k_odd, u.mean_e, u.f1_odd, u.ge, u.go);
+    // the same richness again (another parameter moved): the tables are left as they are
+    u.ge = 123.0;
+    u.set(&[60.0, 10.0, 30.0, -6.0], fs);
+    assert_eq!(u.ge, 123.0, "no new tuning for an unchanged richness");
+    assert_eq!((u.pe, u.k_odd, u.mean_e, u.f1_odd, u.go), (pe, k_odd, mean_e, f1, go));
+    u.ge = ge;
+    // a new richness works them out afresh, to the same values a unit made with it has
+    u.set(&[60.0, 10.0, 80.0, -6.0], fs);
+    let mut fresh = HarmUnit::default();
+    fresh.set(&[60.0, 10.0, 80.0, -6.0], fs);
+    assert_ne!(u.ge, ge);
+    assert_eq!((u.pe, u.k_odd, u.mean_e, u.f1_odd, u.ge, u.go), (fresh.pe, fresh.k_odd, fresh.mean_e, fresh.f1_odd, fresh.ge, fresh.go));
+    // and back: the first values again
+    u.set(&[40.0, 10.0, 30.0, 0.0], fs);
+    assert_eq!((u.pe, u.k_odd, u.mean_e, u.f1_odd, u.ge, u.go), (pe, k_odd, mean_e, f1, ge, go));
+}
+
+/// `cargo test --locked bench_dsp_fast_paths -- --ignored --nocapture`: the old and the new forms on one second of stereo audio.
+#[test]
+#[ignore]
+fn bench_dsp_fast_paths() {
+    use std::time::Instant;
+    let fs = 48000usize;
+    let x = noise(9, fs);
+    let time = |name: &str, f: &mut dyn FnMut(&mut [f32], &mut [f32])| {
+        let (mut l, mut r) = (x.clone(), x.clone());
+        let t = Instant::now();
+        for _ in 0..5 {
+            for (a, b) in l.chunks_mut(480).zip(r.chunks_mut(480)) {
+                f(a, b);
+            }
+        }
+        println!("{name:34} {:7.2} ms per second of audio", t.elapsed().as_secs_f64() * 1000.0 / 5.0);
+    };
+    let quiet: Vec<f32> = x.iter().map(|v| v * 0.01).collect();
+    for (name, src) in [("loud", &x), ("mostly under the knee", &quiet)] {
+        let mut c = CompUnit::default();
+        c.set(&[-30.0, 4.0, 10.0, 100.0, 6.0, 0.0], 48000.0);
+        let mut d = c.clone();
+        let time2 = |tag: &str, f: &mut dyn FnMut(&mut [f32], &mut [f32])| {
+            let (mut l, mut r) = (src.clone(), src.clone());
+            let t = Instant::now();
+            for _ in 0..5 {
+                for (a, b) in l.chunks_mut(480).zip(r.chunks_mut(480)) {
+                    f(a, b);
+                }
+            }
+            println!("{:34} {:7.2} ms per second of audio", format!("compressor, {name}, {tag}"), t.elapsed().as_secs_f64() * 1000.0 / 5.0);
+        };
+        time2("old", &mut |l, r| old_comp(&mut c, l, r));
+        time2("new", &mut |l, r| d.process(l, r));
+    }
+    for (from, to) in [(44100u32, 48000u32), (96000, 48000), (48000, 96000)] {
+        let (mut a, mut b) = (Rs::new(from, to), Rs::new(from, to));
+        let input = noise(2, from as usize * 2);
+        a.push(&input, &input);
+        b.push(&input, &input);
+        let (mut l, mut r) = (vec![0f32; to as usize], vec![0f32; to as usize]);
+        let t = Instant::now();
+        let n = old_pull(&mut b, &mut l, &mut r);
+        let old = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let m = a.pull(&mut l, &mut r);
+        println!("resampler {from} -> {to}: old {old:7.2} ms, new {:7.2} ms ({n} / {m} frames)", t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let mut f = FirLowpass::default();
+    f.design(96000.0, 44100.0);
+    let taps = f.taps.clone();
+    let nt = taps.len();
+    let mut work: [Vec<f32>; 2] = [vec![0.0; nt - 1], vec![0.0; nt - 1]];
+    time("anti-alias filter, old", &mut |l, r| {
+        for (c, x) in [l, r].into_iter().enumerate() {
+            let w = &mut work[c];
+            w.truncate(nt - 1);
+            w.extend_from_slice(x);
+            for (i, o) in x.iter_mut().enumerate() {
+                *o = w[i..i + nt].iter().zip(&taps).map(|(a, b)| a * b).sum();
+            }
+            let tail = w.len() - (nt - 1);
+            w.copy_within(tail.., 0);
+        }
+    });
+    time("anti-alias filter, new", &mut |l, r| f.process(l, r));
+}

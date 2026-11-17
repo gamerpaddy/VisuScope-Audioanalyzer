@@ -385,3 +385,24 @@ fn input_lanes() {
     assert_eq!(Mode::Mix.lanes(2), vec![2]);
     assert_eq!(Mode::Chan(9).lanes(2), vec![1]);
 }
+
+#[test]
+fn ids_run_out_without_a_panic() {
+    // a damaged project file can use the very last id
+    let mut p = Project::new(48000);
+    p.reserve_id(u32::MAX);
+    let a = p.next();
+    let b = p.next();
+    assert_eq!(a, u32::MAX);
+    assert_eq!(b, u32::MAX);
+    let ti = p.add_track(None, Input { dev: String::new(), mode: Mode::Mix });
+    assert_eq!(ti, 0);
+}
+
+#[test]
+fn the_converted_length_is_known_before_converting() {
+    for (n, from, to) in [(1000usize, 44100u32, 48000u32), (5000, 48000, 8000), (3001, 8000, 48000), (7, 48000, 48000), (123_456, 22050, 96000)] {
+        let x = vec![0.1f32; n];
+        assert_eq!(resampled_len(n, from, to), resample(&x, from, to).len() as u64, "{n} {from} -> {to}");
+    }
+}

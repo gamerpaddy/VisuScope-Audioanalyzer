@@ -539,6 +539,22 @@ pub fn plan(text: &str, devs: &[String], cur: usize, graph_on: bool) -> Plan {
     p
 }
 
+/// The sweep range after a plan said `f0` and / or `f1`: each within what the Response window accepts, and never an end at or below
+/// the start (the ends were clamped one by one, so that a plan that named only one of them, or a start that the clamp moved up to
+/// 2000 Hz, could leave `f0 >= f1`, which an exponential sweep cannot be made from). The end that was named stays; the other gives way.
+fn sweep_span(cur: (f32, f32), f0: Option<f32>, f1: Option<f32>) -> (f32, f32) {
+    let mut a = f0.map_or(cur.0, |v| v.clamp(5.0, 2000.0));
+    let mut b = f1.map_or(cur.1, |v| v.clamp(1000.0, 96000.0));
+    if b <= a {
+        if f0.is_some() && f1.is_none() {
+            b = (a * 2.0).min(96000.0);
+        } else {
+            a = (b * 0.5).min(2000.0);
+        }
+    }
+    (a, b)
+}
+
 // ---------------------------------------------------------------------- state and window
 
 #[derive(Default)]
@@ -582,12 +598,7 @@ impl App {
                 }
                 Action::Sweep { f0, f1, secs, level, averages } => {
                     let sp = &mut self.sweep.p;
-                    if let Some(v) = f0 {
-                        sp.f0 = v.clamp(5.0, 2000.0);
-                    }
-                    if let Some(v) = f1 {
-                        sp.f1 = v.clamp(1000.0, 96000.0);
-                    }
+                    (sp.f0, sp.f1) = sweep_span((sp.f0, sp.f1), *f0, *f1);
                     if let Some(v) = secs {
                         sp.secs = *v;
                     }
@@ -861,6 +872,29 @@ mod tests {
 
     fn devs() -> Vec<String> {
         vec!["Microphone (UMIK-1)".into(), "Speakers (Realtek)".into(), "[Loopback] Speakers (Realtek)".into(), "CABLE Output (VB-Audio Virtual Cable)".into(), "Line (SSL 2+ USB)".into()]
+    }
+
+    #[test]
+    fn a_sweep_never_ends_at_or_below_its_start() {
+        // the range of the sentence is kept as it is said
+        assert_eq!(sweep_span((20.0, 20000.0), Some(1500.0), Some(1800.0)), (1500.0, 1800.0));
+        assert_eq!(sweep_span((20.0, 20000.0), Some(50.0), Some(16000.0)), (50.0, 16000.0));
+        // a start that the window cannot take is moved, the end stays
+        assert_eq!(sweep_span((20.0, 20000.0), Some(5000.0), Some(8000.0)), (2000.0, 8000.0));
+        // only one end named: the other one of the sweep stays when it fits, and gives way when it does not
+        assert_eq!(sweep_span((20.0, 20000.0), Some(1800.0), None), (1800.0, 20000.0));
+        assert_eq!(sweep_span((1500.0, 1800.0), Some(1900.0), None), (1900.0, 3800.0));
+        assert_eq!(sweep_span((1500.0, 20000.0), None, Some(1200.0)), (600.0, 1200.0));
+        assert_eq!(sweep_span((20.0, 20000.0), None, Some(500.0)), (20.0, 1000.0));
+        // whatever comes in, the end is above the start and both are in the range of the window
+        for a in [None, Some(5.0), Some(300.0), Some(1999.0), Some(2000.0), Some(9000.0)] {
+            for b in [None, Some(500.0), Some(1000.0), Some(1500.0), Some(2000.0), Some(60000.0), Some(200000.0)] {
+                for cur in [(20.0, 20000.0), (2000.0, 1000.0), (1500.0, 1000.0), (5.0, 96000.0)] {
+                    let (f0, f1) = sweep_span(cur, a, b);
+                    assert!(f0 < f1 && (5.0..=2000.0).contains(&f0) && (1000.0..=96000.0).contains(&f1), "{cur:?} {a:?} {b:?} -> {f0} {f1}");
+                }
+            }
+        }
     }
 
     fn windows(p: &Plan) -> Vec<&'static str> {

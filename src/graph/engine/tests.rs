@@ -590,3 +590,116 @@ fn timeline_bus_reaches_a_sink_through_the_rate_converter() {
     assert!(loud > 14000, "{loud} samples carried the signal");
     bus().tl_clear();
 }
+
+#[test]
+fn an_impulse_response_of_another_rate_is_resampled_by_the_loader_not_by_the_engine_thread() {
+    let dir = std::env::temp_dir().join(format!("visuscope_ir96_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ir96.wav");
+    // a stereo response at 96 kHz: a spike 960 frames (10 ms) in on the left, the same one a little weaker on the right
+    {
+        let (mut l, mut r) = (vec![0f32; 4000], vec![0f32; 4000]);
+        l[960] = 1.0;
+        r[960] = 0.5;
+        let mut w = crate::tools::wavio::WavWriter::create(&path, crate::tools::wavio::Format::Float32, 2, 96000).unwrap();
+        w.write(&l, &r).unwrap();
+        w.finish().unwrap();
+    }
+    let mut g = Graph::default();
+    let gn = g.add(Kind::Generator, 0.0, 0.0);
+    let cv = g.add(Kind::Convolver, 0.0, 0.0);
+    {
+        let n = g.node_mut(cv).unwrap();
+        n.p[0] = 100.0;
+        n.s = path.to_string_lossy().to_string();
+    }
+    let an = g.add(Kind::Analyzer, 0.0, 0.0);
+    g.connect(gn, cv, 0).unwrap();
+    g.connect(cv, an, 0).unwrap();
+    let p = GenParams { on: true, level_db: [-6.0206; 2], ..GenParams::default() };
+    let (mut run, sh) = engine_with(g, vec![p]);
+    let start = std::time::Instant::now();
+    loop {
+        run.tick(Some(1024));
+        let st = run.e.node_status.lock().get(&cv).cloned().unwrap_or_default();
+        if st.contains("s impulse response") {
+            assert!(st.contains("0.04 s impulse response"), "the length is the one at the rate of the graph: {st}");
+            break;
+        }
+        assert!(start.elapsed().as_secs() < 10, "the impulse response never arrived: {st}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    for _ in 0..16 {
+        run.tick(Some(1024));
+    }
+    // (the energy of the two channels together is 1: 0.5 * 2 / sqrt(1.25 / 2) on the left, half of it on the right)
+    let (l, r) = ring_tail(&sh, 4096);
+    let (pl, pr) = (l.iter().fold(0f32, |m, v| m.max(v.abs())), r.iter().fold(0f32, |m, v| m.max(v.abs())));
+    let want_l = 0.5 / (1.25f32 / 2.0).sqrt();
+    assert!((pl - want_l).abs() < 0.06 * want_l, "left {pl}, wanted about {want_l}");
+    assert!((pr / pl - 0.5).abs() < 0.03, "the right channel keeps its own response: {pr} / {pl}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Cost of one `rebuild` of a graph of 30 nodes, as it runs for every step of a slider that is dragged
+/// (cargo test --locked bench_rebuild -- --ignored --nocapture).
+#[test]
+#[ignore]
+fn bench_rebuild() {
+    let mut g = Graph::default();
+    let gn = g.add(Kind::Generator, 0.0, 0.0);
+    let mut prev = gn;
+    let kinds = [Kind::Gain, Kind::Eq, Kind::Comp, Kind::Filter, Kind::Limiter, Kind::Gate, Kind::Delay, Kind::Distortion, Kind::Fuzz, Kind::Tremolo];
+    for k in 0..30 {
+        let id = g.add(kinds[k % kinds.len()], 0.0, 0.0);
+        g.connect(prev, id, 0).unwrap();
+        prev = id;
+    }
+    let an = g.add(Kind::Analyzer, 0.0, 0.0);
+    g.connect(prev, an, 0).unwrap();
+    let (mut run, _sh) = engine_with(g.clone(), vec![GenParams { on: true, ..GenParams::default() }]);
+    let eq = g.nodes.iter().find(|n| n.kind == Kind::Eq).unwrap().id;
+    let t = std::time::Instant::now();
+    let n = 2000;
+    for k in 0..n {
+        g.node_mut(eq).unwrap().p[1] = 100.0 + k as f32;
+        run.rebuild(&g);
+    }
+    println!("rebuild of 32 nodes: {:.1} us", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+}
+
+#[test]
+fn the_delay_of_a_convolution_and_a_limiter_counts_in_the_total() {
+    let mut g = Graph::default();
+    let gn = g.add(Kind::Generator, 0.0, 0.0);
+    let cv = g.add(Kind::Convolver, 0.0, 0.0);
+    let lim = g.add(Kind::Limiter, 0.0, 0.0);
+    let ph = g.add(Kind::Phase, 0.0, 0.0);
+    let an = g.add(Kind::Analyzer, 0.0, 0.0);
+    g.connect(gn, cv, 0).unwrap();
+    g.connect(cv, lim, 0).unwrap();
+    g.connect(lim, ph, 0).unwrap();
+    g.connect(ph, an, 0).unwrap();
+    let (mut run, _sh) = engine_with(g.clone(), vec![GenParams::default()]);
+    let delay = |run: &Run, id: NodeId| {
+        let rn = run.nodes.iter().find(|n| n.id == id).expect("a live node");
+        run.node_delay_ms(rn, &g)
+    };
+    // a limiter looks 1 ms ahead; the convolution has no file yet and passes the signal on at once; a phase node that only turns the polarity adds nothing
+    assert!((delay(&run, lim) - 1.0).abs() < 0.05, "{}", delay(&run, lim));
+    assert_eq!(delay(&run, cv), 0.0);
+    assert_eq!(delay(&run, ph), 0.0);
+    // with a response it is a block (256 frames for a short one) late
+    for n in run.nodes.iter_mut() {
+        if let Rt::Conv { u, .. } = &mut n.rt {
+            u.set_ir(&[vec![0.0, 1.0, 0.5]], 48000, 48000);
+        }
+    }
+    assert!((delay(&run, cv) - 256.0 * 1000.0 / 48000.0).abs() < 1e-3, "{}", delay(&run, cv));
+    // and bypassed, nothing
+    for n in run.nodes.iter_mut() {
+        n.bypass = true;
+    }
+    assert_eq!(delay(&run, cv), 0.0);
+    assert_eq!(delay(&run, lim), 0.0);
+}

@@ -150,15 +150,16 @@ impl Tool for EqTool {
             let sr = self.design_sr();
             let taps = TAPS[self.taps];
             let res = match kind {
-                0 => std::fs::write(&path, eq::apo_text(&self.filts, sr)),
-                1 => std::fs::write(&path, eq::biquad_csv(&self.filts, sr)),
+                // (exports replace a file the user may already use: through a temporary file, so a failed write leaves it alone)
+                0 => crate::fsutil::atomic_write(&path, eq::apo_text(&self.filts, sr)),
+                1 => crate::fsutil::atomic_write(&path, eq::biquad_csv(&self.filts, sr)),
                 _ => {
                     let h = if kind == 2 { eq::fir_linear(&self.filts, sr, taps) } else { eq::fir_minphase(&self.filts, sr, taps) };
-                    (|| {
-                        let mut w = wavio::WavWriter::create(&path, wavio::Format::Float32, 1, sr as u32)?;
+                    crate::fsutil::atomic_write_with(&path, |tmp| {
+                        let mut w = wavio::WavWriter::create(tmp, wavio::Format::Float32, 1, sr as u32)?;
                         w.write(&h, &h)?;
                         w.finish()
-                    })()
+                    })
                 }
             };
             cx.req.note = Some(match res {

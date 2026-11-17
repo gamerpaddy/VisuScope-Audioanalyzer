@@ -385,6 +385,24 @@ struct Entry {
     p0: Option<f32>,
 }
 
+/// Both patches are the same down to the last bit of every value, so `encode` gives the same text for them (the converse does not
+/// hold: a value that differs below the digits of the text is "different" here, which only costs an `encode`).
+fn same_graph(a: &Graph, b: &Graph) -> bool {
+    a.nodes.len() == b.nodes.len()
+        && a.edges == b.edges
+        && a.mods == b.mods
+        && a.nodes.iter().zip(&b.nodes).all(|(x, y)| {
+            x.id == y.id
+                && x.kind == y.kind
+                && x.x.to_bits() == y.x.to_bits()
+                && x.y.to_bits() == y.y.to_bits()
+                && x.bypass == y.bypass
+                && x.s == y.s
+                && x.p.len() == y.p.len()
+                && x.p.iter().zip(&y.p).all(|(u, v)| u.to_bits() == v.to_bits())
+        })
+}
+
 /// Undo / redo of the patch: every settled change (no mouse button down) of the graph becomes one step, so a drag of a node or of a
 /// slider is one step, not hundreds.
 #[derive(Default)]
@@ -402,6 +420,10 @@ impl History {
         match &self.cur {
             None => self.cur = Some((g.encode(), g.clone())),
             Some((text, prev)) if settled => {
+                // (nothing changed, which is nearly every frame: no need to write the whole patch as text to find out)
+                if same_graph(prev, g) {
+                    return;
+                }
                 let now = g.encode();
                 if now != *text {
                     self.undo.push(prev.clone());
@@ -561,7 +583,8 @@ fn save_routing(name: &str, g: &Graph) -> Result<(), String> {
         return Err("give the routing a name".into());
     }
     std::fs::create_dir_all(routings_dir()).map_err(|e| e.to_string())?;
-    std::fs::write(routings_dir().join(format!("{n}.txt")), g.encode()).map_err(|e| e.to_string())
+    // (a saved routing is user data: a crash in the middle of the write must not leave half a file behind)
+    crate::fsutil::atomic_write(routings_dir().join(format!("{n}.txt")), g.encode()).map_err(|e| e.to_string())
 }
 
 fn load_routing(name: &str) -> Result<Graph, String> {

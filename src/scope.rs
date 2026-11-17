@@ -43,6 +43,11 @@ pub struct ScopeState {
     frame_sr: f32,
     triggered: bool,
     tbuf: [Vec<f32>; 2],
+    /// ring position `tbuf` was read at (u64::MAX: nothing valid), so a frame without new samples does not copy again
+    tbuf_total: u64,
+    /// the low-passed trigger source and what it was made from (position, window, channel, cut-off, rate)
+    zp: ZeroPhase,
+    zp_key: Option<(u64, usize, usize, u32, u32)>,
     last_trig: Instant,
     meas: [Meas; 2],
     meas_t: Instant,
@@ -64,34 +69,125 @@ const ROLL_CAP: usize = 600_000;
 const ROLL_RATE: f64 = 1000.0;
 
 /// 4th-order Butterworth-style low-pass applied forwards and backwards (zero phase, so the trigger
-/// point does not move relative to the displayed signal).
-fn lowpass_zero_phase(x: &[f32], fc: f32, sr: f32) -> Vec<f32> {
-    let fc = fc.clamp(10.0, sr * 0.45) as f64;
-    let w0 = std::f64::consts::TAU * fc / sr as f64;
-    let (s, c) = w0.sin_cos();
-    let alpha = s / (2.0 * std::f64::consts::FRAC_1_SQRT_2);
-    let a0 = 1.0 + alpha;
-    let b0 = (1.0 - c) / 2.0 / a0;
-    let b1 = (1.0 - c) / a0;
-    let a1 = -2.0 * c / a0;
-    let a2 = (1.0 - alpha) / a0;
-    let mut y: Vec<f32> = x.to_vec();
-    for pass in 0..2 {
-        let (mut z1, mut z2) = (0.0f64, 0.0f64);
-        let mut run = |v: &mut f32| {
-            let xi = *v as f64;
-            let out = b0 * xi + z1;
-            z1 = b1 * xi - a1 * out + z2;
-            z2 = b0 * xi - a2 * out;
-            *v = out as f32;
-        };
-        if pass == 0 {
-            y.iter_mut().for_each(&mut run);
-        } else {
-            y.iter_mut().rev().for_each(&mut run);
+/// point does not move relative to the displayed signal). The trigger search starts at the newest end and
+/// normally stops within a period or two, so the filter works lazily: the backward pass starts at the end of
+/// the buffer (exactly as a whole-buffer filter does) and runs in segments towards the start, only as far as the
+/// search reaches. The forward pass of a segment is warmed up over `margin` samples first (the start-up
+/// transient of a zero state has died away by then), so the result matches the whole-buffer filter to rounding.
+struct ZeroPhase {
+    /// filtered samples, valid from `done` to the end
+    y: Vec<f32>,
+    done: usize,
+    c: [f64; 4],
+    margin: usize,
+    seg: usize,
+    /// state of the backward pass at the start of the part that is done
+    bz: (f64, f64),
+}
+
+impl ZeroPhase {
+    fn new() -> Self {
+        Self { y: Vec::new(), done: 0, c: [0.0; 4], margin: 0, seg: 8192, bz: (0.0, 0.0) }
+    }
+
+    /// Start over for a buffer of `len` samples.
+    fn reset(&mut self, len: usize, fc: f32, sr: f32) {
+        let fc = fc.clamp(10.0, sr * 0.45) as f64;
+        let w0 = std::f64::consts::TAU * fc / sr as f64;
+        let (s, c) = w0.sin_cos();
+        let alpha = s / (2.0 * std::f64::consts::FRAC_1_SQRT_2);
+        let a0 = 1.0 + alpha;
+        self.c = [(1.0 - c) / 2.0 / a0, (1.0 - c) / a0, -2.0 * c / a0, (1.0 - alpha) / a0];
+        // the poles lie on a circle of radius sqrt(a2): the transient is down to 1e-9 after ln(1e-9) / ln(r) samples
+        let r = self.c[3].max(1e-12).sqrt();
+        self.margin = ((-20.7 / r.ln().min(-1e-9)) as usize + 8).min(len);
+        self.seg = self.margin.max(8192);
+        self.y.clear();
+        self.y.resize(len, 0.0);
+        self.done = len;
+        self.bz = (0.0, 0.0);
+    }
+
+    /// Make `y[need..]` valid (`x` is the unfiltered buffer).
+    fn ensure(&mut self, x: &[f32], need: usize) {
+        let [b0, b1, a1, a2] = self.c;
+        while self.done > need {
+            let b = self.done;
+            let a = b.saturating_sub(self.seg);
+            let w = a.saturating_sub(self.margin);
+            let (mut z1, mut z2) = (0.0f64, 0.0f64);
+            for j in w..b {
+                let xi = x[j] as f64;
+                let out = b0 * xi + z1;
+                z1 = b1 * xi - a1 * out + z2;
+                z2 = b0 * xi - a2 * out;
+                self.y[j] = out as f32;
+            }
+            let (mut z1, mut z2) = self.bz;
+            for j in (a..b).rev() {
+                let xi = self.y[j] as f64;
+                let out = b0 * xi + z1;
+                z1 = b1 * xi - a1 * out + z2;
+                z2 = b0 * xi - a2 * out;
+                self.y[j] = out as f32;
+            }
+            self.bz = (z1, z2);
+            self.done = a;
         }
     }
-    y
+}
+
+/// Newest crossing of `lvl` in `raw` (or in its low-passed version `zp`) between `lo` and `hi`, as the scope looks for it.
+fn find_trigger(raw: &[f32], mut zp: Option<&mut ZeroPhase>, lvl: f32, hy: f32, rising: bool, lo: usize, hi: usize) -> Option<usize> {
+    let mut i = hi;
+    while i > lo {
+        let x: &[f32] = match zp.as_deref_mut() {
+            Some(z) => {
+                if i < z.done + 12 {
+                    z.ensure(raw, i - 12);
+                }
+                &z.y
+            }
+            None => raw,
+        };
+        let (a, b) = (x[i - 1], x[i]);
+        let hit = if rising { a < lvl && b >= lvl && x[i - 12] < lvl - hy } else { a > lvl && b <= lvl && x[i - 12] > lvl + hy };
+        if hit {
+            return Some(i);
+        }
+        i -= 1;
+    }
+    None
+}
+
+/// Copy the newest `l.len()` samples like `Ring::copy_last`, but with the lock taken for short pieces (the audio callback
+/// waits for it; a window of up to a million samples in one go would hold it up). Oldest piece first and in the same
+/// lock as the position, so what is read last is the newest and cannot have been overwritten. The first lock is a
+/// `try_lock` (None: busy, skip this frame). With `have == total` the buffers already hold this window and are left alone.
+fn snapshot_last(ring: &parking_lot::Mutex<Ring>, l: &mut [f32], r: &mut [f32], have: u64) -> Option<u64> {
+    const PIECE: usize = 8192;
+    let g = ring.try_lock()?;
+    let total = g.total;
+    if total == have {
+        return Some(total);
+    }
+    let n = l.len();
+    // (callers keep a margin of a few pieces to the size of the ring)
+    let avail = (total as usize).min(n).min(RING_CAP - PIECE);
+    let pad = n - avail;
+    l[..pad].fill(0.0);
+    r[..pad].fill(0.0);
+    let start = total as usize - avail;
+    let first = PIECE.min(avail);
+    g.copy_abs(start, &mut l[pad..pad + first], &mut r[pad..pad + first]);
+    drop(g);
+    let mut done = first;
+    while done < avail {
+        let m = PIECE.min(avail - done);
+        ring.lock().copy_abs(start + done, &mut l[pad + done..pad + done + m], &mut r[pad + done..pad + done + m]);
+        done += m;
+    }
+    Some(total)
 }
 
 impl ScopeState {
@@ -116,6 +212,9 @@ impl ScopeState {
             frame_sr: 48000.0,
             triggered: false,
             tbuf: Default::default(),
+            tbuf_total: u64::MAX,
+            zp: ZeroPhase::new(),
+            zp_key: None,
             last_trig: long_ago,
             meas: Default::default(),
             meas_t: long_ago,
@@ -251,13 +350,16 @@ impl ScopeState {
                 return;
             }
             // roll mode: no trigger, always show the newest n_win samples scrolling in from the right
+            if self.tbuf[0].len() != n_win {
+                self.tbuf_total = u64::MAX;
+            }
             for c in 0..2 {
                 self.tbuf[c].resize(n_win, 0.0);
             }
             {
-                let Some(ring) = sh.ring.try_lock() else { return };
                 let (a, b) = self.tbuf.split_at_mut(1);
-                ring.copy_last(&mut a[0], &mut b[0]);
+                let Some(t) = snapshot_last(&sh.ring, &mut a[0], &mut b[0], self.tbuf_total) else { return };
+                self.tbuf_total = t;
             }
             for c in 0..2 {
                 let (f, t) = (&mut self.frame[c], &self.tbuf[c]);
@@ -270,38 +372,35 @@ impl ScopeState {
         }
         let pre = ((self.pos * n_win as f32) as usize).min(n_win - 1);
         let post = n_win - pre;
-        let m = (n_win * 2).min(RING_CAP);
+        // (a couple of pieces short of the ring, see snapshot_last)
+        let m = (n_win * 2).min(RING_CAP - 2 * 8192);
+        if self.tbuf[0].len() != m {
+            self.tbuf_total = u64::MAX;
+        }
         for c in 0..2 {
             self.tbuf[c].resize(m, 0.0);
         }
         {
-            let Some(ring) = sh.ring.try_lock() else { return };
             let (a, b) = self.tbuf.split_at_mut(1);
-            ring.copy_last(&mut a[0], &mut b[0]);
+            let Some(t) = snapshot_last(&sh.ring, &mut a[0], &mut b[0], self.tbuf_total) else { return };
+            self.tbuf_total = t;
         }
         let src = self.trig_src;
-        let filtered;
-        let x: &[f32] = if self.hf_reject {
-            filtered = lowpass_zero_phase(&self.tbuf[src], self.hf_hz, sr);
-            &filtered
+        let zp = if self.hf_reject {
+            let key = (self.tbuf_total, m, src, self.hf_hz.to_bits(), sr.to_bits());
+            if self.zp_key != Some(key) {
+                self.zp.reset(m, self.hf_hz, sr);
+                self.zp_key = Some(key);
+            }
+            Some(&mut self.zp)
         } else {
-            &self.tbuf[src]
+            None
         };
         let lvl = self.level / scale[src].max(1e-12);
         let hy = self.hyst * 0.01;
         let hi = m - post - 1;
         let lo = pre.max(16);
-        let mut found = None;
-        let mut i = hi;
-        while i > lo {
-            let (a, b) = (x[i - 1], x[i]);
-            let hit = if self.rising { a < lvl && b >= lvl && x[i - 12] < lvl - hy } else { a > lvl && b <= lvl && x[i - 12] > lvl + hy };
-            if hit {
-                found = Some(i);
-                break;
-            }
-            i -= 1;
-        }
+        let found = find_trigger(&self.tbuf[src], zp, lvl, hy, self.rising, lo, hi);
         self.frame_sr = sr;
         match found {
             Some(i) => {
@@ -645,6 +744,190 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole-buffer filter this was before the lazy one (the reference).
+    fn lowpass_zero_phase(x: &[f32], fc: f32, sr: f32) -> Vec<f32> {
+        let fc = fc.clamp(10.0, sr * 0.45) as f64;
+        let w0 = std::f64::consts::TAU * fc / sr as f64;
+        let (s, c) = w0.sin_cos();
+        let alpha = s / (2.0 * std::f64::consts::FRAC_1_SQRT_2);
+        let a0 = 1.0 + alpha;
+        let b0 = (1.0 - c) / 2.0 / a0;
+        let b1 = (1.0 - c) / a0;
+        let a1 = -2.0 * c / a0;
+        let a2 = (1.0 - alpha) / a0;
+        let mut y: Vec<f32> = x.to_vec();
+        for pass in 0..2 {
+            let (mut z1, mut z2) = (0.0f64, 0.0f64);
+            let mut run = |v: &mut f32| {
+                let xi = *v as f64;
+                let out = b0 * xi + z1;
+                z1 = b1 * xi - a1 * out + z2;
+                z2 = b0 * xi - a2 * out;
+                *v = out as f32;
+            };
+            if pass == 0 {
+                y.iter_mut().for_each(&mut run);
+            } else {
+                y.iter_mut().rev().for_each(&mut run);
+            }
+        }
+        y
+    }
+
+    /// The trigger search as it was, on the whole filtered buffer.
+    fn find_trigger_old(x: &[f32], lvl: f32, hy: f32, rising: bool, lo: usize, hi: usize) -> Option<usize> {
+        let mut i = hi;
+        while i > lo {
+            let (a, b) = (x[i - 1], x[i]);
+            let hit = if rising { a < lvl && b >= lvl && x[i - 12] < lvl - hy } else { a > lvl && b <= lvl && x[i - 12] > lvl + hy };
+            if hit {
+                return Some(i);
+            }
+            i -= 1;
+        }
+        None
+    }
+
+    fn noise(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|i| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let r = ((s >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0;
+                0.6 * r + 0.5 * (std::f32::consts::TAU * 440.0 * i as f32 / 48000.0).sin() + 0.2
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lazy_zero_phase_matches_the_whole_buffer_filter() {
+        for (fc, n) in [(5000.0f32, 50_000usize), (100.0, 60_000), (10.0, 70_000), (20000.0, 30_000)] {
+            let x = noise(n, 7 + n as u64);
+            let want = lowpass_zero_phase(&x, fc, 48000.0);
+            let mut z = ZeroPhase::new();
+            z.reset(n, fc, 48000.0);
+            // in steps from the end, as the search asks for it
+            for need in [n - 100, n - 9000, n / 2, 3000, 0] {
+                z.ensure(&x, need);
+                assert!(z.done <= need);
+                let err = (z.done..n).map(|i| (z.y[i] - want[i]).abs()).fold(0.0f32, f32::max);
+                assert!(err < 2e-6, "fc {fc} need {need}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_trigger_search_finds_what_the_old_one_found() {
+        let (n, sr) = (40_000usize, 48000.0);
+        let x = noise(n, 99);
+        for fc in [500.0f32, 5000.0] {
+            let y = lowpass_zero_phase(&x, fc, sr);
+            for (k, lvl) in [-0.3f32, 0.0, 0.2, 0.9, 5.0].into_iter().enumerate() {
+                for rising in [true, false] {
+                    let (lo, hi) = (4000 + k * 100, n - 3000);
+                    let want = find_trigger_old(&y, lvl, 0.002, rising, lo, hi);
+                    let mut z = ZeroPhase::new();
+                    z.reset(n, fc, sr);
+                    let got = find_trigger(&x, Some(&mut z), lvl, 0.002, rising, lo, hi);
+                    assert_eq!(got, want, "fc {fc} level {lvl} rising {rising}");
+                    if fc == 5000.0 && lvl == 0.0 {
+                        assert!(want.is_some() && z.done > n - 20_000, "only the end of the buffer is filtered: {}", z.done);
+                    }
+                    // unfiltered
+                    assert_eq!(find_trigger(&x, None, lvl, 0.002, rising, lo, hi), find_trigger_old(&x, lvl, 0.002, rising, lo, hi));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_snapshot_of_the_ring_equals_copy_last() {
+        let ring = parking_lot::Mutex::new(Ring::new());
+        let mut s = 5u64;
+        let mut next = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 33) as usize
+        };
+        let (mut l, mut r) = (vec![0f32; 70_000], vec![0f32; 70_000]);
+        let (mut el, mut er) = (vec![0f32; 70_000], vec![0f32; 70_000]);
+        let mut have = u64::MAX;
+        for round in 0..40 {
+            // sometimes no new samples (the old picture must be kept), sometimes a lot (more than a lap of the ring)
+            let add = match round % 5 {
+                0 => 0,
+                1 => 3,
+                2 => 20_000,
+                3 => 1_500_000,
+                _ => next() % 90_000,
+            };
+            {
+                let mut g = ring.lock();
+                for _ in 0..add {
+                    let v = (next() % 10_000) as f32;
+                    g.push(v, -v);
+                }
+            }
+            let t = snapshot_last(&ring, &mut l, &mut r, have).unwrap();
+            have = t;
+            ring.lock().copy_last(&mut el, &mut er);
+            assert_eq!(l, el, "round {round}");
+            assert_eq!(r, er, "round {round}");
+        }
+        // a window that is longer than what has been recorded is zero padded at the front
+        let ring2 = parking_lot::Mutex::new(Ring::new());
+        for i in 0..1000 {
+            ring2.lock().push(i as f32 + 1.0, 0.0);
+        }
+        let (mut a, mut b) = (vec![9f32; 3000], vec![9f32; 3000]);
+        snapshot_last(&ring2, &mut a, &mut b, u64::MAX).unwrap();
+        assert!(a[..2000].iter().all(|&v| v == 0.0) && a[2000] == 1.0 && a[2999] == 1000.0);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_trigger_hf_reject() {
+        let (n, sr) = (2 * 262_144usize, 48000.0);
+        let x = noise(n, 3);
+        let t = Instant::now();
+        let mut found = 0;
+        for _ in 0..20 {
+            let y = lowpass_zero_phase(&x, 5000.0, sr);
+            found += find_trigger_old(&y, 0.1, 0.002, true, 131_072, n - 131_072).unwrap_or(0);
+        }
+        eprintln!("old: {:?} per frame ({found})", t.elapsed() / 20);
+        let t = Instant::now();
+        let mut z = ZeroPhase::new();
+        for _ in 0..20 {
+            z.reset(n, 5000.0, sr);
+            found += find_trigger(&x, Some(&mut z), 0.1, 0.002, true, 131_072, n - 131_072).unwrap_or(0);
+        }
+        eprintln!("new: {:?} per frame ({found})", t.elapsed() / 20);
+        // the copy out of the ring: whole lock vs pieces (the time is similar, the lock hold time is what changes)
+        let ring = parking_lot::Mutex::new(Ring::new());
+        {
+            let mut g = ring.lock();
+            for i in 0..RING_CAP {
+                g.push(i as f32, 0.0);
+            }
+        }
+        let (mut l, mut r) = (vec![0f32; n], vec![0f32; n]);
+        let t = Instant::now();
+        for _ in 0..20 {
+            ring.lock().copy_last(&mut l, &mut r);
+        }
+        eprintln!("copy_last whole: {:?}", t.elapsed() / 20);
+        let t = Instant::now();
+        for _ in 0..20 {
+            snapshot_last(&ring, &mut l, &mut r, u64::MAX);
+        }
+        eprintln!("snapshot_last pieces: {:?}", t.elapsed() / 20);
+        let t = Instant::now();
+        for _ in 0..20 {
+            snapshot_last(&ring, &mut l, &mut r, RING_CAP as u64);
+        }
+        eprintln!("snapshot_last unchanged: {:?}", t.elapsed() / 20);
+    }
 
     #[test]
     fn a_roll_of_minutes_comes_from_the_history() {

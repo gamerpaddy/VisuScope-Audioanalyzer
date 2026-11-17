@@ -125,10 +125,8 @@ impl TfEngine {
         let d = self.delay.round() as isize;
         let (shift_ref, shift_meas) = if d >= 0 { (d as usize, 0) } else { (0, (-d) as usize) };
         let (sl, sr_) = if tp.ref_r { (shift_meas, shift_ref) } else { (shift_ref, shift_meas) };
-        {
-            let ring = sh.ring.lock();
-            ring.copy_last_shifted(&mut self.l, &mut self.r, sl, sr_);
-        }
+        // (in pieces: up to 2 x 262144 samples under one lock would hold the audio callback up, see `copy_last_chunked`)
+        copy_last_shifted_chunked(&sh.ring, &mut self.l, &mut self.r, sl, sr_);
         for i in 0..n {
             let w = self.w[i];
             self.buf[i] = Complex32::new(self.l[i] * w, self.r[i] * w);

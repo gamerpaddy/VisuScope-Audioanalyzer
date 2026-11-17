@@ -48,9 +48,23 @@ impl Held {
     }
 }
 
+/// Called when the program exits: stops the open ASIO session (stop, dispose the buffers, release the driver) and waits for it
+/// for at most `timeout`, so that a driver is not left "in use" by an unclean exit.
+pub fn shutdown(timeout: std::time::Duration) {
+    imp::shutdown(timeout)
+}
+
+/// Whether a failed open says nothing lasting about the driver: it was busy, or slow, or this program was short of a thread. Such an
+/// answer must not be remembered as "this driver does not open" (that would hide it until the next manual rescan).
+fn is_temporary(error: &str) -> bool {
+    error.contains("in use") || error.contains("did not close") || error.contains("did not answer") || error.contains("ASIO thread could not be started")
+}
+
 pub use imp::{forget_failed, open_input, open_output, probe, usable, Port};
 #[cfg(test)]
 pub use imp::drivers;
+#[cfg(all(test, windows, target_pointer_width = "64"))]
+pub use imp::stop_session;
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod imp {
@@ -58,7 +72,8 @@ mod imp {
     use parking_lot::{Mutex, RwLock};
     use std::collections::HashMap;
     use std::ffi::c_void;
-    use std::sync::atomic::Ordering::Relaxed;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::Com::{CLSIDFromString, CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
     use windows_sys::Win32::System::Registry::{RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ};
@@ -187,6 +202,16 @@ mod imp {
         matches!(t, 16..=20 | 24..=27)
     }
 
+    /// Bytes of one sample of a supported type (all zero bits is digital silence in every one of them).
+    fn sample_bytes(t: i32) -> usize {
+        match t {
+            16 => 2,
+            17 => 3,
+            20 => 8,
+            _ => 4,
+        }
+    }
+
     unsafe fn read(p: *const u8, t: i32, i: usize) -> f32 {
         // SAFETY: the caller keeps `i` inside the buffer of the driver
         unsafe {
@@ -246,6 +271,10 @@ mod imp {
 
     // ------------------------------------------------------------------ the session
 
+    /// Ids of the places in the sessions: unique for the whole run, so that the port of a session that is long gone can never be
+    /// mistaken for one of a newer session (every session used to count from 0).
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
     struct Sub<C> {
         id: u64,
         cb: C,
@@ -257,7 +286,6 @@ mod imp {
     struct Subs {
         inputs: Vec<Sub<InCb>>,
         outputs: Vec<Sub<OutCb>>,
-        next: u64,
         /// scratch of the callback: interleaved inputs, the mix of the outputs, one output
         inter_in: Vec<f32>,
         inter_out: Vec<f32>,
@@ -271,21 +299,71 @@ mod imp {
         bufs: Vec<BufferInfo>,
         types: Vec<i32>,
         stop: Arc<AtomicBool>,
+        /// `true` while the buffers of the driver exist. A callback holds the read side the whole time it touches them; the
+        /// session thread takes the write side (which waits for a callback that is inside) and clears it before it disposes
+        /// the buffers, so a callback that was already on its way when `LIVE` was emptied finds nothing to touch.
+        gate: RwLock<bool>,
     }
 
-    // SAFETY: the pointers are the buffers of the driver, valid from createBuffers to disposeBuffers, which the session thread
-    // does after it has taken `Live` out of `LIVE`
+    // SAFETY: the pointers are the buffers of the driver, valid from createBuffers until the session thread has cleared `gate`
+    // (under the write lock) and then calls disposeBuffers; nothing reads or writes them without the read side of `gate`
     unsafe impl Send for Live {}
     unsafe impl Sync for Live {}
 
     static LIVE: RwLock<Option<Arc<Live>>> = RwLock::new(None);
 
     impl Live {
+        /// One buffer switch of the driver: `idx` is the half of the buffers that the driver hands over.
         fn process(&self, idx: usize) {
-            let Some(mut s) = self.subs.try_lock() else { return };
+            // (try: the write side is only held while the buffers are being disposed of: then there is nothing to do)
+            let Some(open) = self.gate.try_read() else { return };
+            if !*open {
+                return;
+            }
+            let idx = idx & 1;
+            // This is an `extern "C"` callback: a panic that unwound out of it would abort the whole program, and the closures of
+            // the clients (inputs, generator, monitor, capture, graph) are not ours to trust.
+            if catch_unwind(AssertUnwindSafe(|| self.run(idx))).is_err() {
+                self.failed(idx);
+            }
+        }
+
+        /// A client panicked: every client of this session is told to rebuild (and dropped, so that the one that fails is not
+        /// called again and again), and this half of the output is silent.
+        fn failed(&self, idx: usize) {
+            crate::log::log("asio: a callback panicked; its clients are dropped and rebuilt");
+            let (inputs, outputs) = {
+                let mut s = self.subs.lock();
+                for d in s.inputs.iter().map(|x| &x.dead).chain(s.outputs.iter().map(|x| &x.dead)) {
+                    d.store(true, Relaxed);
+                }
+                (std::mem::take(&mut s.inputs), std::mem::take(&mut s.outputs))
+            };
+            // (dropping a closure could panic as well)
+            let _ = catch_unwind(AssertUnwindSafe(move || drop((inputs, outputs))));
+            self.silence(idx);
+        }
+
+        /// Zero this half of every output channel (the driver would play the previous contents of the buffer once more).
+        fn silence(&self, idx: usize) {
+            for c in 0..self.info.n_out {
+                let p = self.bufs[self.info.n_in + c].buffers[idx & 1] as *mut u8;
+                if !p.is_null() {
+                    // SAFETY: the caller holds the read side of `gate`; the driver allocated `frames` samples of this type
+                    unsafe { std::ptr::write_bytes(p, 0, self.info.buf * sample_bytes(self.types[self.info.n_in + c])) };
+                }
+            }
+        }
+
+        fn run(&self, idx: usize) {
+            // Someone else holds the clients (a port is being added or removed): play silence for this block rather than the
+            // last one again, which would be heard as a stutter.
+            let Some(mut s) = self.subs.try_lock() else {
+                self.silence(idx);
+                return;
+            };
             let s = &mut *s;
             let (n_in, n_out, frames) = (self.info.n_in, self.info.n_out, self.info.buf);
-            let idx = idx & 1;
             if !s.inputs.is_empty() && n_in > 0 {
                 s.inter_in.resize(n_in * frames, 0.0);
                 for c in 0..n_in {
@@ -331,10 +409,21 @@ mod imp {
             }
         }
 
-        /// The driver wants the session rebuilt (reset request, rate or buffer size changed).
+        /// The session thread is about to dispose of the buffers: wait for a callback that is inside, keep later ones out, and tell
+        /// the clients that are left that this session is over.
+        fn close(&self) {
+            *self.gate.write() = false;
+            let s = self.subs.lock();
+            for d in s.inputs.iter().map(|x| &x.dead).chain(s.outputs.iter().map(|x| &x.dead)) {
+                d.store(true, Relaxed);
+            }
+        }
+
+        /// The driver wants the session rebuilt (reset request, rate or buffer size changed). Never waits for the clients: a driver
+        /// may ask from inside a buffer switch, where they are locked by this very thread. The session thread tells whoever is
+        /// left that the session is over once it has stopped the driver.
         fn reset(&self) {
-            {
-                let s = self.subs.lock();
+            if let Some(s) = self.subs.try_lock() {
                 for d in s.inputs.iter().map(|x| &x.dead).chain(s.outputs.iter().map(|x| &x.dead)) {
                     d.store(true, Relaxed);
                 }
@@ -343,22 +432,31 @@ mod imp {
         }
     }
 
+    /// The callbacks are `extern "C"`: nothing may unwind out of them (that aborts the program), whatever happens inside.
+    fn shield<R>(on_panic: R, f: impl FnOnce() -> R) -> R {
+        catch_unwind(AssertUnwindSafe(f)).unwrap_or(on_panic)
+    }
+
     extern "C" fn cb_switch(index: i32, _direct: i32) {
-        let live = LIVE.read().clone();
-        if let Some(l) = live {
-            l.process(index.max(0) as usize);
-        }
+        shield((), || {
+            let live = LIVE.read().clone();
+            if let Some(l) = live {
+                l.process(index.max(0) as usize);
+            }
+        })
     }
 
     extern "C" fn cb_rate(_sr: f64) {
-        if let Some(l) = LIVE.read().clone() {
-            crate::log::log("asio: the sample rate of the driver changed");
-            l.reset();
-        }
+        shield((), || {
+            if let Some(l) = LIVE.read().clone() {
+                crate::log::log("asio: the sample rate of the driver changed");
+                l.reset();
+            }
+        })
     }
 
     extern "C" fn cb_message(selector: i32, value: i32, _msg: *mut c_void, _opt: *mut f64) -> i32 {
-        match selector {
+        shield(0, || match selector {
             // kAsioSelectorSupported: which messages we understand
             1 => matches!(value, 2..=6) as i32,
             // kAsioEngineVersion
@@ -374,12 +472,20 @@ mod imp {
             // kAsioResyncRequest, kAsioLatenciesChanged
             5 | 6 => 1,
             _ => 0,
-        }
+        })
     }
 
     extern "C" fn cb_time(_t: *mut c_void, index: i32, direct: i32) -> *mut c_void {
         cb_switch(index, direct);
         std::ptr::null_mut()
+    }
+
+    /// Empties `LIVE`, but only if it still is this session's (a session that was given up on may end after a newer one began).
+    fn clear_live(live: &Arc<Live>) {
+        let mut g = LIVE.write();
+        if g.as_ref().is_some_and(|l| Arc::ptr_eq(l, live)) {
+            *g = None;
+        }
     }
 
     struct Session {
@@ -406,8 +512,10 @@ mod imp {
     fn session_thread(name: String, clsid: String, subs: Arc<Mutex<Subs>>, stop: Arc<AtomicBool>, done: Arc<AtomicBool>, ready: std::sync::mpsc::Sender<Result<Info, String>>) {
         // SAFETY: COM and the driver are used from this thread only (the callbacks come from the driver's own thread)
         unsafe {
-            CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
-            let r = (|| -> Result<(Driver, Info, Vec<BufferInfo>, Vec<i32>), String> {
+            // (only a call that succeeded - S_OK or S_FALSE - is to be paired with CoUninitialize: when the thread was somehow
+            // in another apartment model already, the call fails and an extra CoUninitialize would unbalance it)
+            let com = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) >= 0;
+            let r =(|| -> Result<(Driver, Info, Vec<BufferInfo>, Vec<i32>), String> {
                 let mut guid = std::mem::zeroed::<GUID>();
                 if CLSIDFromString(wide(&clsid).as_ptr(), &mut guid) != 0 {
                     return Err(format!("bad driver id {clsid}"));
@@ -469,19 +577,38 @@ mod imp {
                 Ok(v) => v,
                 Err(e) => {
                     let _ = ready.send(Err(e));
-                    CoUninitialize();
+                    if com {
+                        CoUninitialize();
+                    }
                     done.store(true, Relaxed);
                     return;
                 }
             };
-            *LIVE.write() = Some(Arc::new(Live { subs: subs.clone(), info: info.clone(), bufs, types, stop: stop.clone() }));
+            let live = Arc::new(Live { subs: subs.clone(), info: info.clone(), bufs, types, stop: stop.clone(), gate: RwLock::new(true) });
+            // (`open` gave up on this session while the driver was loading, or the program is exiting: do not take `LIVE` from whoever
+            // runs by now, just let the driver go again)
+            if stop.load(Relaxed) {
+                live.close();
+                (d.v().dispose_buffers)(d.0);
+                (d.v().release)(d.0);
+                let _ = ready.send(Err(format!("{name}: closed while it was loading")));
+                if com {
+                    CoUninitialize();
+                }
+                done.store(true, Relaxed);
+                return;
+            }
+            *LIVE.write() = Some(live.clone());
             if (d.v().start)(d.0) != 0 {
                 let msg = driver_error(&d);
-                *LIVE.write() = None;
+                clear_live(&live);
+                live.close();
                 (d.v().dispose_buffers)(d.0);
                 (d.v().release)(d.0);
                 let _ = ready.send(Err(format!("{name}: the driver could not be started {msg}")));
-                CoUninitialize();
+                if com {
+                    CoUninitialize();
+                }
                 done.store(true, Relaxed);
                 return;
             }
@@ -498,12 +625,15 @@ mod imp {
                 }
             }
             (d.v().stop)(d.0);
-            *LIVE.write() = None;
-            // the callback may still be inside `process`: wait for the lock it holds
-            drop(subs.lock());
+            clear_live(&live);
+            // A callback that took its `Arc<Live>` before it was emptied may still be on its way, or inside `process`: closing the
+            // gate waits for the one that is inside and keeps the others away from the buffers that are disposed of next.
+            live.close();
             (d.v().dispose_buffers)(d.0);
             (d.v().release)(d.0);
-            CoUninitialize();
+            if com {
+                CoUninitialize();
+            }
             crate::log::log(&format!("asio: {name} closed"));
             done.store(true, Relaxed);
         }
@@ -531,11 +661,18 @@ mod imp {
 
     /// Make sure the session of this driver runs; `add` puts the callbacks in (None: nothing was added).
     fn open(name: &str, add: impl FnOnce(&Info, &mut Subs) -> Option<u64>) -> Result<(Option<Port>, Info), String> {
+        if EXITING.load(Relaxed) {
+            return Err("the program is closing".into());
+        }
         let clsid = registered().into_iter().find(|d| d.0 == name).map(|d| d.1).ok_or_else(|| format!("ASIO driver {name} not found"))?;
         let mut add = Some(add);
         let started = Instant::now();
         loop {
             let mut g = SESSION.lock();
+            // (`shutdown` sets EXITING before it takes SESSION, so a check under the lock cannot miss it)
+            if EXITING.load(Relaxed) {
+                return Err("the program is closing".into());
+            }
             // what is there: nothing, a session to use, one to wait for, or one that blocks
             enum St {
                 None,
@@ -591,6 +728,9 @@ mod imp {
                 Ok(Err(e)) => return Err(e),
                 Err(_) => {
                     stop.store(true, Relaxed);
+                    // The thread still holds the driver (it may be slow, or hung): keep it on record, so that the next `open` waits for
+                    // it to end instead of loading a second instance of a driver that is not made for that. Nobody can use it (`stop`).
+                    *g = Some(Session { name: name.to_string(), stop, done, subs, info: Info { sr: 0, n_in: 0, n_out: 0, buf: 0 } });
                     return Err(format!("{name}: the driver did not answer"));
                 }
             };
@@ -605,6 +745,32 @@ mod imp {
         }
     }
 
+    /// Set by `shutdown`: no session is opened any more (the program is exiting).
+    static EXITING: AtomicBool = AtomicBool::new(false);
+
+    /// Stops the session that runs, if any, and waits for its thread to be through (stop, dispose, release) for `timeout` at most.
+    /// A thread stuck inside the driver is left behind: the exit must not hang on it.
+    pub fn shutdown(timeout: Duration) {
+        EXITING.store(true, Relaxed);
+        stop_session(timeout);
+    }
+
+    pub fn stop_session(timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        // (`open` holds this lock while a driver loads: that is waited for as well, but not longer than the time that is given)
+        let Some(g) = SESSION.try_lock_for(timeout) else { return };
+        let Some(done) = g.as_ref().map(|s| {
+            s.stop.store(true, Relaxed);
+            s.done.clone()
+        }) else {
+            return;
+        };
+        drop(g);
+        while !done.load(Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Channels and rate of a driver (it is opened and closed again for that; the answer is kept).
     pub fn probe(name: &str) -> Option<Info> {
         if let Some(c) = CACHE.lock().as_ref().and_then(|m| m.get(name)).cloned() {
@@ -615,8 +781,8 @@ mod imp {
             Ok((_, i)) => Some(i),
             Err(e) => {
                 crate::log::log(&format!("asio: {e}"));
-                // not opened because another driver is in use: say nothing about it
-                if e.contains("in use") {
+                // not opened because another driver is in use, or it was only slow: say nothing about it
+                if is_temporary(&e) {
                     return None;
                 }
                 None
@@ -652,8 +818,7 @@ mod imp {
             if info.n_in == 0 {
                 return None;
             }
-            let id = subs.next;
-            subs.next += 1;
+            let id = NEXT_ID.fetch_add(1, Relaxed);
             subs.inputs.push(Sub { id, cb: make(info), dead: dead.clone() });
             Some(id)
         })?;
@@ -666,8 +831,7 @@ mod imp {
             if info.n_out == 0 {
                 return None;
             }
-            let id = subs.next;
-            subs.next += 1;
+            let id = NEXT_ID.fetch_add(1, Relaxed);
             subs.outputs.push(Sub { id, cb: make(info), dead: dead.clone() });
             Some(id)
         })?;
@@ -680,6 +844,8 @@ mod imp {
     use super::*;
 
     pub struct Port;
+
+    pub fn shutdown(_timeout: std::time::Duration) {}
 
     pub fn drivers() -> Vec<String> {
         Vec::new()
@@ -707,6 +873,28 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a busy / slow driver is a temporary answer; a driver that cannot be loaded or has no device stays cached as unusable.
+    #[test]
+    fn only_busy_and_slow_failures_are_temporary() {
+        assert!(is_temporary("ASIO driver Foo is in use: only one ASIO driver can run at a time"));
+        assert!(is_temporary("Bar: the previous ASIO driver did not close"));
+        assert!(is_temporary("Bar: the driver did not answer"));
+        assert!(is_temporary("the ASIO thread could not be started"));
+        assert!(!is_temporary("Bar: the driver did not start (is the device connected?)"));
+        assert!(!is_temporary("Bar: the driver could not be loaded (error 0x80040154)"));
+        assert!(!is_temporary("ASIO driver Bar not found"));
+        assert!(!is_temporary("Bar: no channels"));
+    }
+
+    /// With nothing running, stopping the session returns at once (the exit must never wait for nothing).
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[test]
+    fn stopping_without_a_session_returns_at_once() {
+        let t = std::time::Instant::now();
+        stop_session(std::time::Duration::from_secs(5));
+        assert!(t.elapsed() < std::time::Duration::from_secs(3));
+    }
 
     #[test]
     fn ids_name_the_driver() {

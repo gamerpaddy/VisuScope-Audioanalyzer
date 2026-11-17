@@ -8,7 +8,7 @@ impl App {
     pub fn sync_graph_mode(&mut self) {
         use crate::tools::ROUTING;
         // test hook: VISUSCOPE_GRAPH=demo (or 1) switches the graph on, demo also starts two generators
-        if let Ok(v) = std::env::var("VISUSCOPE_GRAPH")
+        if let Some(v) = &crate::app::env_hooks().graph
             && !self.graph_hook {
                 self.graph_hook = true;
                 self.graph_on = true;
@@ -32,9 +32,11 @@ impl App {
         }
         crate::prof::set_safety_ms(self.safety_ms);
         crate::tools::daw::IMPORT_AT_START.store(self.import_at_start, std::sync::atomic::Ordering::Relaxed);
-        let mut all = vec![self.tg.clone()];
-        all.extend(self.gen_extra.iter().cloned());
-        if all != self.gens_sent {
+        // compared in place: a copy of every generator in every frame was made only to find that nothing changed
+        let unchanged = self.gens_sent.len() == 1 + self.gen_extra.len() && self.gens_sent[0] == self.tg && self.gens_sent[1..] == self.gen_extra[..];
+        if !unchanged {
+            let mut all = vec![self.tg.clone()];
+            all.extend(self.gen_extra.iter().cloned());
             *self.gens_shared.lock() = all.clone();
             self.gens_sent = all;
         }
@@ -59,7 +61,7 @@ impl App {
 
     pub fn options_ui(&mut self, ctx: &egui::Context) {
         // test hook: VISUSCOPE_GALLERY=1 shows the layout previews in a window (for screenshots)
-        if self.layout_ready && std::env::var_os("VISUSCOPE_GALLERY").is_some() {
+        if self.layout_ready && crate::app::env_hooks().gallery {
             egui::Window::new(crate::lang::tr("Layouts")).order(egui::Order::Foreground).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).collapsible(false).resizable(false).show(ctx, |ui| {
                 ui.set_max_width(570.0);
                 self.builtin_grid(ui);

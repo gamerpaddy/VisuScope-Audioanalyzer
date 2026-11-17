@@ -48,18 +48,19 @@ impl Tool for ReportTool {
         for (kind, path) in [(0, done(&mut self.frd)), (1, done(&mut self.rew)), (2, done(&mut self.wav))] {
             let (Some(path), Some(r)) = (path, &cx.sweep.result) else { continue };
             let n = match kind {
-                2 => (|| {
-                    let mut w = wavio::WavWriter::create(&path, wavio::Format::Float32, 1, r.sr as u32)?;
+                // (through a temporary file: a failed export leaves the file that was there alone)
+                2 => crate::fsutil::atomic_write_with(&path, |tmp| {
+                    let mut w = wavio::WavWriter::create(tmp, wavio::Format::Float32, 1, r.sr as u32)?;
                     w.write(&r.ir, &r.ir)?;
                     w.finish()
-                })(),
+                }),
                 _ => {
                     let h = &r.h;
                     let top = (r.params.f1 * 1.2).min(r.sr * 0.5);
-                    let k1 = ((top / h.df) as usize).min(h.mag_db.len() - 1);
+                    let k1 = ((top / h.df) as usize).min(h.mag_db.len() - 1).min(h.phase.len().saturating_sub(1));
                     let f: Vec<f32> = (1..=k1).map(|k| k as f32 * h.df).collect();
                     let ph: Vec<f32> = h.phase[1..=k1].iter().map(|p| p.to_degrees()).collect();
-                    std::fs::write(&path, crate::report::frd_text(&f, &h.mag_db[1..=k1], &ph, kind == 1))
+                    crate::fsutil::atomic_write(&path, crate::report::frd_text(&f, &h.mag_db[1..=k1], &ph, kind == 1))
                 }
             };
             cx.req.note = Some(note(n, &path));

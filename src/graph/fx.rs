@@ -36,27 +36,16 @@ pub struct PhaseUnit {
     cos: f32,
     sin: f32,
     ap: Biquad,
+    /// the transformer (only its non-zero taps, see `Hilbert`) and the history of both channels
     hilbert: Vec<f32>,
-    /// history of both channels (a ring written twice, so the dot product runs on one slice)
-    hist: [Vec<f32>; 2],
-    pos: usize,
+    hist: [HilbertHist; 2],
 }
 
 impl Default for PhaseUnit {
     fn default() -> Self {
         // only the odd taps of an ideal Hilbert transformer are not zero; a Blackman window tames the ripple
-        let hilbert = (0..HILBERT_TAPS)
-            .map(|k| {
-                let m = k as isize - HILBERT_DELAY as isize;
-                if m % 2 == 0 {
-                    return 0.0;
-                }
-                let x = k as f32 / (HILBERT_TAPS - 1) as f32;
-                let w = 0.42 - 0.5 * (2.0 * PI * x).cos() + 0.08 * (4.0 * PI * x).cos();
-                2.0 / (PI * m as f32) * w
-            })
-            .collect();
-        Self { sign: 1.0, mode: 0, layers: Vec::new(), curve_key: (String::new(), 0), sc: Vec::new(), recent: [Vec::new(), Vec::new()], cos: 1.0, sin: 0.0, ap: Biquad::default(), hilbert, hist: [vec![0.0; HILBERT_TAPS * 2], vec![0.0; HILBERT_TAPS * 2]], pos: 0 }
+        let hilbert = dense_hilbert(&hilbert_taps(HILBERT_TAPS));
+        Self { sign: 1.0, mode: 0, layers: Vec::new(), curve_key: (String::new(), 0), sc: Vec::new(), recent: [Vec::new(), Vec::new()], cos: 1.0, sin: 0.0, ap: Biquad::default(), hist: [HilbertHist::new(hilbert.len()), HilbertHist::new(hilbert.len())], hilbert }
     }
 }
 
@@ -113,12 +102,12 @@ impl PhaseUnit {
             self.curve_key = (String::new(), 0);
             return;
         }
-        let key = (s.to_string(), fs as u32);
-        if self.curve_key == key {
+        // (this runs for every change of any parameter of the node: no copy of the curve text unless it changed)
+        if self.curve_key.0 == s && self.curve_key.1 == fs as u32 {
             return;
         }
         let first = self.layers.is_empty();
-        self.curve_key = key.clone();
+        self.curve_key = (s.to_string(), fs as u32);
         // a flat curve is "off": no filter, no delay
         if s.is_empty() {
             self.add_layer(None, first);
@@ -245,25 +234,13 @@ impl PhaseUnit {
             }
             1 => {
                 // y = cos(phi) * x(n - D) + sin(phi) * H{x}(n - D): every frequency is turned by phi
-                let start = self.pos;
-                let mut end = start;
                 for (c, ch) in [&mut *l, &mut *r].into_iter().enumerate() {
                     let h = &mut self.hist[c];
-                    let mut w = start;
                     for v in ch.iter_mut() {
-                        w = (w + 1) % HILBERT_TAPS;
-                        h[w] = *v;
-                        h[w + HILBERT_TAPS] = *v;
-                        let win = &h[w + 1..w + 1 + HILBERT_TAPS];
-                        let mut acc = 0f32;
-                        for (a, b) in win.iter().step_by(2).zip(self.hilbert.iter().rev().step_by(2)) {
-                            acc += a * b;
-                        }
-                        *v = self.cos * win[HILBERT_TAPS - 1 - HILBERT_DELAY] + self.sin * acc;
+                        let (delayed, hilbert) = h.tick(&self.hilbert, *v);
+                        *v = self.cos * delayed + self.sin * hilbert;
                     }
-                    end = w;
                 }
-                self.pos = end;
             }
             _ => {}
         }
@@ -292,6 +269,99 @@ fn hilbert_taps(taps: usize) -> Vec<f32> {
         .collect()
 }
 
+/// The taps of a Hilbert transformer that are not zero (every other one, odd offsets from the centre), oldest sample first.
+fn dense_hilbert(taps: &[f32]) -> Vec<f32> {
+    taps.iter().rev().step_by(2).copied().collect()
+}
+
+/// Dot product of a window of `2 h` samples with taps that are odd-symmetric (`t[2h - 1 - j] = -t[j]`, which a Hilbert
+/// transformer is) given by their first half: the two samples of a pair are subtracted first, so there are half the products.
+#[inline]
+fn dot_odd(w: &[f32], half: &[f32]) -> f32 {
+    let h = half.len();
+    let (a, b) = (&w[..h], &w[h..2 * h]);
+    let mut acc = [0f32; 8];
+    let full = h / 8;
+    for i in 0..full {
+        let (x, y, t) = (&a[8 * i..8 * i + 8], &b[h - 8 * i - 8..h - 8 * i], &half[8 * i..8 * i + 8]);
+        for k in 0..8 {
+            acc[k] += t[k] * (x[k] - y[7 - k]);
+        }
+    }
+    let tail: f32 = (full * 8..h).map(|j| half[j] * (a[j] - b[h - 1 - j])).sum();
+    ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7])) + tail
+}
+
+/// The history of one channel for a short Hilbert transformer in direct form. Only every other tap is not zero, so the sample
+/// `n` is only multiplied with the samples `n`, `n - 2`, `n - 4` ...: the history is kept apart by the parity of the sample
+/// index, each in a ring written twice (the window is one slice), and the products are summed on a few accumulators that
+/// can run side by side (one running sum is a chain of dependent additions), over the first half of the taps only: the
+/// transformer is odd-symmetric. The delayed signal (`taps / 2` samples back, an odd number) is in the history of the other
+/// parity.
+struct HilbertHist {
+    buf: [Vec<f32>; 2],
+    w: [usize; 2],
+    /// parity of the next sample
+    par: usize,
+}
+
+impl HilbertHist {
+    /// `n`: the number of non-zero taps (an even number: the delay of the transformer is then odd).
+    fn new(n: usize) -> Self {
+        debug_assert!(n.is_multiple_of(2));
+        Self { buf: [vec![0.0; 2 * n], vec![0.0; 2 * n]], w: [0; 2], par: 0 }
+    }
+
+    /// One sample in: (the input delayed by the latency, its Hilbert transform at the same time).
+    #[inline]
+    fn tick(&mut self, taps: &[f32], x: f32) -> (f32, f32) {
+        let (n, p) = (taps.len(), self.par);
+        let w = if self.w[p] + 1 == n { 0 } else { self.w[p] + 1 };
+        self.w[p] = w;
+        let b = &mut self.buf[p];
+        b[w] = x;
+        b[w + n] = x;
+        let acc = dot_odd(&b[w + 1..w + 1 + n], &taps[..n / 2]);
+        // the newest sample of the other parity is the one before `x`; the delayed one is `n / 2 - 1` of its steps further back,
+        // which is the place `n / 2` of the window (oldest first)
+        let o = 1 - p;
+        let delayed = self.buf[o][self.w[o] + 1 + n / 2];
+        self.par = o;
+        (delayed, acc)
+    }
+}
+
+/// A phasor `cos + i sin` that turns by a fixed angle per sample. A complex multiplication per sample replaces the sine and the
+/// cosine of an angle that grows without end; in double precision the error of millions of steps stays far below what a
+/// single precision signal can show, and `renorm` (once per block) holds the length at 1.
+struct Rotor {
+    c: f64,
+    s: f64,
+}
+
+impl Rotor {
+    fn new() -> Self {
+        Self { c: 1.0, s: 0.0 }
+    }
+
+    /// (sin, cos) now, then turn by the angle whose cosine and sine are `wc` and `ws`.
+    #[inline]
+    fn next(&mut self, wc: f64, ws: f64) -> (f32, f32) {
+        let out = (self.s as f32, self.c as f32);
+        (self.c, self.s) = (self.c * wc - self.s * ws, self.s * wc + self.c * ws);
+        out
+    }
+
+    fn renorm(&mut self) {
+        let m = self.c.hypot(self.s);
+        if m.is_finite() && m > 0.5 {
+            (self.c, self.s) = (self.c / m, self.s / m);
+        } else {
+            *self = Self::new();
+        }
+    }
+}
+
 const DEEP_TAPS: usize = 16383;
 const DEEP_BLOCK: usize = 512;
 
@@ -305,13 +375,12 @@ pub struct ShiftUnit {
     deep: bool,
     filter: bool,
     fs: f32,
-    theta: f64,
+    rot: Rotor,
     pre: super::dsp::FilterUnit,
     key: (bool, u32),
     // the short Hilbert transformer (direct form)
     hilbert: Vec<f32>,
-    hist: [Vec<f32>; 2],
-    pos: usize,
+    hist: [HilbertHist; 2],
     // the long one (partitioned convolution) and the dry signal delayed to match
     conv: Option<ConvUnit>,
     dry: [Vec<f32>; 2],
@@ -331,12 +400,11 @@ impl ShiftUnit {
             deep: false,
             filter: true,
             fs: 48000.0,
-            theta: 0.0,
+            rot: Rotor::new(),
             pre: Default::default(),
             key: (false, 0),
-            hilbert: hilbert_taps(SHORT_TAPS),
-            hist: [vec![0.0; SHORT_TAPS * 2], vec![0.0; SHORT_TAPS * 2]],
-            pos: 0,
+            hilbert: dense_hilbert(&hilbert_taps(SHORT_TAPS)),
+            hist: [HilbertHist::new(SHORT_TAPS / 2 + 1), HilbertHist::new(SHORT_TAPS / 2 + 1)],
             conv: None,
             dry: [Vec::new(), Vec::new()],
             dpos: 0,
@@ -417,38 +485,25 @@ impl ShiftUnit {
             }
             self.dpos = (self.dpos + n) % len;
         } else {
-            let (start, d) = (self.pos, (SHORT_TAPS - 1) / 2);
-            let mut end = start;
             for (c, x) in [&*l, &*r].into_iter().enumerate() {
                 let h = &mut self.hist[c];
-                let mut w = start;
                 for i in 0..n {
-                    w = (w + 1) % SHORT_TAPS;
-                    h[w] = x[i];
-                    h[w + SHORT_TAPS] = x[i];
-                    let win = &h[w + 1..w + 1 + SHORT_TAPS];
-                    let mut acc = 0f32;
-                    for (a, b) in win.iter().step_by(2).zip(self.hilbert.iter().rev().step_by(2)) {
-                        acc += a * b;
-                    }
-                    re[c][i] = win[SHORT_TAPS - 1 - d];
-                    im[c][i] = acc;
+                    (re[c][i], im[c][i]) = h.tick(&self.hilbert, x[i]);
                 }
-                end = w;
             }
-            self.pos = end;
         }
         // the rotation: up = x cos - H sin, down = x cos + H sin
         let w = 2.0 * std::f64::consts::PI * self.shift / self.fs as f64;
+        let (wc, ws) = (w.cos(), w.sin());
         let sgn = if self.up { -1.0f32 } else { 1.0 };
         let mix = self.mix;
         for i in 0..n {
-            let (s, c) = (self.theta.sin() as f32, self.theta.cos() as f32);
-            self.theta = (self.theta + w) % (2.0 * std::f64::consts::PI);
+            let (s, c) = self.rot.next(wc, ws);
             let (a, b) = (re[0][i] * c + sgn * im[0][i] * s, re[1][i] * c + sgn * im[1][i] * s);
             l[i] = re[0][i] * (1.0 - mix) + a * mix;
             r[i] = re[1][i] * (1.0 - mix) + b * mix;
         }
+        self.rot.renorm();
         self.scratch = re;
         self.scratch_im = im;
     }
@@ -456,27 +511,79 @@ impl ShiftUnit {
 
 // ---------------------------------------------------------------------- convolution
 
-/// Uniformly partitioned convolution with an impulse response (overlap-save, one FFT per block and channel).
+/// The spectra of the partitions of an impulse response (one channel). A real signal has a mirrored spectrum, so only the
+/// `block + 1` bins up to half the transform size are kept (half the memory and half the work of the multiply-add), real and
+/// imaginary parts in separate arrays so that the multiply-add runs on plain float lanes.
+#[derive(Default)]
+struct Spectra {
+    re: Vec<f32>,
+    im: Vec<f32>,
+}
+
+impl Spectra {
+    fn zeros(n: usize) -> Self {
+        Self { re: vec![0.0; n], im: vec![0.0; n] }
+    }
+}
+
+/// A transform of two real blocks packed as one complex block (`a + i b`): bin `k` of the first and of the second one.
+#[inline]
+fn unpack2(z: &[Complex32], k: usize) -> (Complex32, Complex32) {
+    let n = z.len();
+    let (x, y) = (z[k], z[if k == 0 { 0 } else { n - k }].conj());
+    let d = x - y;
+    (Complex32::new(0.5 * (x.re + y.re), 0.5 * (x.im + y.im)), Complex32::new(0.5 * d.im, -0.5 * d.re))
+}
+
+/// An impulse response made ready for a `ConvUnit`: cut into partitions and transformed. Making it takes a while (an FFT per
+/// partition), so it is done by whoever loads the file, not by the audio thread, which only takes it over.
+pub struct IrParts {
+    block: usize,
+    nparts: usize,
+    secs: f32,
+    fft: Arc<dyn Fft<f32>>,
+    ifft: Arc<dyn Fft<f32>>,
+    /// per channel (the same `Arc` twice for a mono response)
+    spec: [Arc<Spectra>; 2],
+}
+
+/// Uniformly partitioned convolution with an impulse response (overlap-save, one FFT per block for both channels).
 /// The output is `block` frames late; the dry signal is delayed by the same amount so the mix stays aligned.
 pub struct ConvUnit {
     block: usize,
     fft: Arc<dyn Fft<f32>>,
     ifft: Arc<dyn Fft<f32>>,
+    nparts: usize,
     /// spectra of the impulse response partitions, per channel
-    parts: [Vec<Vec<Complex32>>; 2],
-    /// spectra of the most recent input blocks (newest first), per channel
-    fdl: [std::collections::VecDeque<Vec<Complex32>>; 2],
+    parts: [Arc<Spectra>; 2],
+    /// spectra of the most recent input blocks per channel: `nparts` slots of `block + 1` bins, used as a ring; the newest is at `head`
+    fdl: [Spectra; 2],
+    head: usize,
     prev: [Vec<f32>; 2],
     inbuf: [Vec<f32>; 2],
     outbuf: [Vec<f32>; 2],
     dry: [Vec<f32>; 2],
     pos: usize,
     scratch: Vec<Complex32>,
-    acc: Vec<Complex32>,
+    /// scratch space of the FFTs (they would allocate it on every call otherwise)
+    fft_scratch: Vec<Complex32>,
+    acc: [Spectra; 2],
     mix: f32,
     gain: f32,
     pub loaded: bool,
     pub ir_secs: f32,
+}
+
+/// `acc += h * x` over the bins (complex numbers as separate real and imaginary arrays).
+#[inline]
+fn mac(acc: &mut Spectra, h_re: &[f32], h_im: &[f32], x_re: &[f32], x_im: &[f32]) {
+    let n = acc.re.len();
+    let (ar, ai) = (&mut acc.re[..n], &mut acc.im[..n]);
+    let (hr, hi, xr, xi) = (&h_re[..n], &h_im[..n], &x_re[..n], &x_im[..n]);
+    for k in 0..n {
+        ar[k] += hr[k] * xr[k] - hi[k] * xi[k];
+        ai[k] += hr[k] * xi[k] + hi[k] * xr[k];
+    }
 }
 
 impl ConvUnit {
@@ -486,20 +593,29 @@ impl ConvUnit {
 
     fn with_block(block: usize) -> Self {
         let mut pl = FftPlanner::<f32>::new();
+        let (fft, ifft) = (pl.plan_fft_forward(block * 2), pl.plan_fft_inverse(block * 2));
+        Self::from_plans(block, fft, ifft)
+    }
+
+    fn from_plans(block: usize, fft: Arc<dyn Fft<f32>>, ifft: Arc<dyn Fft<f32>>) -> Self {
         let n = block * 2;
+        let scratch_len = fft.get_inplace_scratch_len().max(ifft.get_inplace_scratch_len());
         Self {
             block,
-            fft: pl.plan_fft_forward(n),
-            ifft: pl.plan_fft_inverse(n),
-            parts: [Vec::new(), Vec::new()],
+            fft,
+            ifft,
+            nparts: 0,
+            parts: [Default::default(), Default::default()],
             fdl: [Default::default(), Default::default()],
+            head: 0,
             prev: [vec![0.0; block], vec![0.0; block]],
             inbuf: [vec![0.0; block], vec![0.0; block]],
             outbuf: [vec![0.0; block], vec![0.0; block]],
             dry: [vec![0.0; block], vec![0.0; block]],
             pos: 0,
             scratch: vec![Complex32::new(0.0, 0.0); n],
-            acc: vec![Complex32::new(0.0, 0.0); n],
+            fft_scratch: vec![Complex32::new(0.0, 0.0); scratch_len],
+            acc: [Spectra::zeros(block + 1), Spectra::zeros(block + 1)],
             mix: 0.5,
             gain: 1.0,
             loaded: false,
@@ -517,24 +633,32 @@ impl ConvUnit {
 
     /// Install an impulse response (`ch` has one or two channels at `ir_sr`); it is resampled to `fs`, limited in length
     /// and scaled so that its energy is 1 (noise keeps its level).
+    #[cfg(test)]
     pub fn set_ir(&mut self, ch: &[Vec<f32>], ir_sr: u32, fs: u32) {
+        match Self::prepare_ir(ch, ir_sr, fs) {
+            Some(ir) => self.install(ir),
+            None => self.loaded = false,
+        }
+    }
+
+    /// The heavy part of `set_ir`: resampling and the transforms. `None` for a response without any samples.
+    pub fn prepare_ir(ch: &[Vec<f32>], ir_sr: u32, fs: u32) -> Option<IrParts> {
         if ch.is_empty() || ch[0].is_empty() {
-            self.loaded = false;
-            return;
+            return None;
         }
         let mut chans: Vec<Vec<f32>> = Vec::new();
         for c in ch.iter().take(2) {
-            let mut v = if ir_sr == fs {
-                c.clone()
-            } else {
+            // (a sample that is not a number would spread over the whole output through the transforms and stay there)
+            let mut v: Vec<f32> = c.iter().map(|x| if x.is_finite() { *x } else { 0.0 }).collect();
+            if ir_sr != fs {
                 let mut rs = Rs::new(ir_sr, fs);
-                rs.push(c, c);
+                rs.push(&v, &v);
                 let n = rs.available();
                 let (mut a, mut b) = (vec![0f32; n], vec![0f32; n]);
                 let k = rs.pull(&mut a, &mut b);
                 a.truncate(k);
-                a
-            };
+                v = a;
+            }
             v.truncate((Self::MAX_SECS * fs as f32) as usize);
             chans.push(v);
         }
@@ -545,31 +669,67 @@ impl ConvUnit {
         let secs = len as f32 / fs as f32;
         let energy: f32 = chans.iter().map(|c| c.iter().map(|v| v * v).sum::<f32>()).sum::<f32>() / 2.0;
         let norm = if energy > 1e-12 { 1.0 / energy.sqrt() } else { 1.0 };
-        self.load(chans, norm, Self::block_for(secs), secs);
+        Some(Self::prepare(&chans, norm, Self::block_for(secs), secs))
+    }
+
+    /// Partition and transform two channels of taps (as they are, scaled by `norm`).
+    fn prepare(chans: &[Vec<f32>], norm: f32, block: usize, secs: f32) -> IrParts {
+        let len = chans[0].len().max(chans[1].len());
+        let nparts = len.div_ceil(block).max(1);
+        let mut pl = FftPlanner::<f32>::new();
+        let (fft, ifft) = (pl.plan_fft_forward(block * 2), pl.plan_fft_inverse(block * 2));
+        // a mono response (the same taps for both channels) is transformed once and shared
+        let first = Arc::new(Self::spectra(&chans[0], norm, block, nparts, fft.as_ref()));
+        let second = if chans[0] == chans[1] { first.clone() } else { Arc::new(Self::spectra(&chans[1], norm, block, nparts, fft.as_ref())) };
+        IrParts { block, nparts, secs, fft, ifft, spec: [first, second] }
+    }
+
+    /// The spectra of the partitions of `v`, two partitions per complex transform.
+    fn spectra(v: &[f32], norm: f32, block: usize, nparts: usize, fft: &dyn Fft<f32>) -> Spectra {
+        let (n, nb) = (block * 2, block + 1);
+        let mut out = Spectra::zeros(nparts * nb);
+        let mut z = vec![Complex32::new(0.0, 0.0); n];
+        let mut scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
+        let tap = |i: usize| v.get(i).copied().unwrap_or(0.0) * norm;
+        for p in (0..nparts).step_by(2) {
+            let two = p + 1 < nparts;
+            for (k, s) in z.iter_mut().enumerate() {
+                *s = if k < block { Complex32::new(tap(p * block + k), if two { tap((p + 1) * block + k) } else { 0.0 }) } else { Complex32::new(0.0, 0.0) };
+            }
+            fft.process_with_scratch(&mut z, &mut scratch);
+            for k in 0..nb {
+                let (a, b) = unpack2(&z, k);
+                let at = p * nb + k;
+                // (the bins at 0 Hz and at half the rate of a real signal are real)
+                let edge = k == 0 || k == block;
+                out.re[at] = a.re;
+                out.im[at] = if edge { 0.0 } else { a.im };
+                if two {
+                    out.re[at + nb] = b.re;
+                    out.im[at + nb] = if edge { 0.0 } else { b.im };
+                }
+            }
+        }
+        out
+    }
+
+    /// Take over a prepared impulse response; the state of the unit starts afresh.
+    pub fn install(&mut self, ir: IrParts) {
+        let (mix, gain) = (self.mix, self.gain);
+        *self = Self::from_plans(ir.block, ir.fft, ir.ifft);
+        self.mix = mix;
+        self.gain = gain;
+        self.ir_secs = ir.secs;
+        self.nparts = ir.nparts;
+        let nb = ir.block + 1;
+        self.fdl = [Spectra::zeros(ir.nparts * nb), Spectra::zeros(ir.nparts * nb)];
+        self.parts = ir.spec;
+        self.loaded = true;
     }
 
     /// Install two channels of taps as they are (no scaling) and with a given block size.
     fn load(&mut self, chans: Vec<Vec<f32>>, norm: f32, block: usize, secs: f32) {
-        let len = chans[0].len().max(chans[1].len());
-        let (mix, gain) = (self.mix, self.gain);
-        *self = Self::with_block(block);
-        self.mix = mix;
-        self.gain = gain;
-        self.ir_secs = secs;
-        let n = block * 2;
-        let nparts = len.div_ceil(block).max(1);
-        for (c, v) in chans.iter().enumerate() {
-            for p in 0..nparts {
-                let mut buf = vec![Complex32::new(0.0, 0.0); n];
-                for (k, slot) in buf.iter_mut().take(block).enumerate() {
-                    *slot = Complex32::new(v.get(p * block + k).copied().unwrap_or(0.0) * norm, 0.0);
-                }
-                self.fft.process(&mut buf);
-                self.parts[c].push(buf);
-            }
-            self.fdl[c] = (0..nparts).map(|_| vec![Complex32::new(0.0, 0.0); n]).collect();
-        }
-        self.loaded = true;
+        self.install(Self::prepare(&chans, norm, block, secs));
     }
 
     pub fn set(&mut self, p: &[f32]) {
@@ -582,29 +742,60 @@ impl ConvUnit {
         self.block
     }
 
-    fn run_block(&mut self, c: usize) {
-        let b = self.block;
+    /// A block of input is complete: transform both channels together (the left one as the real part, the right one as the
+    /// imaginary part of one complex block), multiply with every partition, transform back the same way.
+    fn run_block(&mut self) {
+        let (b, nb, np) = (self.block, self.block + 1, self.nparts);
+        let n = b * 2;
         // frame = previous block followed by the new one
         for k in 0..b {
-            self.scratch[k] = Complex32::new(self.prev[c][k], 0.0);
-            self.scratch[b + k] = Complex32::new(self.inbuf[c][k], 0.0);
+            self.scratch[k] = Complex32::new(self.prev[0][k], self.prev[1][k]);
+            self.scratch[b + k] = Complex32::new(self.inbuf[0][k], self.inbuf[1][k]);
         }
-        self.prev[c].copy_from_slice(&self.inbuf[c]);
-        self.fft.process(&mut self.scratch);
-        // recycle the oldest spectrum for the newest block
-        let mut spec = self.fdl[c].pop_back().unwrap_or_else(|| vec![Complex32::new(0.0, 0.0); b * 2]);
-        spec.copy_from_slice(&self.scratch);
-        self.fdl[c].push_front(spec);
-        self.acc.iter_mut().for_each(|v| *v = Complex32::new(0.0, 0.0));
-        for (h, x) in self.parts[c].iter().zip(self.fdl[c].iter()) {
-            for ((a, hv), xv) in self.acc.iter_mut().zip(h.iter()).zip(x.iter()) {
-                *a += hv * xv;
+        for c in 0..2 {
+            self.prev[c].copy_from_slice(&self.inbuf[c]);
+        }
+        self.fft.process_with_scratch(&mut self.scratch, &mut self.fft_scratch);
+        // the newest block takes the slot of the oldest one
+        self.head = (self.head + np - 1) % np;
+        let at = self.head * nb;
+        for k in 0..nb {
+            let (l, r) = unpack2(&self.scratch, k);
+            let edge = k == 0 || k == b;
+            self.fdl[0].re[at + k] = l.re;
+            self.fdl[0].im[at + k] = if edge { 0.0 } else { l.im };
+            self.fdl[1].re[at + k] = r.re;
+            self.fdl[1].im[at + k] = if edge { 0.0 } else { r.im };
+        }
+        for c in 0..2 {
+            let acc = &mut self.acc[c];
+            acc.re.fill(0.0);
+            acc.im.fill(0.0);
+            let (h, x) = (&self.parts[c], &self.fdl[c]);
+            // partition p (the response `p` blocks ago) meets the input of `p` blocks ago, `p` slots behind the head (the ring
+            // wraps after `np - head` slots)
+            for p in 0..np {
+                let slot = if self.head + p < np { self.head + p } else { self.head + p - np };
+                let (hs, xs) = (p * nb..(p + 1) * nb, slot * nb..(slot + 1) * nb);
+                mac(acc, &h.re[hs.clone()], &h.im[hs], &x.re[xs.clone()], &x.im[xs]);
             }
         }
-        self.ifft.process(&mut self.acc);
-        let s = 1.0 / (b * 2) as f32;
+        // both results are mirrored spectra of real signals: `left + i right` has the bins of the left one in the same
+        // way as the right one, so the two come back through one transform
+        for k in 0..nb {
+            let (lr, li) = (self.acc[0].re[k], self.acc[0].im[k]);
+            let (rr, ri) = (self.acc[1].re[k], self.acc[1].im[k]);
+            self.scratch[k] = Complex32::new(lr - ri, li + rr);
+            if k > 0 && k < b {
+                self.scratch[n - k] = Complex32::new(lr + ri, rr - li);
+            }
+        }
+        self.ifft.process_with_scratch(&mut self.scratch, &mut self.fft_scratch);
+        let s = 1.0 / n as f32;
         for k in 0..b {
-            self.outbuf[c][k] = self.acc[b + k].re * s;
+            let z = self.scratch[b + k];
+            self.outbuf[0][k] = z.re * s;
+            self.outbuf[1][k] = z.im * s;
         }
     }
 
@@ -612,20 +803,26 @@ impl ConvUnit {
         if !self.loaded {
             return;
         }
-        let b = self.block;
-        for i in 0..l.len() {
-            for (c, v) in [&mut l[i], &mut r[i]].into_iter().enumerate() {
-                self.inbuf[c][self.pos] = *v;
-                let wet = self.outbuf[c][self.pos] * self.gain;
-                let dry = self.dry[c][self.pos];
-                self.dry[c][self.pos] = *v;
-                *v = dry * (1.0 - self.mix) + wet * self.mix;
+        let (b, n) = (self.block, l.len().min(r.len()));
+        let (mix, gain) = (self.mix, self.gain);
+        let mut i = 0;
+        while i < n {
+            // up to the end of the block that is being collected
+            let m = (n - i).min(b - self.pos);
+            let at = self.pos;
+            for (c, x) in [&mut l[i..i + m], &mut r[i..i + m]].into_iter().enumerate() {
+                self.inbuf[c][at..at + m].copy_from_slice(x);
+                let (wet, dry) = (&self.outbuf[c][at..at + m], &mut self.dry[c][at..at + m]);
+                for ((v, w), d) in x.iter_mut().zip(wet).zip(dry) {
+                    let old = std::mem::replace(d, *v);
+                    *v = old * (1.0 - mix) + w * gain * mix;
+                }
             }
-            self.pos += 1;
+            self.pos += m;
+            i += m;
             if self.pos == b {
                 self.pos = 0;
-                self.run_block(0);
-                self.run_block(1);
+                self.run_block();
             }
         }
     }
@@ -1292,5 +1489,409 @@ mod chunking {
         let mut r = l.clone();
         u.process(&mut l, &mut r, fs);
         assert!(l.iter().all(|v| *v == 0.3));
+    }
+}
+
+/// The faster forms of the convolution and of the Hilbert transformer against the plain ones they replaced (kept here as the
+/// reference), and against a direct computation.
+#[cfg(test)]
+mod fast_paths {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::time::Instant;
+
+    fn rng(seed: u32) -> impl FnMut() -> f32 {
+        let mut s = seed;
+        move || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s as f32 / u32::MAX as f32 - 0.5
+        }
+    }
+
+    /// The convolution as it was: complex spectra of all `2 * block` bins, one transform per channel and block, the
+    /// multiply-add over all bins, one sample at a time through the buffers.
+    struct RefConv {
+        block: usize,
+        fft: Arc<dyn Fft<f32>>,
+        ifft: Arc<dyn Fft<f32>>,
+        parts: [Vec<Vec<Complex32>>; 2],
+        fdl: [VecDeque<Vec<Complex32>>; 2],
+        prev: [Vec<f32>; 2],
+        inbuf: [Vec<f32>; 2],
+        outbuf: [Vec<f32>; 2],
+        dry: [Vec<f32>; 2],
+        pos: usize,
+        scratch: Vec<Complex32>,
+        acc: Vec<Complex32>,
+        mix: f32,
+        gain: f32,
+    }
+
+    impl RefConv {
+        fn new(chans: &[Vec<f32>], norm: f32, block: usize, mix: f32, gain: f32) -> Self {
+            let mut pl = FftPlanner::<f32>::new();
+            let n = block * 2;
+            let mut u = Self {
+                block,
+                fft: pl.plan_fft_forward(n),
+                ifft: pl.plan_fft_inverse(n),
+                parts: [Vec::new(), Vec::new()],
+                fdl: [Default::default(), Default::default()],
+                prev: [vec![0.0; block], vec![0.0; block]],
+                inbuf: [vec![0.0; block], vec![0.0; block]],
+                outbuf: [vec![0.0; block], vec![0.0; block]],
+                dry: [vec![0.0; block], vec![0.0; block]],
+                pos: 0,
+                scratch: vec![Complex32::new(0.0, 0.0); n],
+                acc: vec![Complex32::new(0.0, 0.0); n],
+                mix,
+                gain,
+            };
+            let len = chans[0].len().max(chans[1].len());
+            let nparts = len.div_ceil(block).max(1);
+            for (c, v) in chans.iter().enumerate() {
+                for p in 0..nparts {
+                    let mut buf = vec![Complex32::new(0.0, 0.0); n];
+                    for (k, slot) in buf.iter_mut().take(block).enumerate() {
+                        *slot = Complex32::new(v.get(p * block + k).copied().unwrap_or(0.0) * norm, 0.0);
+                    }
+                    u.fft.process(&mut buf);
+                    u.parts[c].push(buf);
+                }
+                u.fdl[c] = (0..nparts).map(|_| vec![Complex32::new(0.0, 0.0); n]).collect();
+            }
+            u
+        }
+
+        fn run_block(&mut self, c: usize) {
+            let b = self.block;
+            for k in 0..b {
+                self.scratch[k] = Complex32::new(self.prev[c][k], 0.0);
+                self.scratch[b + k] = Complex32::new(self.inbuf[c][k], 0.0);
+            }
+            self.prev[c].copy_from_slice(&self.inbuf[c]);
+            self.fft.process(&mut self.scratch);
+            let mut spec = self.fdl[c].pop_back().unwrap_or_else(|| vec![Complex32::new(0.0, 0.0); b * 2]);
+            spec.copy_from_slice(&self.scratch);
+            self.fdl[c].push_front(spec);
+            self.acc.iter_mut().for_each(|v| *v = Complex32::new(0.0, 0.0));
+            for (h, x) in self.parts[c].iter().zip(self.fdl[c].iter()) {
+                for ((a, hv), xv) in self.acc.iter_mut().zip(h.iter()).zip(x.iter()) {
+                    *a += hv * xv;
+                }
+            }
+            self.ifft.process(&mut self.acc);
+            let s = 1.0 / (b * 2) as f32;
+            for k in 0..b {
+                self.outbuf[c][k] = self.acc[b + k].re * s;
+            }
+        }
+
+        fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+            let b = self.block;
+            for i in 0..l.len() {
+                for (c, v) in [&mut l[i], &mut r[i]].into_iter().enumerate() {
+                    self.inbuf[c][self.pos] = *v;
+                    let wet = self.outbuf[c][self.pos] * self.gain;
+                    let dry = self.dry[c][self.pos];
+                    self.dry[c][self.pos] = *v;
+                    *v = dry * (1.0 - self.mix) + wet * self.mix;
+                }
+                self.pos += 1;
+                if self.pos == b {
+                    self.pos = 0;
+                    self.run_block(0);
+                    self.run_block(1);
+                }
+            }
+        }
+    }
+
+    fn noise_ir(n: usize, seed: u32) -> Vec<f32> {
+        let mut g = rng(seed);
+        (0..n).map(|i| g() * (-(i as f32) / (n as f32 * 0.4)).exp()).collect()
+    }
+
+    fn peak(x: &[f32]) -> f32 {
+        x.iter().fold(0f32, |m, v| m.max(v.abs()))
+    }
+
+    /// Feed a stream in blocks of odd sizes.
+    fn run_blocks(l: &mut [f32], r: &mut [f32], mut f: impl FnMut(&mut [f32], &mut [f32])) {
+        let mut at = 0;
+        let sizes = [480usize, 1, 333, 1024, 7, 2048, 100];
+        let mut k = 0;
+        while at < l.len() {
+            let e = (at + sizes[k % sizes.len()]).min(l.len());
+            f(&mut l[at..e], &mut r[at..e]);
+            at = e;
+            k += 1;
+        }
+    }
+
+    #[test]
+    fn the_half_spectrum_convolution_matches_the_old_one_and_a_direct_convolution() {
+        // (taps, block): one partition, an odd and an even number of them, a mono and a stereo response
+        for (len, block, stereo) in [(100usize, 256usize, false), (1000, 256, true), (5000, 256, false), (5000, 512, true), (9000, 1024, false), (4097, 1024, true), (256, 256, false), (257, 256, true)] {
+            let a = noise_ir(len, 11);
+            let b = if stereo { noise_ir(len, 12) } else { a.clone() };
+            let (mix, gain) = (0.7f32, 1.5f32);
+            let mut new = ConvUnit::new();
+            new.load(vec![a.clone(), b.clone()], 1.0, block, 0.0);
+            new.mix = mix;
+            new.gain = gain;
+            assert_eq!(Arc::ptr_eq(&new.parts[0], &new.parts[1]), !stereo, "a mono response is shared");
+            let mut old = RefConv::new(&[a.clone(), b.clone()], 1.0, block, mix, gain);
+            let n = 12000;
+            let (mut g1, mut g2) = (rng(5), rng(6));
+            let (x, y): (Vec<f32>, Vec<f32>) = (0..n).map(|_| (g1(), g2())).unzip();
+            let (mut nl, mut nr) = (x.clone(), y.clone());
+            let (mut ol, mut or) = (x.clone(), y.clone());
+            run_blocks(&mut nl, &mut nr, |l, r| new.process(l, r));
+            run_blocks(&mut ol, &mut or, |l, r| old.process(l, r));
+            let scale = peak(&ol).max(peak(&or)).max(1.0);
+            let err = nl.iter().zip(&ol).chain(nr.iter().zip(&or)).map(|(p, q)| (p - q).abs()).fold(0f32, f32::max);
+            assert!(err < 2e-5 * scale, "{len} taps, block {block}: new against old differ by {err} (peak {scale})");
+            // and the wet part is the convolution (double precision, delayed by one block)
+            let mut pure = ConvUnit::new();
+            pure.load(vec![a.clone(), b.clone()], 1.0, block, 0.0);
+            pure.mix = 1.0;
+            pure.gain = 1.0;
+            let (mut pl, mut pr) = (x.clone(), y.clone());
+            run_blocks(&mut pl, &mut pr, |l, r| pure.process(l, r));
+            for (ir, inp, out) in [(&a, &x, &pl), (&b, &y, &pr)] {
+                let mut worst = 0f64;
+                for i in (block..n).step_by(13) {
+                    let t = i - block;
+                    let d: f64 = (0..=t.min(ir.len() - 1)).map(|k| ir[k] as f64 * inp[t - k] as f64).sum();
+                    worst = worst.max((d - out[i] as f64).abs());
+                }
+                assert!(worst < 2e-5 * scale as f64, "{len} taps, block {block}: direct convolution differs by {worst}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_prepared_response_gives_the_same_sound_as_one_that_is_set_directly_and_bad_samples_are_dropped() {
+        let fs = 48000u32;
+        let mut ir = noise_ir(3000, 3);
+        // a damaged float file: it must not turn the output into NaN for good
+        ir[10] = f32::NAN;
+        ir[500] = f32::INFINITY;
+        let mut a = ConvUnit::new();
+        a.set_ir(&[ir.clone()], 44100, fs);
+        let mut b = ConvUnit::new();
+        b.install(ConvUnit::prepare_ir(&[ir], 44100, fs).expect("an impulse response"));
+        assert!(a.loaded && b.loaded && (a.ir_secs - b.ir_secs).abs() < 1e-9);
+        let mut g = rng(9);
+        let x: Vec<f32> = (0..8000).map(|_| g()).collect();
+        let (mut l1, mut r1, mut l2, mut r2) = (x.clone(), x.clone(), x.clone(), x.clone());
+        a.process(&mut l1, &mut r1);
+        b.process(&mut l2, &mut r2);
+        assert_eq!(l1, l2);
+        assert!(l1.iter().chain(r1.iter()).all(|v| v.is_finite()), "the output stays finite");
+        assert!(peak(&l1[1000..]) > 0.01, "and it is not silent");
+        assert!(ConvUnit::prepare_ir(&[Vec::new()], fs, fs).is_none());
+        assert!(ConvUnit::prepare_ir(&[], fs, fs).is_none());
+    }
+
+    /// The Hilbert transformer in direct form as it was: the history of the samples in one ring written twice, the sum over
+    /// every other tap in one running sum.
+    fn old_hilbert(taps: &[f32], x: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let n = taps.len();
+        let d = (n - 1) / 2;
+        let mut h = vec![0f32; n * 2];
+        let mut w = 0;
+        let (mut re, mut im) = (Vec::new(), Vec::new());
+        for v in x {
+            w = (w + 1) % n;
+            h[w] = *v;
+            h[w + n] = *v;
+            let win = &h[w + 1..w + 1 + n];
+            let mut acc = 0f32;
+            for (a, b) in win.iter().step_by(2).zip(taps.iter().rev().step_by(2)) {
+                acc += a * b;
+            }
+            re.push(win[n - 1 - d]);
+            im.push(acc);
+        }
+        (re, im)
+    }
+
+    #[test]
+    fn the_dense_hilbert_transformer_matches_the_direct_form() {
+        let taps = hilbert_taps(SHORT_TAPS);
+        let dense = dense_hilbert(&taps);
+        assert_eq!(dense.len(), SHORT_TAPS / 2 + 1);
+        // (what the half-length sum relies on)
+        for j in 0..dense.len() {
+            assert!((dense[j] + dense[dense.len() - 1 - j]).abs() < 1e-6, "tap {j}: {} against {}", dense[j], dense[dense.len() - 1 - j]);
+        }
+        // and the sum itself, for lengths that are not a multiple of eight too
+        for h in [1usize, 7, 8, 9, 64, 100, 128] {
+            let t: Vec<f32> = (0..h).map(|i| (i as f32 * 0.37).sin()).collect();
+            let full: Vec<f32> = t.iter().copied().chain(t.iter().rev().map(|v| -v)).collect();
+            let x: Vec<f32> = (0..2 * h).map(|i| (i as f32 * 0.91).cos() + 0.1 * i as f32).collect();
+            let want: f64 = x.iter().zip(&full).map(|(a, b)| *a as f64 * *b as f64).sum();
+            assert!((dot_odd(&x, &t) as f64 - want).abs() < 1e-3, "half length {h}");
+        }
+        let mut g = rng(21);
+        let x: Vec<f32> = (0..5000).map(|i| g() + (i as f32 * 0.05).sin()).collect();
+        let (re0, im0) = old_hilbert(&taps, &x);
+        // in blocks of any size the state carries over
+        let mut hh = HilbertHist::new(dense.len());
+        let (mut re1, mut im1) = (Vec::new(), Vec::new());
+        for v in &x {
+            let (a, b) = hh.tick(&dense, *v);
+            re1.push(a);
+            im1.push(b);
+        }
+        assert_eq!(re0, re1, "the delayed signal is exactly the same samples");
+        let err = im0.iter().zip(&im1).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(err < 2e-5 * peak(&im0).max(1.0), "Hilbert transform differs by {err}");
+    }
+
+    /// The shifter as it was: the direct form above and the angle in double precision reduced modulo 2 pi.
+    fn old_shift(l: &[f32], r: &[f32], shift: f64, up: bool, mix: f32, fs: f32) -> (Vec<f32>, Vec<f32>) {
+        let taps = hilbert_taps(SHORT_TAPS);
+        let ((rl, il), (rr, ir)) = (old_hilbert(&taps, l), old_hilbert(&taps, r));
+        let w = 2.0 * std::f64::consts::PI * shift / fs as f64;
+        let sgn = if up { -1.0f32 } else { 1.0 };
+        let mut theta = 0f64;
+        let (mut ol, mut or) = (Vec::new(), Vec::new());
+        for i in 0..l.len() {
+            let (s, c) = (theta.sin() as f32, theta.cos() as f32);
+            theta = (theta + w) % (2.0 * std::f64::consts::PI);
+            let (a, b) = (rl[i] * c + sgn * il[i] * s, rr[i] * c + sgn * ir[i] * s);
+            ol.push(rl[i] * (1.0 - mix) + a * mix);
+            or.push(rr[i] * (1.0 - mix) + b * mix);
+        }
+        (ol, or)
+    }
+
+    #[test]
+    fn the_frequency_shifter_and_the_phase_node_match_their_old_forms() {
+        let fs = 48000.0;
+        let mut g = rng(31);
+        let n = 20000;
+        let l: Vec<f32> = (0..n).map(|i| 0.3 * g() + 0.4 * (i as f32 * 0.07).sin()).collect();
+        let r: Vec<f32> = (0..n).map(|i| 0.3 * g() + 0.4 * (i as f32 * 0.11).sin()).collect();
+        for (up, shift, mix) in [(false, 1234.5f32, 1.0f32), (true, 300.0, 0.6), (true, 20000.0, 1.0)] {
+            let mut u = ShiftUnit::new();
+            // filter off (parameter 3), short quality
+            u.set(&[if up { 1.0 } else { 0.0 }, shift, 0.0, 1.0, mix * 100.0], fs);
+            let (mut a, mut b) = (l.clone(), r.clone());
+            run_blocks(&mut a, &mut b, |x, y| u.process(x, y));
+            let (ra, rb) = old_shift(&l, &r, shift as f64, up, mix, fs);
+            let err = a.iter().zip(&ra).chain(b.iter().zip(&rb)).map(|(p, q)| (p - q).abs()).fold(0f32, f32::max);
+            assert!(err < 3e-5, "shifter up {up} {shift} Hz: differs by {err}");
+        }
+        // the phase node: cos * delayed + sin * Hilbert
+        let taps = hilbert_taps(HILBERT_TAPS);
+        let (re, im) = old_hilbert(&taps, &l);
+        let mut u = PhaseUnit::default();
+        u.set(&[0.0, 1.0, 40.0, 1000.0, 0.7], fs);
+        let (mut a, mut b) = (l.clone(), r.clone());
+        run_blocks(&mut a, &mut b, |x, y| u.process(x, y));
+        let phi = 40f32.to_radians();
+        let err = (0..n).map(|i| (a[i] - (phi.cos() * re[i] + phi.sin() * im[i])).abs()).fold(0f32, f32::max);
+        assert!(err < 3e-5, "phase node differs by {err}");
+    }
+
+    #[test]
+    fn the_phasor_keeps_the_angle_and_the_length_over_a_very_long_run() {
+        // 1234 Hz at 48 kHz: the angle after n samples is 2 pi (n * 1234 mod 48000) / 48000, exactly reducible in integers
+        let (k, m) = (1234u64, 48000u64);
+        let w = 2.0 * std::f64::consts::PI * k as f64 / m as f64;
+        let (wc, ws) = (w.cos(), w.sin());
+        let mut rot = Rotor::new();
+        let mut worst = 0f64;
+        let total = 30_000_000u64;
+        let mut n = 0u64;
+        while n < total {
+            for i in 0..1024u64 {
+                let (s, c) = rot.next(wc, ws);
+                if i == 0 || i == 1023 {
+                    let a = 2.0 * std::f64::consts::PI * (((n + i) * k) % m) as f64 / m as f64;
+                    worst = worst.max((s as f64 - a.sin()).abs()).max((c as f64 - a.cos()).abs());
+                }
+            }
+            rot.renorm();
+            n += 1024;
+        }
+        assert!(worst < 5e-7, "the phasor strayed by {worst} after {total} samples");
+        assert!((rot.c.hypot(rot.s) - 1.0).abs() < 1e-12);
+        // a damaged state starts over
+        rot.c = f64::NAN;
+        rot.renorm();
+        assert_eq!((rot.c, rot.s), (1.0, 0.0));
+    }
+
+    /// `cargo test --locked bench_fast_paths -- --ignored --nocapture`: the old and the new forms, one second of stereo audio at
+    /// 48 kHz in blocks of 480.
+    #[test]
+    #[ignore]
+    fn bench_fast_paths() {
+        let fs = 48000usize;
+        let mut g = rng(77);
+        let x: Vec<f32> = (0..fs).map(|_| g() * 0.5).collect();
+        let time = |name: &str, f: &mut dyn FnMut(&mut [f32], &mut [f32])| {
+            let (mut l, mut r) = (x.clone(), x.clone());
+            let t = Instant::now();
+            for _ in 0..3 {
+                for (a, b) in l.chunks_mut(480).zip(r.chunks_mut(480)) {
+                    f(a, b);
+                }
+            }
+            println!("{name:34} {:7.2} ms per second of audio", t.elapsed().as_secs_f64() * 1000.0 / 3.0);
+        };
+        for (secs, stereo) in [(0.5f32, false), (5.0, false), (5.0, true)] {
+            let a = noise_ir((secs * fs as f32) as usize, 1);
+            let b = if stereo { noise_ir(a.len(), 2) } else { a.clone() };
+            let block = ConvUnit::block_for(secs);
+            let tag = if stereo { "stereo" } else { "mono" };
+            let mut old = RefConv::new(&[a.clone(), b.clone()], 1.0, block, 0.5, 1.0);
+            time(&format!("convolution {secs} s {tag}, old"), &mut |l, r| old.process(l, r));
+            let mut new = ConvUnit::new();
+            new.load(vec![a, b], 1.0, block, secs);
+            new.mix = 0.5;
+            time(&format!("convolution {secs} s {tag}, new"), &mut |l, r| new.process(l, r));
+        }
+        let taps = hilbert_taps(SHORT_TAPS);
+        time("Hilbert direct form, old", &mut |l, r| {
+            let (_, a) = old_hilbert(&taps, l);
+            let (_, b) = old_hilbert(&taps, r);
+            l.copy_from_slice(&a);
+            r.copy_from_slice(&b);
+        });
+        let dense = dense_hilbert(&taps);
+        let mut hh = [HilbertHist::new(dense.len()), HilbertHist::new(dense.len())];
+        time("Hilbert direct form, new", &mut |l, r| {
+            for (c, ch) in [l, r].into_iter().enumerate() {
+                for v in ch.iter_mut() {
+                    *v = hh[c].tick(&dense, *v).1;
+                }
+            }
+        });
+        let w = 2.0 * std::f64::consts::PI * 1234.5 / 48000.0;
+        let mut theta = 0f64;
+        time("angle with sin / cos / %, old", &mut |l, r| {
+            for i in 0..l.len() {
+                let (s, c) = (theta.sin() as f32, theta.cos() as f32);
+                theta = (theta + w) % (2.0 * std::f64::consts::PI);
+                l[i] = l[i] * c + r[i] * s;
+            }
+        });
+        let (wc, ws) = (w.cos(), w.sin());
+        let mut rot = Rotor::new();
+        time("angle with a phasor, new", &mut |l, r| {
+            for i in 0..l.len() {
+                let (s, c) = rot.next(wc, ws);
+                l[i] = l[i] * c + r[i] * s;
+            }
+            rot.renorm();
+        });
     }
 }

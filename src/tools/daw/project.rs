@@ -19,8 +19,9 @@ pub struct Source {
     pub ch: Vec<Vec<f32>>,
     /// min / max per `OV_BLOCK` frames, per channel
     pub ov: Vec<Vec<(f32, f32)>>,
-    /// file this source was written to (project media folder or a recorded take)
-    pub saved: Mutex<Option<PathBuf>>,
+    /// files that hold this audio (a recorded take, the media folder of the project, of the autosave): the source is immutable, so
+    /// every one of them stays valid, and a save to a folder that has its copy already does not write it again
+    pub saved: Mutex<Vec<PathBuf>>,
     /// the beat, found on a thread when first asked for
     grid: Arc<Mutex<Option<Arc<BeatGrid>>>>,
     grid_started: std::sync::atomic::AtomicBool,
@@ -186,7 +187,7 @@ impl Source {
             ch.push(Vec::new());
         }
         let ov = ch.iter().map(|c| c.chunks(OV_BLOCK).map(|b| b.iter().fold((0f32, 0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)))).collect()).collect();
-        Self { id, name, ch, ov, saved: Mutex::new(None), grid: Arc::new(Mutex::new(None)), grid_started: std::sync::atomic::AtomicBool::new(false) }
+        Self { id, name, ch, ov, saved: Mutex::new(Vec::new()), grid: Arc::new(Mutex::new(None)), grid_started: std::sync::atomic::AtomicBool::new(false) }
     }
 
     /// The beat of this source, once it is found (the search runs on a thread of its own the first time it is asked for).
@@ -206,6 +207,19 @@ impl Source {
     /// False until the search for the beat has finished (for a repaint later).
     pub fn grid_pending(&self) -> bool {
         self.grid_started.load(std::sync::atomic::Ordering::Relaxed) && self.grid.lock().is_none()
+    }
+
+    /// Remember a file that holds this audio.
+    pub fn mark_saved(&self, path: PathBuf) {
+        let mut s = self.saved.lock();
+        if !s.contains(&path) {
+            s.push(path);
+        }
+    }
+
+    /// Whether `path` is a file written for this source that is still there.
+    pub fn is_saved_at(&self, path: &std::path::Path) -> bool {
+        self.saved.lock().iter().any(|p| p == path) && path.exists()
     }
 
     pub fn len(&self) -> usize {
@@ -582,7 +596,8 @@ impl Project {
 
     pub fn next(&mut self) -> u32 {
         let i = self.next_id;
-        self.next_id += 1;
+        // (a damaged file can reserve the last id: that must not be an overflow)
+        self.next_id = self.next_id.saturating_add(1);
         i
     }
 
@@ -845,6 +860,41 @@ impl Project {
         (l, r)
     }
 
+    /// Why `[a, b)` may not be rendered into memory (two `f32` per frame), `None` when it may: a damaged project (a clip placed
+    /// years away) would otherwise ask for terabytes and take the whole process down. `max_frames` is what the memory allows.
+    pub fn render_refusal(a: i64, b: i64, max_frames: usize, sr: u32) -> Option<String> {
+        let n = b.saturating_sub(a).max(0) as u64;
+        (n > max_frames as u64).then(|| format!("The range is too long to render in memory ({:.0} minutes at most with the free memory now)", max_frames as f64 / 60.0 / sr.max(1) as f64))
+    }
+
+    /// The most frames a render may produce now: what the free memory allows for the two channels (see `wavio::max_samples`).
+    pub fn render_limit() -> usize {
+        (crate::tools::wavio::max_samples() / 2) as usize
+    }
+
+    /// Latest start of a clip that a project file may place (24 hours): further than that is a damaged file, and a render up to such a
+    /// clip would never fit into memory.
+    pub fn max_start(sr: u32) -> i64 {
+        86_400 * sr as i64
+    }
+
+    /// A number that changes when anything that the mix of the tracks `ids` sounds like changes (their clips, fader, pan, routing,
+    /// mute, polarity, automation): a background mixdown compares it with the one from its start to see whether the tracks were
+    /// edited while it ran.
+    pub fn mix_fingerprint(&self, ids: &[u32]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for t in self.tracks.iter().filter(|t| ids.contains(&t.id)) {
+            (t.id, t.chan.index(), t.ch_db.map(f32::to_bits), t.ch_mute, t.vol_db.to_bits(), t.pan.to_bits(), t.mute, t.solo, t.invert).hash(&mut h);
+            t.auto.iter().for_each(|(f, d)| (f, d.to_bits()).hash(&mut h));
+            t.clips.len().hash(&mut h);
+            for c in &t.clips {
+                (c.id, c.src.id, c.start, c.off, c.len, c.gain_db.to_bits(), c.fade_in, c.fade_out, c.reverse, c.muted, c.xf).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
     // ------------------------------------------------------------------ editing
 
     /// Split every clip of `tracks` (all when empty) that spans `t`; only clips in `only` when given.
@@ -1014,6 +1064,11 @@ pub const COLOR_COUNT: usize = 8;
 pub const TRACK_COLORS: [(u8, u8, u8); COLOR_COUNT] = [(96, 165, 250), (74, 222, 128), (250, 204, 21), (248, 113, 113), (192, 132, 252), (45, 212, 191), (251, 146, 60), (244, 114, 182)];
 
 // ---------------------------------------------------------------------- resampling
+
+/// How many samples `resample` makes of `n` samples at `from` Hz for `to` Hz (to see beforehand whether the result fits into memory).
+pub fn resampled_len(n: usize, from: u32, to: u32) -> u64 {
+    if from == to { n as u64 } else { (n as f64 * to as f64 / from.max(1) as f64).round() as u64 }
+}
 
 /// Windowed-sinc resampler (Kaiser-like window, 32 taps) for sample rate conversion at import and record.
 pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {

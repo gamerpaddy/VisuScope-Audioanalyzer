@@ -14,7 +14,11 @@ impl Routing {
         let painter = ui.painter_at(canvas);
         painter.rect_filled(canvas, 0.0, CANVAS_BG);
         // dot grid
-        let step = (24.0 * self.zoom).max(10.0);
+        // (zoomed far out the dots would be thousands of circles a frame: they stay at least ~14 px apart)
+        let mut step = (24.0 * self.zoom).max(10.0);
+        if step < 14.0 {
+            step *= 2.0;
+        }
         let (ox, oy) = (self.pan.x.rem_euclid(step), self.pan.y.rem_euclid(step));
         let mut y = canvas.top() + oy;
         while y < canvas.bottom() {
@@ -81,9 +85,30 @@ impl Routing {
 
         // wires first (under the nodes)
         let mut wire_hit: Option<(NodeId, u8)> = None;
-        let metersum: HashMap<NodeId, f32> = self.eng.as_ref().map(|e| self.g.nodes.iter().map(|n| (n.id, e.meter(n.id).peak[0].max(e.meter(n.id).peak[1]))).collect()).unwrap_or_default();
+        let metersum: HashMap<NodeId, f32> = self
+            .eng
+            .as_ref()
+            .map(|e| {
+                self.g
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        let m = e.meter(n.id);
+                        (n.id, m.peak[0].max(m.peak[1]))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // node id -> place in the list, once per frame (the wires, the modulations and the node loop below look nodes up by id;
+        // the list is only reordered after the loop)
+        let mut index: HashMap<NodeId, usize> = HashMap::with_capacity(self.g.nodes.len());
+        for (i, n) in self.g.nodes.iter().enumerate() {
+            index.entry(n.id).or_insert(i);
+        }
+        let nodes = &self.g.nodes;
+        let find = |id: NodeId| index.get(&id).and_then(|&i| nodes.get(i));
         for e in &self.g.edges {
-            let (Some(a), Some(b)) = (self.g.node(e.from), self.g.node(e.to)) else { continue };
+            let (Some(a), Some(b)) = (find(e.from), find(e.to)) else { continue };
             let pts = wire_pts(sp(out_pos(a, e.from_port as usize)), sp(in_pos(b, e.port as usize)));
             let lvl = metersum.get(&e.from).copied().unwrap_or(0.0);
             let live = ((20.0 * lvl.max(1e-6).log10() + 60.0) / 60.0).clamp(0.0, 1.0);
@@ -97,7 +122,7 @@ impl Routing {
         }
         // a parameter that follows a signal: a dashed line from the signal to the node
         for m in &self.g.mods {
-            let (Some(a), Some(b)) = (self.g.node(m.src), self.g.node(m.node)) else { continue };
+            let (Some(a), Some(b)) = (find(m.src), find(m.node)) else { continue };
             let bw = self.sizes.get(&b.id).map_or(node_w(b.kind), |s| s.0);
             // to the port of the parameter row (where the row was drawn last), else to the top of the node
             let row = MOD_ROWS.lock().iter().find(|r| r.0 == (m.node, m.param)).map(|r| r.1);
@@ -183,7 +208,8 @@ impl Routing {
         let ids: Vec<NodeId> = self.g.nodes.iter().map(|n| n.id).collect();
         let loops = self.feedback_nodes(cx);
         for id in ids {
-            let Some(idx) = self.g.nodes.iter().position(|n| n.id == id) else { continue };
+            // (nodes added by a menu in this loop go to the end: the places of the old ones stay)
+            let Some(idx) = index.get(&id).copied().filter(|&i| self.g.nodes.get(i).is_some_and(|n| n.id == id)).or_else(|| self.g.nodes.iter().position(|n| n.id == id)) else { continue };
             let mut n = self.g.nodes[idx].clone();
             let w = node_w(n.kind) * z;
             let (hdr, row) = (HDR * z, ROW * z);

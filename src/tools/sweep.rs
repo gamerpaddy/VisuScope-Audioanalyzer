@@ -165,7 +165,10 @@ pub struct Sweep {
     pub p: SweepParams,
     pub state: State,
     pub result: Option<SweepResult>,
-    slot: Arc<Mutex<Option<Result<RunOut, String>>>>,
+    /// the result of the analysis, with the number of the measurement (`epoch`) it belongs to
+    slot: Arc<Mutex<Option<(u64, Result<RunOut, String>)>>>,
+    /// counts the starts and stops: what a stopped measurement's analysis delivers later is not the result of the next one
+    epoch: u64,
     acc: Option<Acc>,
     next_id: u64,
     /// what was captured so far (the analysers' ring holds only a few seconds: the sweep takes what it needs from it as it goes)
@@ -184,6 +187,18 @@ pub fn anchor_phase(phase: &mut [f32], k: usize) {
 /// The deconvolution works on blocks of this many frames at most (memory: about 80 bytes for each).
 pub const MAX_FFT: usize = 1 << 24;
 
+/// A sweep needs a start below its end (the settings let both be chosen independently): with the end at or below the start the
+/// rate of the sweep is not defined (a ratio of 1 or less) and the analysis has nothing to work on.
+pub fn range_ok(f0: f64, f1: f64) -> bool {
+    f0.is_finite() && f1.is_finite() && f0 > 0.0 && f1 > f0 * 1.1
+}
+
+/// Run an analysis so that a panic ends as an error: the result slot of the worker is always filled, the state never stays
+/// "computing" for ever.
+fn guarded<T>(work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| Err("analysis failed".into()))
+}
+
 /// The longest sweep + tail (seconds, sweep counted twice) the deconvolution can do at a rate.
 pub fn max_total_secs(sr: f32) -> f32 {
     MAX_FFT as f32 / sr.max(1.0)
@@ -191,7 +206,7 @@ pub fn max_total_secs(sr: f32) -> f32 {
 
 impl Sweep {
     pub fn new() -> Self {
-        Self { p: SweepParams::default(), state: State::Idle, result: None, slot: Arc::new(Mutex::new(None)), acc: None, next_id: 1, cap: [Vec::new(), Vec::new()] }
+        Self { p: SweepParams::default(), state: State::Idle, result: None, slot: Arc::new(Mutex::new(None)), epoch: 0, acc: None, next_id: 1, cap: [Vec::new(), Vec::new()] }
     }
 
     pub fn busy(&self) -> bool {
@@ -203,6 +218,7 @@ impl Sweep {
             return;
         }
         self.acc = None;
+        self.epoch += 1;
         self.state = State::Arming(Instant::now());
     }
 
@@ -210,6 +226,7 @@ impl Sweep {
         *PLAYER.lock() = None;
         PLAY_ACTIVE.store(false, Relaxed);
         self.acc = None;
+        self.epoch += 1;
         self.state = State::Idle;
     }
 
@@ -234,9 +251,14 @@ impl Sweep {
             self.state = State::Failed(format!("sweep and tail too long for the memory of the analysis at {sr:.0} Hz: at most {:.0} s of tail plus twice the sweep length", max_total_secs(sr)));
             return;
         }
+        let (f0, f1) = self.p.span(sr);
+        if !range_ok(f0 as f64, f1 as f64) {
+            self.state = State::Failed(format!("the sweep range {f0:.0} Hz to {f1:.0} Hz is not valid: the end frequency has to be above the start frequency"));
+            return;
+        }
         self.cap = [Vec::new(), Vec::new()];
         let t0 = sh.ring.lock().total;
-        *PLAYER.lock() = Some(PlayJob { f0: self.p.span(sr).0 as f64, f1: self.p.span(sr).1 as f64, secs, amp: 10f32.powf(self.p.amp_db / 20.0), pos: 0 });
+        *PLAYER.lock() = Some(PlayJob { f0: f0 as f64, f1: f1 as f64, secs, amp: 10f32.powf(self.p.amp_db / 20.0), pos: 0 });
         PLAY_ACTIVE.store(true, Relaxed);
         self.state = State::Capturing { t0, need, since: Instant::now(), run };
     }
@@ -281,28 +303,56 @@ impl Sweep {
                         c.resize(have + k, 0.0);
                     }
                     let [cl, cr] = &mut self.cap;
-                    sh.ring.lock().copy_abs(from, &mut cl[have..], &mut cr[have..]);
+                    // in pieces: after a stall of the UI up to a million samples are waiting, and one copy of that under the lock
+                    // would hold the audio callback up (see `copy_last_chunked`)
+                    const PIECE: usize = 8192;
+                    let mut done = 0;
+                    while done < k {
+                        let m = PIECE.min(k - done);
+                        {
+                            let ring = sh.ring.lock();
+                            // the piece must still be in the ring (the callback goes on writing between the pieces)
+                            if ring.total as usize > from + done + RING_CAP {
+                                drop(ring);
+                                self.cancel();
+                                self.state = State::Failed("the program stalled for too long during the measurement: try again".into());
+                                return;
+                            }
+                            ring.copy_abs(from + done, &mut cl[have + done..have + done + m], &mut cr[have + done..have + done + m]);
+                        }
+                        done += m;
+                    }
                 }
                 if self.cap[0].len() as u64 >= need {
                     let [l, r] = std::mem::take(&mut self.cap);
                     let mut p = self.p.clone();
                     (p.f0, p.f1) = p.span(sr);
                     let slot = self.slot.clone();
+                    let epoch = self.epoch;
                     self.state = State::Computing { run };
-                    std::thread::Builder::new()
-                        .name("sweep-fft".into())
-                        .spawn(move || {
-                            let out = process_run(&l, &r, sr, &p);
-                            *slot.lock() = Some(out);
-                        })
-                        .ok();
+                    // (a panic of the analysis is turned into an error: the result slot is the only way out of Computing)
+                    let spawned = std::thread::Builder::new().name("sweep-fft".into()).spawn(move || {
+                        let out = guarded(|| process_run(&l, &r, sr, &p));
+                        // (not over the result of a later measurement, if this one is the late one)
+                        let mut g = slot.lock();
+                        if g.as_ref().is_none_or(|(old, _)| *old <= epoch) {
+                            *g = Some((epoch, out));
+                        }
+                    });
+                    if spawned.is_err() {
+                        self.state = State::Failed("could not start the analysis".into());
+                    }
                 } else if since.elapsed() > Duration::from_secs_f32((self.p.secs + self.p.tail) * 3.0 + 5.0) {
                     self.cancel();
                     self.state = State::Failed("capture timed out (input stalled?)".into());
                 }
             }
             State::Computing { run } => {
-                let Some(res) = self.slot.try_lock().and_then(|mut g| g.take()) else { return };
+                let Some((g, res)) = self.slot.try_lock().and_then(|mut g| g.take()) else { return };
+                // (the analysis of a measurement that was stopped delivers into the same slot: it is not ours)
+                if g != self.epoch {
+                    return;
+                }
                 match res {
                     Err(e) => {
                         self.acc = None;
@@ -490,7 +540,14 @@ pub fn process_run(l: &[f32], r: &[f32], sr: f32, p: &SweepParams) -> Result<Run
     let srf = sr as f64;
     let secs = p.secs as f64;
     let f1 = (p.f1 as f64).min(srf * 0.5 * 0.98);
+    // (the range is not checked by the settings: an end at or below the start made the clamp below panic, and an equal one gave NaN)
+    if !range_ok(p.f0 as f64, f1) {
+        return Err(format!("the sweep range {:.0} Hz to {:.0} Hz is not valid: the end frequency has to be above the start frequency", p.f0, f1));
+    }
     let ns = (secs * srf).round() as usize;
+    if ns < 256 {
+        return Err("the sweep is too short".into());
+    }
     let ncap = l.len();
     if ncap < ns + 64 {
         return Err("capture shorter than the sweep".into());
@@ -532,14 +589,18 @@ pub fn process_run(l: &[f32], r: &[f32], sr: f32, p: &SweepParams) -> Result<Run
     }
     // keep the band-limited pre-ringing (a few periods of the lowest frequency) but stay clear of the
     // second-harmonic response, which sits secs*ln(2)/ln(f1/f0) before the main peak
-    let pre_s = (2.0 / p.f0 as f64).clamp(0.002, 0.5 * secs * std::f64::consts::LN_2 / lr);
+    let pre_s = (2.0 / p.f0 as f64).max(0.002).min(0.5 * secs * std::f64::consts::LN_2 / lr);
     let pre = ((pre_s * srf) as usize).min(pk);
     let start = pk - pre;
-    let ir_len = ((p.ir_ms as f64 * 1e-3 * srf) as usize).clamp(256, nfft - start);
+    let ir_len = ((p.ir_ms as f64 * 1e-3 * srf) as usize).max(256).min(nfft - start);
+    // the response window follows the length that was asked for
+    let rl = (((p.resp_ms as f64 * 1e-3 * srf) as usize).clamp(256, ir_len.max(256))).max(256);
+    // the impulse response holds the pre-roll and at least 100 ms after the peak (with 5 Hz the pre-roll alone can be longer than
+    // the 200 ms the settings allow: `impulse::analyse` needs the clarity windows behind the peak)
+    let ir_len = ir_len.max(pre + (0.1 * srf) as usize + 1).min(nfft - start).max(ir_len);
     let cut = |h: &[f32], len: usize| -> Vec<f32> { (0..len).map(|k| h.get(start + k).copied().unwrap_or(0.0)).collect() };
     let ir = cut(&h_dut, ir_len);
     // frequency response window with a Hann tail
-    let rl = (((p.resp_ms as f64 * 1e-3 * srf) as usize).clamp(256, ir_len)).max(256);
     let taper = |mut v: Vec<f32>| {
         let t0 = rl * 3 / 4;
         for (k, s) in v.iter_mut().enumerate().skip(t0) {
@@ -612,6 +673,86 @@ mod tests {
         }
         // everything was taken: the analysis is running (or has finished with a verdict on this made-up signal)
         assert!(matches!(sw.state, State::Computing { .. } | State::Failed(_) | State::Done), "{:?}", matches!(sw.state, State::Capturing { .. }));
+    }
+
+    #[test]
+    fn a_sweep_that_does_not_rise_is_refused_instead_of_panicking() {
+        let sr = 48000.0;
+        let cap = vec![0.1f32; 3 * 48000];
+        // (the Response window lets both frequencies be chosen on their own: 1500 Hz to 1000 Hz made the clamp panic, an equal pair gave NaN)
+        for (f0, f1) in [(1500.0f32, 1000.0f32), (1000.0, 1000.0), (1000.0, 1050.0), (0.0, 1000.0), (f32::NAN, 1000.0)] {
+            let p = SweepParams { secs: 1.0, tail: 1.0, f0, f1, ..Default::default() };
+            let r = process_run(&cap, &cap, sr, &p);
+            assert!(r.is_err(), "{f0} to {f1}");
+        }
+        assert!(range_ok(20.0, 20000.0) && !range_ok(20.0, 20.0) && !range_ok(100.0, 50.0));
+        // and the state machine says so instead of playing a sweep
+        let sh = Arc::new(Shared::new());
+        sh.sr.store(48000, Relaxed);
+        let mut sw = Sweep::new();
+        sw.p = SweepParams { f0: 1500.0, f1: 1000.0, ..Default::default() };
+        sw.post_job(&sh, 0);
+        assert!(matches!(sw.state, State::Failed(_)) && !sw.busy());
+    }
+
+    #[test]
+    fn a_panicking_analysis_ends_in_an_error_and_a_filled_slot_ends_the_computing_state() {
+        let r: Result<u32, String> = guarded(|| panic!("boom"));
+        assert_eq!(r.unwrap_err(), "analysis failed");
+        assert_eq!(guarded(|| Ok(5)).unwrap(), 5);
+        // the worker publishes whatever came out: the UI leaves Computing
+        let sh = Arc::new(Shared::new());
+        sh.sr.store(48000, Relaxed);
+        let mut sw = Sweep::new();
+        sw.state = State::Computing { run: 0 };
+        let mut req = Requests::default();
+        sw.tick(&sh, true, &mut req);
+        assert!(sw.busy(), "still waiting for the worker");
+        *sw.slot.lock() = Some((sw.epoch, guarded(|| -> Result<RunOut, String> { panic!("boom") })));
+        sw.tick(&sh, true, &mut req);
+        assert!(matches!(&sw.state, State::Failed(e) if e == "analysis failed") && !sw.busy());
+    }
+
+    #[test]
+    fn the_late_result_of_a_stopped_measurement_is_not_taken_for_the_next_one() {
+        let sh = Arc::new(Shared::new());
+        sh.sr.store(48000, Relaxed);
+        let mut sw = Sweep::new();
+        let mut req = Requests::default();
+        // measurement 1 is in the analysis and is stopped; the next one starts and reaches its own analysis
+        sw.start();
+        sw.state = State::Computing { run: 0 };
+        let old_epoch = sw.epoch;
+        // (what Stop does to the state, without the global player that other tests may use)
+        sw.state = State::Idle;
+        sw.start();
+        sw.state = State::Computing { run: 0 };
+        assert!(sw.epoch > old_epoch);
+        // the worker of the first one delivers late: ignored, the second is still awaited
+        *sw.slot.lock() = Some((old_epoch, Err("stale".into())));
+        sw.tick(&sh, true, &mut req);
+        assert!(sw.busy() && matches!(sw.state, State::Computing { .. }));
+        // its own result is taken
+        *sw.slot.lock() = Some((sw.epoch, Err("mine".into())));
+        sw.tick(&sh, true, &mut req);
+        assert!(matches!(&sw.state, State::Failed(e) if e == "mine"));
+    }
+
+    #[test]
+    fn the_impulse_response_reaches_100_ms_behind_the_peak_even_with_a_long_pre_roll() {
+        // 5 Hz start: the pre-roll (a third of a second here) is longer than the 200 ms impulse response the settings allow
+        let sr = 8000.0f32;
+        let p = SweepParams { secs: 6.0, tail: 1.0, amp_db: -6.0, f0: 5.0, f1: 3000.0, ir_ms: 200.0, resp_ms: 200.0, ..Default::default() };
+        let n = (p.secs as f64 * sr as f64) as usize;
+        let amp = 10f32.powf(p.amp_db / 20.0);
+        let play: Vec<f32> = (0..n).map(|i| ess(i as f64 / sr as f64, 5.0, 3000.0, 6.0) as f32 * amp).collect();
+        let cap = device(&play, 40, 0.8, sr as usize);
+        let silent = vec![0f32; cap.len()];
+        let out = process_run(&cap, &silent, sr, &p).expect("process");
+        assert!(out.pre > (0.2 * sr) as usize, "the case needs a pre-roll longer than the IR: {}", out.pre);
+        assert!(out.ir.len() >= out.pre + (0.1 * sr) as usize, "ir {} pre {}", out.ir.len(), out.pre);
+        // the viewer's analysis no longer slices out of bounds
+        let _ = super::super::impulse::analyse(&out.ir, sr);
     }
 
     #[test]

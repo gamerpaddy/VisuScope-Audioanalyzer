@@ -33,22 +33,22 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
+type SmoothKey = (usize, usize, u64, [u32; 3]);
+thread_local! {
+    static SMOOTH_CACHE: std::cell::RefCell<Vec<(SmoothKey, std::rc::Rc<Vec<f64>>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// 1/`n` octave smoothing for the spectrum display: per pixel, the average power over `[b/k, b*k]`
 /// bins around the pixel's centre bin (never narrower than the pixel itself).
 ///
 /// The prefix sums of the powers (one `exp2` per bin) are kept between frames: a stored spectrum never changes and a live one
-/// only with the next analysis (`seq`), while the display is redrawn far more often.
-fn smooth_pixels(data: &[f32], bpos: &[f32], n: f32, seq: u64) -> Vec<Option<f32>> {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    type Key = (usize, usize, u64, [u32; 3]);
-    thread_local! {
-        static CACHE: RefCell<Vec<(Key, Rc<Vec<f64>>)>> = const { RefCell::new(Vec::new()) };
-    }
+/// only with the next analysis (`seq`), while the display is redrawn far more often. `cap` is how many traces are drawn
+/// (plus a little slack): each entry is as large as the spectrum, so more than that is only memory.
+fn smooth_pixels(data: &[f32], bpos: &[f32], n: f32, seq: u64, cap: usize, out: &mut Vec<Option<f32>>) {
     let half = (data.len() - 1) as f32;
     // the address tells the traces apart; a few sample values guard against a freed buffer that is reused for other data
-    let key: Key = (data.as_ptr() as usize, data.len(), seq, [data[0].to_bits(), data[data.len() / 3].to_bits(), data[data.len() - 1].to_bits()]);
-    let pre = CACHE.with(|c| {
+    let key: SmoothKey = (data.as_ptr() as usize, data.len(), seq, [data[0].to_bits(), data[data.len() / 3].to_bits(), data[data.len() - 1].to_bits()]);
+    let pre = SMOOTH_CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if let Some(i) = c.iter().position(|(k, _)| *k == key) {
             return c[i].1.clone();
@@ -57,17 +57,17 @@ fn smooth_pixels(data: &[f32], bpos: &[f32], n: f32, seq: u64) -> Vec<Option<f32
         for (i, &x) in data.iter().enumerate() {
             pre[i + 1] = pre[i] + (x * 0.332_192_8).exp2() as f64;
         }
-        let pre = Rc::new(pre);
+        let pre = std::rc::Rc::new(pre);
         // traces of an older analysis are of no use any more; the list stays short
         c.retain(|(k, _)| k.2 == seq || k.2 == 0);
-        if c.len() >= 24 {
-            c.remove(0);
-        }
+        let excess = (c.len() + 1).saturating_sub(cap.max(1));
+        c.drain(..excess);
         c.push((key, pre.clone()));
         pre
     });
     let k = 2f32.powf(0.5 / n);
-    (0..bpos.len() - 1)
+    out.clear();
+    out.extend((0..bpos.len() - 1)
         .map(|i| {
             let (b0, b1) = (bpos[i], bpos[i + 1]);
             if b1 < 0.0 || b0 > half {
@@ -78,8 +78,7 @@ fn smooth_pixels(data: &[f32], bpos: &[f32], n: f32, seq: u64) -> Vec<Option<f32
             let a = lo.max(0.0).floor() as usize;
             let b = ((hi.ceil() as usize) + 1).min(data.len());
             (b > a).then(|| 10.0 * (((pre[b] - pre[a]) / (b - a) as f64).max(1e-30) as f32).log10())
-        })
-        .collect()
+        }));
 }
 
 /// Linear-interpolated / peak-reduced lookup of a spectrum between fractional bins.
@@ -387,9 +386,19 @@ impl App {
         let sm = crate::app::SMOOTH_OCT[self.smooth_oct].0;
         // (never 0: that is the mark of a stored spectrum, which stays cached)
         let seq = self.an.seq.max(1);
-        let trace = |data: &[f32], off: f32| -> Vec<Pos2> {
+        // (what is drawn at once: the cache of the smoothing needs no more entries than that)
+        let drawn = self.snaps.iter().filter(|s| s.visible).count() + self.show_ch.iter().filter(|&&c| c).count() * (self.show_min as usize + self.show_max as usize + self.show_avg as usize + self.show_live as usize);
+        let cap = drawn + 2;
+        // (scratch for the per-pixel values of every trace of the frame)
+        let mut vals: Vec<Option<f32>> = Vec::with_capacity(w);
+        let trace = |vals: &mut Vec<Option<f32>>, data: &[f32], off: f32| -> Vec<Pos2> {
             let mut pts = Vec::with_capacity(w);
-            let vals: Vec<Option<f32>> = if sm > 0.0 { smooth_pixels(data, &bpos, sm, seq) } else { (0..w).map(|i| sample_bins(data, bpos[i], bpos[i + 1])).collect() };
+            if sm > 0.0 {
+                smooth_pixels(data, &bpos, sm, seq, cap, vals);
+            } else {
+                vals.clear();
+                vals.extend((0..w).map(|i| sample_bins(data, bpos[i], bpos[i + 1])));
+            }
             for i in 0..w {
                 if let Some(v) = vals[i] {
                     pts.push(Pos2::new(plot.left() + i as f32 + 0.5, y_of_db(v + off).clamp(plot.top() - 2.0, plot.bottom() + 2.0)));
@@ -399,14 +408,21 @@ impl App {
         };
         let lw = self.line_w;
 
+        let mut sbp: Vec<f32> = Vec::with_capacity(bpos.len());
         for s in &self.snaps {
             if !s.visible {
                 continue;
             }
             let sb = |hz: f32| hz / (s.sr / s.n as f32);
             let mut pts = Vec::with_capacity(w);
-            let sbp: Vec<f32> = bpos.iter().map(|b| sb(b * bin_hz)).collect();
-            let vals: Vec<Option<f32>> = if sm > 0.0 { smooth_pixels(&s.data, &sbp, sm, 0) } else { (0..w).map(|i| sample_bins(&s.data, sbp[i], sbp[i + 1])).collect() };
+            sbp.clear();
+            sbp.extend(bpos.iter().map(|b| sb(b * bin_hz)));
+            if sm > 0.0 {
+                smooth_pixels(&s.data, &sbp, sm, 0, cap, &mut vals);
+            } else {
+                vals.clear();
+                vals.extend((0..w).map(|i| sample_bins(&s.data, sbp[i], sbp[i + 1])));
+            }
             for i in 0..w {
                 if let Some(v) = vals[i] {
                     pts.push(Pos2::new(plot.left() + i as f32 + 0.5, y_of_db(v + offs[s.ch.min(1)]).clamp(plot.top() - 2.0, plot.bottom() + 2.0)));
@@ -421,16 +437,16 @@ impl App {
             }
             let base = CH_COLORS[ch];
             if self.show_min {
-                clip.add(Shape::line(trace(&self.an.min[ch], offs[ch]), Stroke::new(lw * 0.8, lerp_color(BG, base, 0.45))));
+                clip.add(Shape::line(trace(&mut vals, &self.an.min[ch], offs[ch]), Stroke::new(lw * 0.8, lerp_color(BG, base, 0.45))));
             }
             if self.show_max {
-                clip.add(Shape::line(trace(&self.an.max[ch], offs[ch]), Stroke::new(lw, Color32::from_rgb(255, 170, 60))));
+                clip.add(Shape::line(trace(&mut vals, &self.an.max[ch], offs[ch]), Stroke::new(lw, Color32::from_rgb(255, 170, 60))));
             }
             if self.show_avg {
-                clip.add(Shape::line(trace(&self.an.avg[ch], offs[ch]), Stroke::new(lw * 1.2, lerp_color(base, Color32::WHITE, 0.55))));
+                clip.add(Shape::line(trace(&mut vals, &self.an.avg[ch], offs[ch]), Stroke::new(lw * 1.2, lerp_color(base, Color32::WHITE, 0.55))));
             }
             if self.show_live {
-                let pts = trace(&self.an.live[ch], offs[ch]);
+                let pts = trace(&mut vals, &self.an.live[ch], offs[ch]);
                 if self.fill && pts.len() > 1 {
                     let mut mesh = epaint::Mesh::default();
                     let top = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 70);
@@ -914,4 +930,94 @@ pub fn icon_btn(ui: &mut Ui, ico: Ico, tip: &str, active: bool) -> bool {
         }
     }
     resp.on_hover_text(tip).clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache_len() -> usize {
+        SMOOTH_CACHE.with(|c| c.borrow().len())
+    }
+
+    fn spectrum(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                -120.0 + (s >> 8) as f32 / (1u32 << 24) as f32 * 100.0
+            })
+            .collect()
+    }
+
+    /// Power average over the bins of every pixel, summed directly (no prefix sums, no cache).
+    fn reference(data: &[f32], bpos: &[f32], n: f32) -> Vec<Option<f32>> {
+        let half = (data.len() - 1) as f32;
+        let k = 2f32.powf(0.5 / n);
+        (0..bpos.len() - 1)
+            .map(|i| {
+                let (b0, b1) = (bpos[i], bpos[i + 1]);
+                if b1 < 0.0 || b0 > half {
+                    return None;
+                }
+                let c = (0.5 * (b0 + b1)).max(0.0);
+                let (lo, hi) = ((c / k).min(b0), (c * k).max(b1));
+                let a = lo.max(0.0).floor() as usize;
+                let b = ((hi.ceil() as usize) + 1).min(data.len());
+                (b > a).then(|| {
+                    let sum: f64 = data[a..b].iter().map(|&x| (x as f64 * 0.332_192_809_488_736_2).exp2()).sum();
+                    10.0 * ((sum / (b - a) as f64).max(1e-30)).log10() as f32
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn smoothing_cache_hits_misses_and_stays_within_its_cap() {
+        let (a, b, c, d) = (spectrum(2049, 1), spectrum(2049, 2), spectrum(2049, 3), spectrum(2049, 4));
+        let bpos: Vec<f32> = (0..=300).map(|i| i as f32 * 2000.0 / 300.0 - 5.0).collect();
+        let mut out = Vec::new();
+        assert_eq!(cache_len(), 0);
+        smooth_pixels(&a, &bpos, 3.0, 5, 3, &mut out);
+        smooth_pixels(&b, &bpos, 3.0, 5, 3, &mut out);
+        assert_eq!(cache_len(), 2);
+        // the same trace again is a hit: nothing new is stored, the result is the same
+        let first = out.clone();
+        smooth_pixels(&b, &bpos, 3.0, 5, 3, &mut out);
+        assert_eq!(cache_len(), 2);
+        assert_eq!(first, out);
+        // a different smoothing width reuses the sums too
+        smooth_pixels(&a, &bpos, 6.0, 5, 3, &mut out);
+        assert_eq!(cache_len(), 2);
+        // beyond the cap the oldest goes
+        smooth_pixels(&c, &bpos, 3.0, 5, 3, &mut out);
+        smooth_pixels(&d, &bpos, 3.0, 5, 3, &mut out);
+        assert_eq!(cache_len(), 3);
+        // a lowered cap drops the surplus at the next miss
+        smooth_pixels(&a, &bpos, 3.0, 5, 1, &mut out);
+        assert_eq!(cache_len(), 1);
+        // the next analysis makes the traces of the old one useless; stored spectra (seq 0) stay
+        smooth_pixels(&b, &bpos, 3.0, 0, 8, &mut out);
+        smooth_pixels(&c, &bpos, 3.0, 6, 8, &mut out);
+        assert_eq!(cache_len(), 2);
+    }
+
+    #[test]
+    fn smoothing_equals_the_direct_sum() {
+        let data = spectrum(4097, 9);
+        let mut out = Vec::new();
+        for (n, lo, hi) in [(3.0f32, -20.0f32, 4200.0f32), (1.0, 0.0, 600.0), (12.0, 100.0, 140.0)] {
+            let bpos: Vec<f32> = (0..=400).map(|i| lo + (hi - lo) * i as f32 / 400.0).collect();
+            smooth_pixels(&data, &bpos, n, 1, 4, &mut out);
+            let want = reference(&data, &bpos, n);
+            assert_eq!(out.len(), want.len());
+            for (g, w) in out.iter().zip(&want) {
+                match (g, w) {
+                    (Some(g), Some(w)) => assert!((g - w).abs() < 1e-3, "{g} {w}"),
+                    (None, None) => {}
+                    _ => panic!("{g:?} vs {w:?}"),
+                }
+            }
+        }
+    }
 }

@@ -57,6 +57,9 @@ fn routings_can_be_saved_listed_loaded_and_names_are_cleaned() {
     assert_eq!(back.nodes.len(), g.nodes.len());
     assert_eq!(back.node(eq).unwrap().p[2], 3.0);
     assert!(load_routing("missing").is_err());
+    // the write goes through a temporary file that is gone again
+    let files = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.path().extension().is_none_or(|x| x != "txt")).count();
+    assert_eq!(files, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -231,4 +234,85 @@ fn port_positions_line_up_with_mixer_rows() {
     assert!((in_pos(n, 1).y - in_pos(n, 0).y - ROW).abs() < 1e-4);
     assert!(out_pos(n, 0).y < in_pos(n, 0).y);
     assert!(out_pos(n, 0).x > in_pos(n, 0).x);
+}
+
+#[test]
+fn the_cheap_comparison_of_patches_agrees_with_the_text() {
+    let mut g = Graph::starter("dev", None);
+    let eq = g.add(Kind::Eq, 5.0, 6.0);
+    let h = g.clone();
+    assert!(same_graph(&g, &h));
+    // every kind of change that the text shows is a change for the comparison too
+    let mut edits: Vec<Graph> = Vec::new();
+    let mut m = h.clone();
+    m.node_mut(eq).unwrap().p[2] += 1.5;
+    edits.push(m);
+    let mut m = h.clone();
+    m.node_mut(eq).unwrap().x += 1.0;
+    edits.push(m);
+    let mut m = h.clone();
+    m.node_mut(eq).unwrap().bypass = true;
+    edits.push(m);
+    let mut m = h.clone();
+    m.node_mut(eq).unwrap().s = "x".into();
+    edits.push(m);
+    let mut m = h.clone();
+    m.remove_bridged(eq);
+    edits.push(m);
+    let mut m = h.clone();
+    m.disconnect(2, 0);
+    edits.push(m);
+    for e in &edits {
+        assert!(!same_graph(&g, e));
+        assert_ne!(g.encode(), e.encode());
+    }
+    // a value that is not a number is still the same as itself (it would be "changed" every frame otherwise)
+    let mut n = h.clone();
+    n.node_mut(eq).unwrap().p[2] = f32::NAN;
+    assert!(same_graph(&n, &n.clone()));
+}
+
+#[test]
+fn undo_steps_are_recorded_once_per_settled_change() {
+    let mut g = Graph::starter("dev", None);
+    let mut h = History::default();
+    // the first call only takes the picture of the patch; frames without a change add nothing, whether settled or not
+    for settled in [true, true, false, true] {
+        h.track(&g, settled);
+    }
+    assert!(h.undo.is_empty());
+    let id = g.add(Kind::Eq, 5.0, 6.0);
+    h.track(&g, false);
+    assert!(h.undo.is_empty(), "a drag in progress is not a step yet");
+    h.track(&g, true);
+    h.track(&g, true);
+    assert_eq!(h.undo.len(), 1);
+    g.node_mut(id).unwrap().p[2] += 1.0;
+    h.track(&g, true);
+    assert_eq!(h.undo.len(), 2);
+    let prev = h.back(&g).unwrap();
+    assert_eq!(prev.node(id).unwrap().p[2], Kind::Eq.info().params[2].def);
+}
+
+#[test]
+#[ignore]
+fn bench_history_track_per_frame() {
+    // a patch of about 40 nodes, the settled frames that change nothing (nearly all of them)
+    let mut g = Graph::starter("dev", None);
+    for i in 0..38 {
+        let k = [Kind::Eq, Kind::Comp, Kind::Gain, Kind::Mixer][i % 4];
+        g.add(k, (i * 40) as f32, (i * 10) as f32);
+    }
+    let h = g.clone();
+    let t = Instant::now();
+    let mut n = 0;
+    for _ in 0..2000 {
+        n += g.encode().len();
+    }
+    eprintln!("old, encode every frame: {:?} per frame ({n})", t.elapsed() / 2000);
+    let t = Instant::now();
+    for _ in 0..2000 {
+        n += same_graph(&g, &h) as usize;
+    }
+    eprintln!("new, same_graph: {:?} per frame ({n})", t.elapsed() / 2000);
 }

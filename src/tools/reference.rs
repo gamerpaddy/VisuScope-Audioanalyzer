@@ -65,6 +65,28 @@ fn interp(pts: &[(f32, f32)], f: f32) -> Option<f32> {
     Some(a.1 + (b.1 - a.1) * t)
 }
 
+/// The two limit lines (lower, upper) of a mask with limit columns, as curves over frequency.
+struct MaskLines {
+    lo: Vec<(f32, f32)>,
+    hi: Vec<(f32, f32)>,
+}
+
+fn mask_lines(r: &RefCurve) -> Option<MaskLines> {
+    let l = r.limits.as_ref()?;
+    Some(MaskLines { lo: r.pts.iter().zip(l).map(|(p, l)| (p.0, l.0)).collect(), hi: r.pts.iter().zip(l).map(|(p, l)| (p.0, l.1)).collect() })
+}
+
+/// Limits (lo, hi) of the mask `r` at `f`; `lines` are its limit columns when it has them.
+fn limits_in(r: &RefCurve, lines: Option<&MaskLines>, f: f32) -> Option<(f32, f32)> {
+    match lines {
+        Some(m) => Some((interp(&m.lo, f)? + r.offset, interp(&m.hi, f)? + r.offset)),
+        None => {
+            let c = interp(&r.pts, f)? + r.offset;
+            Some((c - r.tol, c + r.tol))
+        }
+    }
+}
+
 pub fn parse_csv(text: &str) -> Result<(Vec<(f32, f32)>, Option<Vec<(f32, f32)>>), String> {
     let (mut pts, mut lim) = (Vec::new(), Vec::new());
     for line in text.lines() {
@@ -138,22 +160,6 @@ impl Reference {
         }
     }
 
-    /// Limits (lo, hi) of the mask at `f`.
-    fn limits_at(&self, f: f32) -> Option<(f32, f32)> {
-        let r = self.refs.get(self.mask?)?;
-        match &r.limits {
-            Some(l) => {
-                let lo: Vec<_> = r.pts.iter().zip(l).map(|(p, l)| (p.0, l.0)).collect();
-                let hi: Vec<_> = r.pts.iter().zip(l).map(|(p, l)| (p.0, l.1)).collect();
-                Some((interp(&lo, f)? + r.offset, interp(&hi, f)? + r.offset))
-            }
-            None => {
-                let c = interp(&r.pts, f)? + r.offset;
-                Some((c - r.tol, c + r.tol))
-            }
-        }
-    }
-
     fn check(&mut self, cx: &Ctx) {
         self.fails.clear();
         self.fail_pct = 0.0;
@@ -162,6 +168,8 @@ impl Reference {
         if cx.an.n == 0 {
             return;
         }
+        // (the limit lines of a mask are made once: they used to be rebuilt for each of the 500 frequencies)
+        let lines = mask_lines(r);
         let (f0, f1) = (r.pts[0].0.max(10.0), r.pts[r.pts.len() - 1].0.min(cx.sr * 0.5));
         if f1 <= f0 * 1.05 {
             return;
@@ -172,7 +180,7 @@ impl Reference {
         let mut prev = f0;
         for i in 0..n {
             let f = f0 * (f1 / f0).powf(i as f32 / (n - 1) as f32);
-            let (Some(v), Some((lo, hi))) = (spec_at(cx.an, &cx.an.avg[self.ch], f), self.limits_at(f)) else { continue };
+            let (Some(v), Some((lo, hi))) = (spec_at(cx.an, &cx.an.avg[self.ch], f), limits_in(r, lines.as_ref(), f)) else { continue };
             let dev = if v > hi { v - hi } else if v < lo { v - lo } else { 0.0 };
             if dev != 0.0 {
                 bad += 1;
@@ -202,7 +210,9 @@ impl Tool for Reference {
                 if let Some(path) = res {
                     let (slot, color) = (self.import.clone(), self.color());
                     std::thread::spawn(move || {
-                        let r = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| parse_csv(&t)).map(|(pts, limits)| RefCurve {
+                        let read = || std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| parse_csv(&t));
+                        // (a panic of the parser ends as an error message: the slot is always filled)
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_else(|_| Err("the file could not be read".into())).map(|(pts, limits)| RefCurve {
                             name: path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
                             pts,
                             limits,
@@ -236,7 +246,7 @@ impl Tool for Reference {
                     for p in &r.pts {
                         s += &format!("{:.3},{:.3}\n", p.0, p.1 + r.offset);
                     }
-                    cx.req.note = Some(match std::fs::write(&path, s) {
+                    cx.req.note = Some(match crate::fsutil::atomic_write(&path, s) {
                         Ok(_) => format!("Saved {}", path.display()),
                         Err(e) => format!("save failed: {e}"),
                     });
@@ -487,5 +497,71 @@ mod tests {
         assert!((p[0].1 + 4.5).abs() < 1e-6);
         assert!(parse_csv("nothing here").is_err());
         assert!((interp(&[(100.0, 0.0), (10000.0, -20.0)], 1000.0).unwrap() + 10.0).abs() < 1e-3);
+    }
+
+    /// The version that rebuilt the limit lines for every frequency, as the reference.
+    fn limits_at_old(r: &RefCurve, f: f32) -> Option<(f32, f32)> {
+        match &r.limits {
+            Some(l) => {
+                let lo: Vec<_> = r.pts.iter().zip(l).map(|(p, l)| (p.0, l.0)).collect();
+                let hi: Vec<_> = r.pts.iter().zip(l).map(|(p, l)| (p.0, l.1)).collect();
+                Some((interp(&lo, f)? + r.offset, interp(&hi, f)? + r.offset))
+            }
+            None => {
+                let c = interp(&r.pts, f)? + r.offset;
+                Some((c - r.tol, c + r.tol))
+            }
+        }
+    }
+
+    fn mask(n: usize, with_limits: bool) -> RefCurve {
+        let mut s = 99u32;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s as f32 / u32::MAX as f32
+        };
+        let pts: Vec<(f32, f32)> = (0..n).map(|i| (20.0 * 1000f32.powf(i as f32 / (n - 1) as f32), rnd() * 20.0 - 10.0)).collect();
+        let limits = with_limits.then(|| pts.iter().map(|p| (p.1 - 1.0 - rnd(), p.1 + 1.0 + rnd())).collect());
+        RefCurve { name: String::new(), pts, limits, color: Color32::WHITE, show: true, tol: 2.5, offset: 1.5 }
+    }
+
+    #[test]
+    fn the_limit_lines_made_once_give_the_same_limits_as_the_ones_made_for_every_frequency() {
+        for with_limits in [false, true] {
+            let r = mask(300, with_limits);
+            let lines = mask_lines(&r);
+            assert_eq!(lines.is_some(), with_limits);
+            for i in 0..500 {
+                // (a little beyond both ends: no limit there)
+                let f = 15.0 * 1500f32.powf(i as f32 / 499.0);
+                assert_eq!(limits_in(&r, lines.as_ref(), f), limits_at_old(&r, f), "{f}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_mask_limits() {
+        let r = mask(1000, true);
+        let t = std::time::Instant::now();
+        let mut acc = 0.0f32;
+        for _ in 0..20 {
+            for i in 0..500 {
+                let f = 20.0 * 1000f32.powf(i as f32 / 499.0);
+                acc += limits_at_old(&r, f).map_or(0.0, |l| l.0);
+            }
+        }
+        let old = t.elapsed();
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            let lines = mask_lines(&r);
+            for i in 0..500 {
+                let f = 20.0 * 1000f32.powf(i as f32 / 499.0);
+                acc += limits_in(&r, lines.as_ref(), f).map_or(0.0, |l| l.0);
+            }
+        }
+        println!("mask check (500 frequencies, 1000 points): old {:?} per check, new {:?} per check ({acc})", old / 20, t.elapsed() / 20);
     }
 }

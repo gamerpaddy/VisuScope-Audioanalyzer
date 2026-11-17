@@ -45,7 +45,7 @@ const TAIL: f32 = 4.0;
 
 impl App {
     pub fn latency_test(&mut self) {
-        let Some(ch) = std::env::var("VISUSCOPE_LATENCY_TEST").ok().and_then(|v| v.parse::<usize>().ok()) else { return };
+        let Some(ch) = crate::app::env_hooks().latency_test.as_ref().and_then(|v| v.parse::<usize>().ok()) else { return };
         let ch = ch.min(1);
         ENABLED.store(true, Relaxed);
         now_ms();

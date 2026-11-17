@@ -62,10 +62,13 @@ impl LiveTf {
         let nyq = o.sr * 0.5;
         let (f0, f1) = (20.0f32.max(df * 2.0), 20000.0f32.min(nyq * 0.98));
         let ppo = LOG_N as f32 / (f1 / f0).log2();
-        let last = o.mag.len() - 2;
+        // (each list on its own length: the estimator fills them alike, but one that is shorter must not take the window down)
         let at = |data: &[f32], f: f32| -> f32 {
+            if data.len() < 2 {
+                return f32::NAN;
+            }
             let b = f / df;
-            let k = (b.floor() as usize).min(last);
+            let k = (b.floor() as usize).min(data.len() - 2);
             let t = b - k as f32;
             data[k] * (1.0 - t) + data[k + 1] * t
         };
@@ -278,5 +281,29 @@ impl Tool for LiveTf {
         self.y_lo = self.y_lo.clamp(-200.0, self.y_hi - 5.0);
         self.coh_thr = self.coh_thr.clamp(0.05, 0.99);
         self.p.delay_ms = self.p.delay_ms.clamp(-500.0, 500.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_phase_or_coherence_list_shorter_than_the_magnitude_does_not_take_the_window_down() {
+        let n = 8192;
+        let mk = |phase: usize, coh: usize| TfResult { seq: 1, sr: 48000.0, n, mag: vec![0.0; n / 2 + 1], phase: vec![10.0; phase], coh: vec![0.9; coh], delay_ms: 0.0, frames: 3 };
+        let mut t = LiveTf::new();
+        // equal lengths as before
+        t.build(&mk(n / 2 + 1, n / 2 + 1));
+        let c = t.curve.as_ref().unwrap();
+        assert_eq!(c.f.len(), LOG_N);
+        assert!(c.phase_at.iter().all(|p| (*p - 10.0).abs() < 1e-3));
+        // shorter, one point, none
+        for (p, h) in [(100usize, 50usize), (1, 0), (0, 4000)] {
+            t.build(&mk(p, h));
+            let c = t.curve.as_ref().unwrap();
+            assert_eq!(c.coh.len(), LOG_N);
+            assert_eq!(c.phase_at.len(), LOG_N);
+        }
     }
 }

@@ -89,6 +89,13 @@ pub fn start(sh: Arc<Shared>, id: String) -> AudioHandle {
             while !stop2.load(Relaxed) {
                 let dead = Arc::new(AtomicBool::new(false));
                 match build(&sh, &id, gid, dead.clone()) {
+                    // A slow build (an ASIO driver can take 10 s to open) that ends after the user switched to another device: the
+                    // newer thread owns the status and the format now, this one just lets its stream go and ends.
+                    Ok((stream, _, _)) if !is_newest(&sh, gid) => {
+                        dead.store(true, Relaxed);
+                        drop(stream);
+                        break;
+                    }
                     Ok((stream, info, key)) => {
                         crate::log::log(&format!("audio: stream running: {info}"));
                         *sh.status.lock() = info;
@@ -155,6 +162,9 @@ pub fn start(sh: Arc<Shared>, id: String) -> AudioHandle {
                     }
                     Err(e) => {
                         crate::log::log(&format!("audio: build failed: {e}"));
+                        if !is_newest(&sh, gid) {
+                            break;
+                        }
                         *sh.status.lock() = format!("{e} - retrying...");
                         sleep_unless_stopped(&stop2, 1000);
                     }
@@ -167,6 +177,27 @@ pub fn start(sh: Arc<Shared>, id: String) -> AudioHandle {
         })
         .expect("spawn audio thread");
     AudioHandle { stop }
+}
+
+fn is_newest(sh: &Shared, gid: u32) -> bool {
+    sh.audio_gen.load(Relaxed) == gid
+}
+
+/// A new input begins: the ring starts over and the sample rate and channel count are those of this input. Only the newest audio
+/// thread may do this (the check is made under the lock of the ring, which the newer thread takes as well before it stores
+/// its own format), otherwise an old, slow build that ends late would overwrite the format of the session that replaced it and
+/// empty its ring. `false`: this thread is not the newest, nothing was touched.
+fn claim(sh: &Shared, gid: u32, sr: u32, chans: u32) -> bool {
+    let mut r = sh.ring.lock();
+    if !is_newest(sh, gid) {
+        return false;
+    }
+    r.total = 0;
+    r.l.fill(0.0);
+    r.r.fill(0.0);
+    sh.sr.store(sr, Relaxed);
+    sh.chans.store(chans, Relaxed);
+    true
 }
 
 /// (sample rate, channels, format) the device currently offers; `None` if it cannot be queried.
@@ -188,18 +219,14 @@ fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<
         let mut got = (0u32, 0usize);
         let (port, info) = crate::asio::open_input(crate::asio::name_of(id), dead.clone(), |i| {
             got = (i.sr, i.n_in);
-            {
-                let mut r = sh2.ring.lock();
-                r.total = 0;
-                r.l.fill(0.0);
-                r.r.fill(0.0);
-            }
-            sh2.sr.store(i.sr, Relaxed);
-            sh2.chans.store(i.n_in as u32, Relaxed);
+            // (when this build is stale the body is silent anyway: it checks the generation, `start` drops the port)
+            claim(&sh2, gid, i.sr, i.n_in as u32);
             Box::new(input_body::<f32>(sh2.clone(), gid, d2.clone(), i.n_in, i.sr))
         })?;
-        sh.xruns.store(0, Relaxed);
         let _ = got;
+        if is_newest(sh, gid) {
+            sh.xruns.store(0, Relaxed);
+        }
         return Ok((crate::asio::Held::Asio(port), format!("ASIO {} Hz, {} ch, {} frames", info.sr, info.n_in, info.buf), (info.sr, info.n_in as u16, SampleFormat::F32)));
     }
     let host = cpal::default_host();
@@ -222,14 +249,9 @@ fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<
     let mut sc_default = sc;
     sc_default.buffer_size = default_buf;
 
-    {
-        let mut r = sh.ring.lock();
-        r.total = 0;
-        r.l.fill(0.0);
-        r.r.fill(0.0);
+    if !claim(sh, gid, sr, ch as u32) {
+        return Err("replaced by a newer input".into());
     }
-    sh.sr.store(sr, Relaxed);
-    sh.chans.store(ch as u32, Relaxed);
 
     let build_with = |sc: cpal::StreamConfig| match fmt {
         SampleFormat::F32 => make::<f32>(&dev, sc, sh.clone(), gid, dead.clone()),
@@ -248,7 +270,9 @@ fn build(sh: &Arc<Shared>, id: &str, gid: u32, dead: Arc<AtomicBool>) -> Result<
     };
     // Larger buffer first (fewer xruns; VISUSCOPE_INPUT_BUFFER_FRAMES overrides); fall back to the driver default if refused.
     let stream = build_with(sc).or_else(|_| build_with(sc_default)).map_err(|e| format!("{e} (format {fmt:?}, {sr} Hz)"))?;
-    sh.xruns.store(0, Relaxed);
+    if is_newest(sh, gid) {
+        sh.xruns.store(0, Relaxed);
+    }
     stream.play().map_err(|e| format!("{e}"))?;
     Ok((crate::asio::Held::Cpal(stream), format!("{sr} Hz, {ch} ch, {fmt:?}"), (sr, ch, fmt)))
 }
@@ -345,5 +369,31 @@ where
             sh.last_data_ms.store(sh.t0.elapsed().as_millis() as u64, Relaxed);
             sh.cv.notify_one();
             timer.done(data.len() / ch.max(1), in_sr);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stale build (an older generation) must not touch the format or the ring of the session that replaced it.
+    #[test]
+    fn a_stale_build_leaves_the_newer_session_alone() {
+        let sh = Shared::new();
+        sh.audio_gen.store(2, Relaxed);
+        assert!(claim(&sh, 2, 48000, 4));
+        sh.ring.lock().push(0.5, -0.5);
+        assert_eq!((sh.sr.load(Relaxed), sh.chans.load(Relaxed)), (48000, 4));
+        // generation 1 finishes late
+        assert!(!claim(&sh, 1, 44100, 2));
+        assert_eq!((sh.sr.load(Relaxed), sh.chans.load(Relaxed)), (48000, 4));
+        let r = sh.ring.lock();
+        assert_eq!(r.total, 1);
+        assert_eq!(r.l[0], 0.5);
+        drop(r);
+        // the newest one starts the ring over
+        assert!(claim(&sh, 2, 96000, 2));
+        assert_eq!(sh.ring.lock().total, 0);
+        assert_eq!(sh.sr.load(Relaxed), 96000);
     }
 }

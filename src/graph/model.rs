@@ -413,7 +413,13 @@ impl Graph {
             && let Some(n) = self.nodes.iter().find(|n| n.kind == Kind::Analyzer) {
                 return n.id;
             }
-        self.next += 1;
+        // (a damaged file can leave the counter at the largest number: it wraps round, and never hands out an id that is in use)
+        loop {
+            self.next = self.next.wrapping_add(1);
+            if self.node(self.next).is_none() {
+                break;
+            }
+        }
         let id = self.next;
         self.nodes.push(Node::new(id, kind, x, y));
         id
@@ -698,7 +704,9 @@ impl Graph {
                 if g.nodes.iter().any(|n| n.id == id || (kind == Kind::Analyzer && n.kind == kind)) {
                     continue;
                 }
-                let mut n = Node::new(id, kind, f[2].parse().unwrap_or(0.0), f[3].parse().unwrap_or(0.0));
+                // (a position that is not a number would reach the drawing code: "NaN" and "inf" do parse)
+                let pos = |t: &str| t.parse::<f32>().ok().filter(|v| v.is_finite()).unwrap_or(0.0);
+                let mut n = Node::new(id, kind, pos(f[2]), pos(f[3]));
                 n.bypass = f[4] == "1";
                 n.s = unesc(f[5]);
                 if legacy_harm {
@@ -1023,6 +1031,31 @@ mod tests {
             });
             assert!(result.is_ok(), "decode panicked on: {text:?}");
         }
+    }
+
+    #[test]
+    fn positions_that_are_not_numbers_and_the_largest_id_do_not_break_the_graph() {
+        let text = "VSGRAPH 1
+node 1|gain|NaN|inf|0||0,0
+node 4294967295|eq|-inf|5|0||
+node 3|out|1e40|7|0||
+";
+        let mut g = Graph::decode(text).expect("a graph");
+        assert_eq!(g.nodes.len(), 3);
+        for n in &g.nodes {
+            assert!(n.x.is_finite() && n.y.is_finite(), "node {} at {} {}", n.id, n.x, n.y);
+        }
+        // (1e40 is infinity in single precision)
+        assert_eq!(g.node(3).unwrap().x, 0.0);
+        assert_eq!(g.node(3).unwrap().y, 7.0);
+        // the counter is at its limit: the next node wraps round to a free id instead of overflowing
+        let id = g.add(Kind::Gain, 0.0, 0.0);
+        assert!(id != 1 && id != 3 && id != u32::MAX, "{id}");
+        assert_eq!(g.nodes.iter().filter(|n| n.id == id).count(), 1);
+        let id2 = g.add(Kind::Gain, 0.0, 0.0);
+        assert_ne!(id, id2);
+        let ids: std::collections::HashSet<_> = g.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(ids.len(), g.nodes.len());
     }
 
     #[test]

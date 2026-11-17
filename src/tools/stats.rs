@@ -17,7 +17,8 @@ pub struct Stats {
     ch: usize,
     fade: bool,
     trend: usize,
-    hist: [Vec<f32>; 2],
+    // (f64: an f32 counter stops counting at 16.7 million, a few minutes of a steady tone in one bin)
+    hist: [Vec<f64>; 2],
     clip: [u64; 2],
     clip_events: [u64; 2],
     run: [u32; 2],
@@ -47,6 +48,16 @@ pub fn word_length(samples: &[f32]) -> Option<u32> {
         });
         bad.count() * 200 < samples.len()
     })
+}
+
+/// Count the samples into the bins of the histogram (a sample that is not a number has no bin: it would be counted as a clip).
+fn count_into(hist: &mut [f64], x: &[f32]) {
+    for &v in x {
+        if v.is_finite() {
+            let b = (((v.clamp(-1.0, 1.0) + 1.0) * 0.5) * (BINS - 1) as f32).round() as usize;
+            hist[b] += 1.0;
+        }
+    }
 }
 
 impl Stats {
@@ -112,15 +123,14 @@ impl Tool for Stats {
             return;
         }
         if self.fade {
-            let k = (1.0 - n as f32 / (cx.sr * 10.0)).clamp(0.0, 1.0);
+            let k = (1.0 - n as f32 / (cx.sr * 10.0)).clamp(0.0, 1.0) as f64;
             for h in self.hist.iter_mut().flat_map(|h| h.iter_mut()) {
                 *h *= k;
             }
         }
         for (c, x) in [l, r].into_iter().enumerate() {
+            count_into(&mut self.hist[c], x);
             for &v in x {
-                let b = (((v.clamp(-1.0, 1.0) + 1.0) * 0.5) * (BINS - 1) as f32).round() as usize;
-                self.hist[c][b] += 1.0;
                 if v.abs() >= 0.9999 {
                     self.clip[c] += 1;
                     self.run[c] += 1;
@@ -190,8 +200,8 @@ impl Tool for Stats {
         let pr = inset(rect);
         if pr.width() > 40.0 && pr.height() > 20.0 {
             let hist = &self.hist[c];
-            let maxc = hist.iter().cloned().fold(1.0, f32::max);
-            let top = maxc.log10().ceil().max(1.0);
+            let maxc = hist.iter().cloned().fold(1.0, f64::max);
+            let top = maxc.log10().ceil().max(1.0) as f32;
             let plot = Plot::new(pr, -1.0, 1.0, 0.0, top, false);
             plot.grid_y(&painter, &|v| format!("1e{v:.0}"));
             plot.grid_x(&painter, &|v| format!("{v:.1}"));
@@ -202,7 +212,7 @@ impl Tool for Stats {
                 if v < 1.0 {
                     continue;
                 }
-                let y = plot.ty(v.log10());
+                let y = plot.ty(v.log10() as f32);
                 let edge = i == 0 || i == BINS - 1;
                 let col = if edge && v > 0.0 { Color32::from_rgb(240, 90, 80) } else { CH_COLORS[c] };
                 clip.rect_filled(egui::Rect::from_min_max(Pos2::new(pr.left() + i as f32 * bw, y), Pos2::new(pr.left() + (i + 1) as f32 * bw, pr.bottom())), 0.0, col);
@@ -277,5 +287,20 @@ mod tests {
         assert_eq!(word_length(&sine(24)), Some(24));
         let float: Vec<f32> = (0..4000).map(|i| (0.3 * (i as f32 * 0.01237).sin()) * 0.7321).collect();
         assert_eq!(word_length(&float), None);
+    }
+
+    #[test]
+    fn the_histogram_keeps_counting_past_what_an_f32_can_hold() {
+        let mut h = vec![0.0f64; BINS];
+        let mid = BINS / 2;
+        // 2^24: adding 1 to an f32 of this size gives the same number again
+        h[mid] = 16_777_216.0;
+        count_into(&mut h, &vec![0.0f32; 1000]);
+        assert_eq!(h[mid], 16_778_216.0);
+        // the ends take full scale, a value that is not a number is not counted at all
+        let mut h = vec![0.0f64; BINS];
+        count_into(&mut h, &[1.0, -1.0, 2.0, f32::NAN, f32::INFINITY, 0.0]);
+        assert_eq!((h[0], h[BINS - 1], h[mid]), (1.0, 2.0, 1.0));
+        assert_eq!(h.iter().sum::<f64>(), 4.0);
     }
 }

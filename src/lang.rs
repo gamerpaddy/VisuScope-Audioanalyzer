@@ -36,6 +36,20 @@ pub fn lookup(s: &str) -> Option<&'static str> {
     TABLE.read().as_ref().and_then(|t| t.get(s).copied())
 }
 
+/// A text that lives for the whole run. The same text is given out once: a language file is read again at every switch, and a
+/// leaked copy of every entry each time would add up (a table is some 10 kB, the user may switch many times while trying a file).
+fn intern(s: String) -> &'static str {
+    static POOL: std::sync::Mutex<Option<std::collections::HashSet<&'static str>>> = std::sync::Mutex::new(None);
+    let mut g = POOL.lock().unwrap_or_else(|e| e.into_inner());
+    let pool = g.get_or_insert_with(Default::default);
+    if let Some(&k) = pool.get(s.as_str()) {
+        return k;
+    }
+    let k: &'static str = Box::leak(s.into_boxed_str());
+    pool.insert(k);
+    k
+}
+
 pub fn parse(text: &str) -> HashMap<&'static str, &'static str> {
     let un = |s: &str| -> &'static str {
         let mut out = String::with_capacity(s.len());
@@ -53,7 +67,7 @@ pub fn parse(text: &str) -> HashMap<&'static str, &'static str> {
                 _ => out.push(c),
             }
         }
-        Box::leak(out.into_boxed_str())
+        intern(out)
     };
     text.lines().filter(|l| !l.starts_with('#')).filter_map(|l| l.split_once('\t')).filter(|(a, b)| !a.is_empty() && !b.trim().is_empty()).map(|(a, b)| (un(a), un(b))).collect()
 }
@@ -106,5 +120,18 @@ mod tests {
         for (k, v) in &t {
             assert_eq!(k.matches("{}").count(), v.matches("{}").count(), "{k}");
         }
+    }
+
+    #[test]
+    fn reading_a_table_again_does_not_leak_it_again() {
+        let text = "A key that only this test has\tund sein Text\nSecond one for the test\tZweiter\n";
+        let a = super::parse(text);
+        let b = super::parse(text);
+        // the very same strings come back (same address), so nothing new was allocated for the second read
+        for (k, v) in &a {
+            let (k2, v2) = b.get_key_value(k).unwrap();
+            assert!(std::ptr::eq(*k, *k2) && std::ptr::eq(*v, *v2), "{k}");
+        }
+        assert_eq!(a.len(), 2);
     }
 }

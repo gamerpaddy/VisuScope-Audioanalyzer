@@ -14,6 +14,23 @@ pub fn lin_to_db(x: f32) -> f32 {
     20.0 * x.max(1e-9).log10()
 }
 
+/// Dot product with eight independent running sums: one sum is a chain of dependent additions that cannot use the SIMD
+/// registers without the compiler changing the result, eight can (the result differs from the plain sum by rounding only).
+#[inline]
+pub(super) fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let (ca, cb) = (a[..n].chunks_exact(8), b[..n].chunks_exact(8));
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    let mut acc = [0f32; 8];
+    for (x, y) in ca.zip(cb) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
+    ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7])) + tail
+}
+
 // ---------------------------------------------------------------------- biquad
 
 #[derive(Clone, Copy, Default)]
@@ -296,7 +313,7 @@ impl FirLowpass {
             self.work.extend_from_slice(x);
             for (i, o) in x.iter_mut().enumerate() {
                 let w = &self.work[i..i + nt];
-                *o = w.iter().zip(&self.taps).map(|(a, b)| a * b).sum();
+                *o = dot(w, &self.taps);
             }
             // the last nt - 1 samples are the history of the next block
             let tail = self.work.len() - (nt - 1);
@@ -353,13 +370,27 @@ impl CompUnit {
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         let mut worst = 0f32;
+        // below the lower edge of the knee the curve is exactly 0 dB (and nothing under -120 dB is compressed): no logarithm
+        // for those samples, which are most of them. NaN fails the comparison and counts as silence, as before.
+        let edge = db_to_lin(self.thr - self.knee * 0.5).max(1e-6);
+        let makeup = db_to_lin(self.makeup);
+        // 20 / ln(10) and its inverse: dB per neper of amplitude, so ln and exp stand in for log10 and powf (the natural ones are
+        // the fast ones of the system's math library: log2 and exp2 are several times slower there)
+        const DB_PER_NEPER: f32 = 8.685_889_6;
+        const NEPER_PER_DB: f32 = 0.115_129_25;
         for i in 0..l.len() {
             let level = l[i].abs().max(r[i].abs());
-            let target = if level < 1e-6 { 0.0 } else { self.curve(lin_to_db(level)) };
+            // (min: an infinite level gives a large finite number of dB, not inf - inf = NaN in the curve that would stay in `g`)
+            let target = if level > edge { self.curve(level.min(f32::MAX).ln() * DB_PER_NEPER) } else { 0.0 };
             // reduction grows with the attack time constant and recovers with the release one
             let c = if target < self.g { self.att } else { self.rel };
             self.g = c * self.g + (1.0 - c) * target;
-            let gain = db_to_lin(self.g + self.makeup);
+            // (the recovery is an exponential that never reaches 0: from 1e-9 dB on it is 0 in single precision, and a denormal
+            // number is slow to compute with)
+            if target == 0.0 && self.g.abs() < 1e-9 {
+                self.g = 0.0;
+            }
+            let gain = if self.g == 0.0 { makeup } else { ((self.g + self.makeup) * NEPER_PER_DB).exp() };
             l[i] *= gain;
             r[i] *= gain;
             worst = worst.min(self.g);
@@ -402,7 +433,6 @@ impl LimiterUnit {
     }
 
     /// Delay of the limiter in frames.
-    #[cfg(test)]
     pub fn latency(&self) -> usize {
         self.la
     }
@@ -604,11 +634,14 @@ pub struct HarmUnit {
     env: [f32; 2],
     release: f32,
     dc: DcBlock,
+    /// the richness (as bits) the constants were worked out for: `set` runs on every change of any parameter of the node
+    /// and `tune` costs a few thousand transcendental functions
+    tuned: Option<u32>,
 }
 
 impl Default for HarmUnit {
     fn default() -> Self {
-        let mut u = Self { even: 0.3, odd: 0.0, out: 1.0, pe: 1.0, k_odd: 3.0, mean_e: 0.0, f1_odd: 0.0, ge: 1.0, go: 1.0, env: [0.0; 2], release: 0.999, dc: DcBlock::default() };
+        let mut u = Self { even: 0.3, odd: 0.0, out: 1.0, pe: 1.0, k_odd: 3.0, mean_e: 0.0, f1_odd: 0.0, ge: 1.0, go: 1.0, env: [0.0; 2], release: 0.999, dc: DcBlock::default(), tuned: None };
         u.tune(0.5);
         u
     }
@@ -617,6 +650,10 @@ impl Default for HarmUnit {
 impl HarmUnit {
     /// Work out the constants of the two shapers for a richness between 0 and 1 (numerically, over one cycle).
     fn tune(&mut self, rich: f32) {
+        if self.tuned == Some(rich.to_bits()) {
+            return;
+        }
+        self.tuned = Some(rich.to_bits());
         self.pe = 1.0 - 0.75 * rich;
         self.k_odd = 1.5 + 12.0 * rich;
         const N: usize = 1024;
@@ -977,8 +1014,10 @@ impl TremUnit {
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         for i in 0..l.len() {
             self.phase = (self.phase + self.rate / self.fs.max(1.0)).fract();
-            l[i] *= self.lfo(self.phase);
-            r[i] *= if self.offset == 0.0 { self.lfo(self.phase) } else { self.lfo(self.phase + self.offset) };
+            // (linked channels: the same value, one sine)
+            let a = self.lfo(self.phase);
+            l[i] *= a;
+            r[i] *= if self.offset == 0.0 { a } else { self.lfo(self.phase + self.offset) };
         }
     }
 }
@@ -1022,6 +1061,74 @@ fn rs_table() -> &'static [f32] {
     })
 }
 
+/// The weights of the kernel for every position of the output frames between two input frames. For rates whose ratio is a
+/// fraction with a small denominator (44.1 kHz to 48 kHz is 147 / 160) the output frames lie at only `den` different positions
+/// between input frames, so the table lookup and the interpolation of every tap are done once, here, and a frame is a dot product.
+struct Poly {
+    den: u64,
+    /// taps per output frame (twice the reach of the kernel)
+    taps: usize,
+    /// `den` rows of `taps` weights
+    w: Vec<f32>,
+}
+
+/// Most weights a `Poly` may hold (1 MiB); a ratio that needs more (47999 to 48000) uses the lookup per tap.
+const POLY_MAX: usize = 1 << 18;
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+impl Poly {
+    /// `ratio` is the one of the resampler (input frames per output frame): the reach is worked out from it in the same way.
+    fn new(from: u32, to: u32, ratio: f64) -> Option<Poly> {
+        let (from, to) = (from.max(1) as u64, to.max(1) as u64);
+        let den = to / gcd(from, to);
+        let scale = (1.0 / ratio).min(1.0);
+        let half = (RS_T / scale).ceil() as usize;
+        let taps = 2 * half;
+        if (den as usize).checked_mul(taps)? > POLY_MAX {
+            return None;
+        }
+        let tab = rs_table();
+        let top = (tab.len() - 2) as f64;
+        let mut w = Vec::with_capacity(den as usize * taps);
+        for p in 0..den {
+            let frac = p as f64 / den as f64;
+            for m in 0..taps {
+                // tap `m` is the input frame `m - half + 1` from the one at or before the output position, which is `frac` after it
+                let x = ((m as f64 - (half as f64 - 1.0)) - frac) * scale;
+                let u = ((x + RS_T) * RS_RES as f64).clamp(0.0, top);
+                let ui = u as usize;
+                let t = (u - ui as f64) as f32;
+                w.push(tab[ui] + (tab[ui + 1] - tab[ui]) * t);
+            }
+        }
+        Some(Poly { den, taps, w })
+    }
+}
+
+/// Both channels of a run of frames against one row of weights, four sums per channel.
+#[inline]
+fn dot_frames(w: &[f32], f: &[[f32; 2]]) -> (f32, f32) {
+    let n = w.len().min(f.len());
+    let (cw, cf) = (w[..n].chunks_exact(4), f[..n].chunks_exact(4));
+    let (rw, rf) = (cw.remainder(), cf.remainder());
+    let (mut a, mut b) = ([0f32; 4], [0f32; 4]);
+    for (x, y) in cw.zip(cf) {
+        for k in 0..4 {
+            a[k] += x[k] * y[k][0];
+            b[k] += x[k] * y[k][1];
+        }
+    }
+    let (mut ta, mut tb) = (0f32, 0f32);
+    for (x, y) in rw.iter().zip(rf) {
+        ta += x * y[0];
+        tb += x * y[1];
+    }
+    ((a[0] + a[2]) + (a[1] + a[3]) + ta, (b[0] + b[2]) + (b[1] + b[3]) + tb)
+}
+
 /// Streaming resampler for one source: frames come in at the source rate, go out at the graph rate.
 /// A windowed-sinc interpolation (`rs_table`): lowering a rate filters away what the new rate cannot hold, raising it leaves no
 /// images above the old Nyquist frequency. Plain copying when the rates match.
@@ -1030,11 +1137,13 @@ pub struct Rs {
     pos: f64,
     /// input frames per output frame
     ratio: f64,
+    poly: Option<Poly>,
 }
 
 impl Rs {
     pub fn new(from: u32, to: u32) -> Self {
-        Self { buf: VecDeque::new(), pos: 0.0, ratio: from.max(1) as f64 / to.max(1) as f64 }
+        let ratio = from.max(1) as f64 / to.max(1) as f64;
+        Self { buf: VecDeque::new(), pos: 0.0, ratio, poly: if (ratio - 1.0).abs() < 1e-9 { None } else { Poly::new(from, to, ratio) } }
     }
 
     pub fn same_rate(&self) -> bool {
@@ -1098,21 +1207,43 @@ impl Rs {
         let half = self.half() as isize;
         let scale = (1.0 / self.ratio).min(1.0);
         let tab = rs_table();
+        // table position of the kernel for the taps of one output frame: it moves by the same amount from tap to tap
+        let step = scale * RS_RES as f64;
+        // (the table has two entries more than the kernel is wide, and the kernel is zero at both ends: a tap that lies outside
+        // reads a zero there. The reach `half` is rounded up, so for a lowered rate the last taps can lie outside; without the
+        // limit they read past the end of the table)
+        let top = (tab.len() - 2) as f64;
         let buf = self.buf.make_contiguous();
         for i in 0..k {
-            let base = self.pos.floor() as isize;
-            let (mut al, mut ar) = (0f64, 0f64);
-            for j in (base - half + 1)..=(base + half) {
-                if j < 0 {
-                    continue;
+            let (al, ar);
+            if let Some(poly) = &self.poly {
+                // the output position is a whole number of 1 / den input frames (the error of the sum of the ratios so far is
+                // far below that): the row of weights for it
+                debug_assert_eq!(poly.taps, 2 * half as usize);
+                let at = (self.pos * poly.den as f64).round() as u64;
+                let (base, row) = ((at / poly.den) as isize, (at % poly.den) as usize);
+                let first = base - half + 1;
+                // the taps before the start of the queue are zero (nothing was played before it)
+                let skip = (-first).clamp(0, 2 * half) as usize;
+                let frames = &buf[(first + skip as isize) as usize..=(base + half) as usize];
+                let (a, b) = dot_frames(&poly.w[row * poly.taps + skip..(row + 1) * poly.taps], frames);
+                (al, ar) = (a as f64, b as f64);
+            } else {
+                let base = self.pos.floor() as isize;
+                let first = base - half + 1;
+                let skip = (-first).clamp(0, 2 * half) as usize;
+                let u0 = ((first as f64 - self.pos) * scale + RS_T) * RS_RES as f64;
+                let taps = &buf[(first + skip as isize) as usize..=(base + half) as usize];
+                let (mut a, mut b) = (0f64, 0f64);
+                for (m, f) in taps.iter().enumerate() {
+                    let u = (u0 + (skip + m) as f64 * step).clamp(0.0, top);
+                    let ui = u as usize;
+                    let t = (u - ui as f64) as f32;
+                    let h = tab[ui] + (tab[ui + 1] - tab[ui]) * t;
+                    a += (f[0] * h) as f64;
+                    b += (f[1] * h) as f64;
                 }
-                let x = (j as f64 - self.pos) * scale;
-                let u = (x + RS_T) * RS_RES as f64;
-                let (ui, t) = (u.floor() as usize, (u - u.floor()) as f32);
-                let h = tab[ui] + (tab[ui + 1] - tab[ui]) * t;
-                let f = buf[j as usize];
-                al += (f[0] * h) as f64;
-                ar += (f[1] * h) as f64;
+                (al, ar) = (a, b);
             }
             l[i] = (al * scale) as f32;
             r[i] = (ar * scale) as f32;
